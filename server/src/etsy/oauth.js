@@ -5,7 +5,7 @@
 import crypto from 'node:crypto';
 import config from '../config.js';
 import { getDb } from '../db/index.js';
-import { getCredentials, saveToken, request, call } from './client.js';
+import { getCredentials, saveToken, request, call, clientId } from './client.js';
 import { ALL_SCOPES } from './operations.generated.js';
 import { EtsyApiError, badRequest } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
@@ -36,7 +36,8 @@ export function buildAuthorizationUrl({ scopes = DEFAULT_SCOPES, redirectUri } =
 
   const url = new URL(config.etsy.connectUrl);
   url.searchParams.set('response_type', 'code');
-  url.searchParams.set('client_id', creds.keystring);
+  // OAuth identifies the app by the bare keystring, not the api-key pair.
+  url.searchParams.set('client_id', clientId());
   url.searchParams.set('redirect_uri', redirect);
   url.searchParams.set('scope', scopeStr);
   url.searchParams.set('state', state);
@@ -51,13 +52,12 @@ export async function exchangeCode({ code, state }) {
   if (!row) throw badRequest('Unknown or expired OAuth state. Start the connection again.');
   getDb().prepare('DELETE FROM oauth_state WHERE state = ?').run(state);
 
-  const { keystring } = getCredentials();
   const res = await fetch(config.etsy.tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type: 'authorization_code',
-      client_id: keystring,
+      client_id: clientId(),
       redirect_uri: row.redirect_uri,
       code,
       code_verifier: row.code_verifier,

@@ -151,15 +151,26 @@ from the spec. That is what makes coverage total rather than selective.
 | `uploadListingImage` | POST | `/v3/application/shops/{shop_id}/listings/{listing_id}/images` | listings_w | Listing media |
 | `uploadListingVideo` | POST | `/v3/application/shops/{shop_id}/listings/{listing_id}/videos` | listings_w | Listing media |
 
+## Authentication
+
+Two things travel with a request, and they are easy to confuse:
+
+- **`x-api-key`** must be **`keystring:shared_secret`**, not the keystring alone.
+  Etsy answers `403 {"error":"Shared secret is required in x-api-key header."}`
+  otherwise, on every endpoint including the public ones.
+- **`client_id`** in the OAuth flow is the **bare keystring**, without the secret.
+
+Settings has a **Test connection** button that pings Etsy and reports which of
+these is wrong, rather than leaving you to read a 403.
+
 ## OAuth scopes
 
-The connect flow requests every scope Etsy defines, so no feature fails later
-for want of permission. Etsy shows the seller exactly what is being granted.
+The connect flow requests all twelve scopes Etsy defines, so no feature fails
+later for want of permission. Etsy shows the seller exactly what is being granted.
 
 | Scope | Grants |
 |---|---|
 | `address_r` / `address_w` | read / update billing and shipping addresses |
-| `billing_r` | read billing data (not used by any v3 operation) |
 | `email_r` | read the user profile |
 | `listings_r` / `listings_w` / `listings_d` | read / create-edit / delete listings |
 | `profile_r` / `profile_w` | read / update profile |

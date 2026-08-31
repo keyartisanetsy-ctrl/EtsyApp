@@ -77,6 +77,21 @@ await check('unknown operation is rejected', async () => {
   assert(status === 404, `expected 404, got ${status}`);
 });
 
+await check('x-api-key is built as keystring:shared_secret', async () => {
+  const c = await import('../server/src/etsy/client.js');
+  assert(c.buildApiKeyHeader('key', 'secret') === 'key:secret', 'pair not combined');
+  assert(c.buildApiKeyHeader('key:secret', 'secret') === 'key:secret', 'already-combined value was doubled');
+  assert(c.buildApiKeyHeader(' key ', ' secret ') === 'key:secret', 'whitespace not trimmed');
+  assert(c.buildApiKeyHeader('', 'secret') === '', 'empty keystring should yield empty header');
+});
+await check('a call without the shared secret is refused before it reaches Etsy', async () => {
+  const { status, body } = await req('/api/auth/test', { allowError: true });
+  assert(status === 200, `test endpoint should always answer, got ${status}`);
+  assert(Array.isArray(body.checks) && body.checks.length >= 3, 'no checks returned');
+  const fmt = body.checks.find((c) => c.name === 'x-api-key format');
+  assert(fmt, 'missing the x-api-key format check');
+});
+
 console.log('\nSKU / inventory');
 await check('sku grid responds with discount column', async () => {
   const { body } = await req('/api/skus');

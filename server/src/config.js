@@ -24,7 +24,8 @@ export const config = {
   etsy: {
     base: process.env.ETSY_API_BASE || 'https://openapi.etsy.com',
     connectUrl: 'https://www.etsy.com/oauth/connect',
-    tokenUrl: 'https://api.etsy.com/v3/public/oauth/token',
+    // Both openapi.etsy.com and api.etsy.com serve this; the spec names the former.
+    tokenUrl: process.env.ETSY_TOKEN_URL || 'https://openapi.etsy.com/v3/public/oauth/token',
     keystring: process.env.ETSY_KEYSTRING || '',
     sharedSecret: process.env.ETSY_SHARED_SECRET || '',
     redirectUri: process.env.ETSY_REDIRECT_URI || '',

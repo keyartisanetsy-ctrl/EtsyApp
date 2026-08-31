@@ -52,13 +52,34 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // -------------------------------------------------------------- credentials
 
 export function getCredentials() {
+  const keystring = resolveSetting('etsy.keystring', config.etsy.keystring);
+  const sharedSecret = resolveSetting('etsy.shared_secret', config.etsy.sharedSecret);
   return {
-    keystring: resolveSetting('etsy.keystring', config.etsy.keystring),
-    sharedSecret: resolveSetting('etsy.shared_secret', config.etsy.sharedSecret),
+    keystring,
+    sharedSecret,
+    apiKeyHeader: buildApiKeyHeader(keystring, sharedSecret),
     redirectUri: resolveSetting('etsy.redirect_uri', config.etsy.redirectUri) ||
       `http://127.0.0.1:${config.port}/api/auth/callback`,
   };
 }
+
+/**
+ * Etsy's x-api-key must be "keystring:shared_secret", not the keystring alone.
+ * Sending only the keystring is refused with
+ *   403 {"error":"Shared secret is required in x-api-key header."}
+ * on every endpoint, public ones included. Tolerate a keystring that already
+ * has the secret appended, since that is an easy thing to paste.
+ */
+export function buildApiKeyHeader(keystring, sharedSecret) {
+  const key = String(keystring ?? '').trim();
+  const secret = String(sharedSecret ?? '').trim();
+  if (!key) return '';
+  if (key.includes(':')) return key;
+  return secret ? `${key}:${secret}` : key;
+}
+
+/** OAuth's client_id is the bare keystring, never the combined pair. */
+export const clientId = () => String(getCredentials().keystring ?? '').split(':')[0].trim();
 
 export function getStoredToken() {
   const row = getDb().prepare('SELECT * FROM oauth_token WHERE id = 1').get();
@@ -107,14 +128,13 @@ async function ensureFreshToken() {
   if (!token) throw unauthorized('No Etsy account connected. Open Settings and connect your shop.');
   if (new Date(token.expires_at).getTime() - Date.now() > 60_000) return token;
 
-  const { keystring } = getCredentials();
   log.info('access token expiring, refreshing');
   const res = await fetch(config.etsy.tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type: 'refresh_token',
-      client_id: keystring,
+      client_id: clientId(),
       refresh_token: token.refresh_token,
     }),
   });
@@ -145,8 +165,14 @@ export async function request(pathname, {
   method = 'GET', query, body, bodyKind = 'json', headers = {},
   auth = true, operationId, raw = false,
 } = {}) {
-  const { keystring } = getCredentials();
+  const { keystring, sharedSecret, apiKeyHeader } = getCredentials();
   if (!keystring) throw unauthorized('Etsy API keystring is not configured. Add it in Settings.');
+  if (!sharedSecret && !keystring.includes(':')) {
+    throw unauthorized(
+      'Etsy shared secret is not configured. Etsy requires the x-api-key header to be '
+      + '"keystring:shared_secret" — the keystring alone is rejected on every endpoint. Add it in Settings.',
+    );
+  }
 
   const url = new URL(pathname.startsWith('http') ? pathname : config.etsy.base + pathname);
   for (const [k, v] of Object.entries(query || {})) {
@@ -159,7 +185,7 @@ export async function request(pathname, {
   for (;;) {
     attempt += 1;
     const started = Date.now();
-    const h = { 'x-api-key': keystring, Accept: 'application/json', ...headers };
+    const h = { 'x-api-key': apiKeyHeader, Accept: 'application/json', ...headers };
 
     if (auth) {
       const token = await ensureFreshToken();

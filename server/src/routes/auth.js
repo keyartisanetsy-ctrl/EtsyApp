@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { asyncRoute } from '../lib/http.js';
 import { buildAuthorizationUrl, exchangeCode, verifyScopes, DEFAULT_SCOPES } from '../etsy/oauth.js';
 import { getStoredToken, disconnect, getCredentials, call } from '../etsy/client.js';
+import { maskSecret } from '../lib/crypto.js';
 import { currentShop } from '../etsy/shop.js';
 import { OPERATION_COUNT } from '../etsy/operations.generated.js';
 
@@ -51,6 +52,61 @@ router.post('/disconnect', asyncRoute(async (req, res) => {
 }));
 
 router.get('/scopes', asyncRoute(async (req, res) => res.json(await verifyScopes())));
+
+/**
+ * Live credential check against Etsy's public ping endpoint.
+ *
+ * This is the check that proves the x-api-key header is actually accepted;
+ * a purely local test cannot tell you that.
+ */
+router.get('/test', asyncRoute(async (req, res) => {
+  const creds = getCredentials();
+  const checks = [];
+
+  checks.push({
+    name: 'Keystring present',
+    ok: !!creds.keystring,
+    detail: creds.keystring ? maskSecret(creds.keystring) : 'Not set — add it in Settings.',
+  });
+  checks.push({
+    name: 'Shared secret present',
+    ok: !!creds.sharedSecret || creds.keystring.includes(':'),
+    detail: creds.sharedSecret || creds.keystring.includes(':')
+      ? 'Set'
+      : 'Not set. Etsy requires x-api-key to be "keystring:shared_secret"; the keystring alone is rejected on every endpoint.',
+  });
+  checks.push({
+    name: 'x-api-key format',
+    ok: creds.apiKeyHeader.includes(':'),
+    detail: creds.apiKeyHeader.includes(':')
+      ? 'keystring:shared_secret'
+      : 'Missing the ":shared_secret" half — Etsy will answer 403 on every call.',
+  });
+
+  let ping = null;
+  if (creds.apiKeyHeader) {
+    try {
+      const result = await call('ping', {}, { auth: false });
+      ping = { ok: true, applicationId: result?.application_id ?? null };
+      checks.push({ name: 'Etsy accepts the API key', ok: true, detail: `application_id ${result?.application_id ?? '(none returned)'}` });
+    } catch (err) {
+      ping = { ok: false, status: err.status, error: err.message };
+      checks.push({ name: 'Etsy accepts the API key', ok: false, detail: err.message });
+    }
+  }
+
+  const token = getStoredToken();
+  if (token) {
+    try {
+      const me = await call('getMe', {});
+      checks.push({ name: 'OAuth token works', ok: true, detail: `user_id ${me?.user_id ?? '?'}` });
+    } catch (err) {
+      checks.push({ name: 'OAuth token works', ok: false, detail: err.message });
+    }
+  }
+
+  res.json({ ok: checks.every((c) => c.ok), checks, ping });
+}));
 
 router.get('/ping', asyncRoute(async (req, res) => {
   res.json(await call('ping', {}, { auth: false }));

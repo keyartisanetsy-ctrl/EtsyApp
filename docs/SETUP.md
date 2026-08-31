@@ -20,7 +20,10 @@ npm run build       # builds the web app into web/dist
 ## 3. Register an Etsy app
 
 1. Go to <https://www.etsy.com/developers/your-apps> and create an app.
-2. Copy the **keystring** and **shared secret**.
+2. Copy **both** the **keystring** and the **shared secret**. Both are required:
+   Etsy's `x-api-key` header must be `keystring:shared_secret`, and the
+   keystring on its own is rejected with a 403 on every endpoint. (The OAuth
+   `client_id` is the bare keystring — the app handles that distinction.)
 3. Add this callback URL to the app, **exactly**:
 
    ```
@@ -46,7 +49,8 @@ cp .env.example .env
 npm start           # http://127.0.0.1:4317
 ```
 
-Open **Settings → Connect Etsy shop**. Etsy opens in a new tab and lists the
+Press **Test connection** first — it pings Etsy and tells you whether the key is
+accepted before you start the OAuth dance. Then **Connect Etsy shop**. Etsy opens in a new tab and lists the
 permissions being requested. Approve, and the tab confirms the connection.
 
 The app requests every scope Etsy defines so no feature fails later for want of
@@ -169,6 +173,10 @@ read and you will have to re-enter them (nothing else is lost).
 **`invalid_request` / `redirect_uri mismatch` when connecting**
 The callback URL on the Etsy app must match byte for byte. Check for
 `localhost` vs `127.0.0.1`, http vs https, and a trailing slash.
+
+**`403 Shared secret is required in x-api-key header`**
+The shared secret is missing. Etsy needs `x-api-key: keystring:shared_secret`.
+Add it in Settings and press Test connection.
 
 **`Etsy 403` on a specific operation**
 Either the token lacks the scope (Settings shows what was granted), or the

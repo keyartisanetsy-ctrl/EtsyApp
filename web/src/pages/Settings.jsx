@@ -30,6 +30,17 @@ export default function Settings() {
     } catch (err) { showError(err, 'Could not save'); } finally { setBusy(false); }
   };
 
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+
+  const testConnection = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      setTestResult(await api.get('/auth/test'));
+    } catch (err) { showError(err, 'Test failed'); } finally { setTesting(false); }
+  };
+
   const connect = async () => {
     try {
       const r = await api.post('/auth/connect', {});
@@ -70,10 +81,35 @@ export default function Settings() {
             <span className={`badge ${auth?.connected ? 'green' : 'grey'}`}>{auth?.connected ? 'connected' : 'not connected'}</span>
           </div>
 
+          <div className="flex mb16">
+            <button className="btn" onClick={testConnection} disabled={testing}>
+              {testing ? <Spinner /> : '⚡'} Test connection
+            </button>
+            {testResult && (
+              <span className={`badge ${testResult.ok ? 'green' : 'red'}`}>
+                {testResult.ok ? 'all checks passed' : 'problems found'}
+              </span>
+            )}
+          </div>
+
+          {testResult && (
+            <div className="card mb16" style={{ background: 'var(--bg)' }}>
+              {testResult.checks.map((c) => (
+                <div key={c.name} className="flex small" style={{ padding: '3px 0' }}>
+                  <span style={{ color: c.ok ? 'var(--good)' : 'var(--bad)', width: 18 }}>{c.ok ? '✓' : '✕'}</span>
+                  <span style={{ width: 200 }}>{c.name}</span>
+                  <span className="dim">{c.detail}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
           {!auth?.hasKeystring ? (
             <Banner kind="warn">
-              Add your Etsy <strong>keystring</strong> below and save it before connecting.
-              You get it from etsy.com/developers/your-apps.
+              Add your Etsy <strong>keystring</strong> and <strong>shared secret</strong> below, then save.
+              Both come from etsy.com/developers/your-apps. Etsy requires the API key header to be
+              <code className="mono"> keystring:shared_secret</code> — the keystring on its own is rejected on
+              every endpoint, so the secret is not optional.
             </Banner>
           ) : auth?.connected ? (
             <>
