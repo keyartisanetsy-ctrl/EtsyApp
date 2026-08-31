@@ -15,11 +15,29 @@ See [`docs/etsy-api-coverage.md`](docs/etsy-api-coverage.md) for the full table.
 
 ## Quick start
 
+The app runs on your own computer — nothing is hosted. Install
+[Node.js 20 or newer](https://nodejs.org) first, then:
+
+**Windows** — double-click `START-WINDOWS.bat`
+**macOS / Linux** — double-click `START-MAC-LINUX.command`
+
+That is all. The first run installs dependencies and builds the interface
+(a few minutes), then opens <http://127.0.0.1:4317> in your browser.
+
+Prefer a terminal? One command does the same thing from a fresh clone:
+
 ```bash
-npm install          # installs both workspaces and compiles the SQLite driver
-npm run codegen      # regenerate the Etsy client from docs/etsy-oas.json
-npm run build        # build the web app
-npm start            # http://127.0.0.1:4317
+npm start            # installs and builds if needed, then serves on :4317
+```
+
+**Leave that window open** while you use the app — it *is* the app. Closing it
+stops the server, and the browser will then say `ERR_CONNECTION_REFUSED`.
+
+If something is wrong, this tells you exactly what:
+
+```bash
+npm run doctor       # checks Node, dependencies, build, port, permissions
+npm run fix          # installs, generates, builds, re-checks
 ```
 
 For development with hot reload:
@@ -173,6 +191,24 @@ every Excel export, path-traversal protection, and the error paths that should
 fail cleanly when a shop is not connected.
 
 ---
+
+## When the browser says the site cannot be reached
+
+`ERR_CONNECTION_REFUSED` on `127.0.0.1:4317` means no server is listening. It is
+never a browser or firewall problem — localhost is your own machine.
+
+1. **Is it running?** The terminal (or the launcher window) must still be open
+   and showing `Etsy Command Center on http://127.0.0.1:4317`. If you closed it,
+   or pressed `Ctrl+C`, start it again.
+2. **Did startup fail?** Scroll up in that window — the error is printed there.
+   `npm run doctor` will name the problem and the fix.
+3. **Is `node` installed?** `node --version` must print v20 or higher. If the
+   command is not found, install the LTS build from <https://nodejs.org> and
+   open a *new* terminal.
+4. **Are you in the right folder?** `npm start` must run from inside the
+   `EtsyApp` directory — the one containing `package.json`.
+5. **Port already taken?** `npm run doctor` will say so. Use another:
+   `PORT=4400 npm start`, then open `http://127.0.0.1:4400`.
 
 ## Honest limitations
 
