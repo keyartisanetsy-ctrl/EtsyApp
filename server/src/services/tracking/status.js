@@ -43,14 +43,22 @@ export function classify(text = '') {
   return null;
 }
 
-/** Numeric provider codes used by YunTrack / 17TRACK style APIs. */
+/**
+ * 17TRACK's numeric status codes.
+ *
+ * YunTrack uses a different, overlapping numbering (50 = delivered, 40 = alert)
+ * and is mapped in its own adapter -- do not merge the two tables, the same
+ * number means different things in each.
+ */
 export function fromProviderCode(code) {
   const map = {
-    0: STATUS.NOT_FOUND, 10: STATUS.IN_TRANSIT, 20: STATUS.EXCEPTION,
-    30: STATUS.PICKUP_WAITING, 35: STATUS.OUT_FOR_DELIVERY, 40: STATUS.DELIVERED,
-    50: STATUS.RETURNED, 1: STATUS.PRE_SHIPPED, 2: STATUS.IN_TRANSIT,
-    3: STATUS.PICKUP_WAITING, 4: STATUS.DELIVERED, 5: STATUS.EXCEPTION,
-    6: STATUS.EXPIRED, 7: STATUS.RETURNED,
+    0: STATUS.NOT_FOUND,
+    10: STATUS.IN_TRANSIT,
+    20: STATUS.EXCEPTION,
+    30: STATUS.PICKUP_WAITING,
+    35: STATUS.OUT_FOR_DELIVERY,
+    40: STATUS.DELIVERED,
+    50: STATUS.RETURNED,
   };
   return map[Number(code)] ?? null;
 }

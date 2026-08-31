@@ -77,8 +77,15 @@ and strips the read-only fields Etsy refuses on write.
 - Pushing to Etsy marks the order shipped and emails the buyer — or record the
   number locally only.
 - Every number deep-links to `https://www.yuntrack.com/parcelTracking?id=<code>`.
+  That template is a setting — `{code}` is substituted — so it can point at any
+  tracker.
 - Statuses: pre-shipped, on its way, out for delivery, waiting for pickup,
   delivered, exception, returned, expired, not found.
+- Four lookup providers, switchable in Settings:
+  **YunTrack (direct)** replays the signed query the tracking page makes for
+  itself; **YunTrack (browser)** loads that page in real Chromium, which gets
+  through the WAF that rejects server-side calls from some networks;
+  **17TRACK** is a paid API key; **manual** turns automatic lookups off.
 - **Anything that has not moved in 4+ days raises an alert** (threshold
   configurable). This is time-based, so it still fires when the carrier feed is
   unreachable. Alerts can be acknowledged, and re-arm on the next real scan.
@@ -169,15 +176,17 @@ fail cleanly when a shop is not connected.
 
 ## Honest limitations
 
-- **YunTrack has no public API.** `services.yuntrack.com` sits behind a WAF that
-  rejects automated requests from datacentre ranges — it returned HTTP 405 to
-  every method tried from this build environment. The adapter is written to
-  YunTrack's request/response shape and will work wherever that host is
-  reachable; where it is not, parcels keep their last known state, the failure is
-  shown per parcel rather than silently swallowed, and you can set a status by
-  hand. **The deep link and the no-movement alert work regardless**, because the
-  alert counts elapsed time rather than depending on the feed. A 17TRACK adapter
-  is included as a paid fallback that works from any network.
+- **YunTrack publishes no developer API, so the adapter targets the call its own
+  tracking page makes.** The request shape, the HMAC-SHA256 signature and the
+  status-code table were read off the public page bundle, so they match what the
+  site itself sends rather than being guessed — there is a regression test
+  pinning the signature to a known vector. `services.yuntrack.com` sits behind an
+  Aliyun WAF that rejects some datacentre IPs with a 405 interstitial; that is an
+  IP-reputation block, not a bad request, and it is reported as such. Where it
+  happens, switch to the **browser provider**, which loads the real
+  `parcelTracking?id=` page. **The deep link and the no-movement alert work under
+  every provider**, because the alert counts elapsed time rather than depending
+  on the feed.
 - **Manus is an agent API, not a chat API.** Requests are submitted as tasks and
   polled, so a reply can take minutes, and it does not accept image input. The
   screenshot workflow and image editing therefore need Anthropic or OpenAI.

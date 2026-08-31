@@ -11,6 +11,7 @@ import { badRequest } from '../../lib/errors.js';
 import { createLogger } from '../../lib/logger.js';
 import { STATUS, STATUS_LABELS, TERMINAL } from './status.js';
 import * as yuntrack from './yuntrack.js';
+import * as yuntrackBrowser from './yuntrack-browser.js';
 import * as seventeen from './seventeentrack.js';
 
 const log = createLogger('tracking');
@@ -102,12 +103,35 @@ export async function addTracking(entries, { pushToEtsy = true, noteToBuyer = ''
 
 // ----------------------------------------------------------------- polling
 
+export const PROVIDERS = ['yuntrack', 'yuntrack-browser', 'seventeentrack', 'manual'];
+
 function providerFor(name) {
-  if (name === 'seventeentrack') {
-    return { name, fetch: (codes) => seventeen.fetchTracking(codes, { apiKey: readSetting('tracking.seventeentrack_key') }) };
+  switch (name) {
+    case 'seventeentrack':
+      return { name, fetch: (codes) => seventeen.fetchTracking(codes, { apiKey: readSetting('tracking.seventeentrack_key') }) };
+
+    case 'yuntrack-browser':
+      // Drives a real browser over the same parcelTracking page a person opens.
+      return {
+        name,
+        batchSize: 8, // one page load per parcel, so keep batches small
+        fetch: (codes) => yuntrackBrowser.fetchTracking(codes, {
+          headless: !isTruthy(readSetting('tracking.browser_headed')),
+          executablePath: readSetting('tracking.browser_path') || undefined,
+        }),
+      };
+
+    case 'manual':
+      return { name, fetch: async (codes) => codes.map((c) => ({ code: c, status: null, events: [], manual: true })) };
+
+    default:
+      return {
+        name: 'yuntrack',
+        fetch: (codes) => yuntrack.fetchTracking(codes, {
+          endpoint: readSetting('tracking.api_endpoint') || `${yuntrack.API_ROOT}/Track/Query`,
+        }),
+      };
   }
-  if (name === 'manual') return { name, fetch: async (codes) => codes.map((c) => ({ code: c, status: null, events: [], manual: true })) };
-  return { name: 'yuntrack', fetch: (codes) => yuntrack.fetchTracking(codes, { endpoint: readSetting('tracking.provider') === 'yuntrack' ? (process.env.YUNTRACK_API || 'https://services.yuntrack.com/Track/Query') : '' }) };
 }
 
 const fingerprint = (e) =>
@@ -195,17 +219,26 @@ export async function syncTracking({ codes = null, batchSize = 30, includeDelive
   if (!list.length) return { checked: 0, updated: [], errors: [] };
 
   const provider = providerFor(readSetting('tracking.provider'));
+  const size = provider.batchSize ?? batchSize;
   const updated = [];
   const errors = [];
+  let blocked = null;
 
-  for (let i = 0; i < list.length; i += batchSize) {
-    const batch = list.slice(i, i + batchSize);
+  for (let i = 0; i < list.length; i += size) {
+    const batch = list.slice(i, i + size);
     try {
       const parcels = await provider.fetch(batch);
       for (const parcel of parcels) updated.push(applyParcel(parcel));
     } catch (err) {
       for (const code of batch) { recordCheckError(code, err.message); errors.push({ code, error: err.message }); }
       log.warn(`provider ${provider.name} failed for ${batch.length} parcels: ${err.message}`);
+      // A WAF block or a missing browser will fail identically for every
+      // remaining batch, so stop and report it once.
+      if (err.blocked || /Playwright/i.test(err.message)) {
+        blocked = err.message;
+        for (const code of list.slice(i + size)) { recordCheckError(code, err.message); errors.push({ code, error: err.message }); }
+        break;
+      }
     }
   }
 
@@ -214,7 +247,7 @@ export async function syncTracking({ codes = null, batchSize = 30, includeDelive
   refreshStaleFlags();
 
   audit('tracking.sync', { entity: 'tracking', status: errors.length ? 'partial' : 'ok', detail: { checked: list.length, errors: errors.length } });
-  return { checked: list.length, provider: provider.name, updated, errors };
+  return { checked: list.length, provider: provider.name, updated, errors, blocked };
 }
 
 /** Time-based alerting; independent of whether the carrier API answered. */

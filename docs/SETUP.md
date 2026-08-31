@@ -94,22 +94,54 @@ failure.
 
 ## Tracking providers
 
-**YunTrack** has no documented public API. The adapter targets
-`services.yuntrack.com/Track/Query` with the request shape their web client
-uses, and tolerates the several response shapes they have shipped. That host is
-behind a WAF that rejects automated requests from some networks — if you get
-`405` or `403`, the parcel keeps its last known state and the error is shown
-against it.
+The tracking link is the primary mechanism and always works:
+`tracking.url_template` defaults to
+`https://www.yuntrack.com/parcelTracking?id={code}`, with `{code}` substituted
+per parcel. Point it anywhere else if you change tracker.
 
-What still works in that case:
+For *automatic* status, pick a provider under `tracking.provider`:
 
-- the deep link to YunTrack for every parcel,
-- manual status setting, which records an event,
-- **the no-movement alert**, because it counts elapsed time since the last known
-  movement rather than depending on the feed.
+### `yuntrack` — direct query (default)
 
-**17TRACK** is a paid API that works from any network. Add a key under
-`tracking.seventeentrack_key` and set `tracking.provider` to `seventeentrack`.
+YunTrack has no developer API, so this replays the exact call its own tracking
+page makes: `POST services.yuntrack.com/Track/Query` with
+`{NumberList, CaptchaVerification, Timestamp, Signature}`, where `Signature` is
+`HMAC-SHA256("Timestamp=<ts>&NumberList=<json>")`. The status codes are theirs
+(`10` Processing, `20`/`30` Transit, `50` Delivered, `40`/`60`/`70`/`100` Alert,
+`90` Returned, `0` Not Found).
+
+That host sits behind an Aliyun WAF. If it answers `405` with an HTML
+interstitial, your IP is being refused on reputation — the numbers and the
+request are fine. The app says exactly that instead of reporting a generic
+failure. Home and office connections are usually fine; cloud servers and VPNs
+often are not.
+
+### `yuntrack-browser` — the same page, in a real browser
+
+Loads `https://www.yuntrack.com/parcelTracking?id=<code>` in headless Chromium
+and reads the tracking data the page fetches for itself. Because it is a genuine
+browser session it gets past the WAF that refuses direct calls.
+
+```bash
+npm install playwright && npx playwright install chromium
+```
+
+Then set `tracking.provider` to `yuntrack-browser`. If a captcha appears, set
+`tracking.browser_headed` to `true` once, solve it, and switch back. It loads one
+page per parcel, so it is slower — leave the background sync at its default
+interval rather than polling hard.
+
+### `seventeentrack` — paid API
+
+Works from any network. Add a key under `tracking.seventeentrack_key`.
+
+### `manual`
+
+No automatic lookups. Set each status from the parcel drawer.
+
+**Under every provider**, the deep link works and the no-movement alert keeps
+firing, because it counts elapsed time since the last known movement rather than
+waiting on a carrier reply.
 
 ## Exposing beyond localhost
 

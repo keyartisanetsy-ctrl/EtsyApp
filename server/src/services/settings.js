@@ -13,7 +13,12 @@ export const SETTING_DEFS = {
   'etsy.shared_secret':    { env: config.etsy.sharedSecret, def: '', secret: true, label: 'Etsy shared secret' },
   'etsy.redirect_uri':     { env: config.etsy.redirectUri, def: `http://127.0.0.1:${config.port}/api/auth/callback`, label: 'OAuth redirect URI' },
 
-  'ai.provider':           { env: config.ai.defaultProvider, def: 'manus', label: 'Default AI provider' },
+  'ai.provider':           { env: config.ai.defaultProvider, def: 'manus', label: 'Default AI provider',
+    options: [
+      { value: 'manus', label: 'Manus (agent, async, text only)' },
+      { value: 'anthropic', label: 'Anthropic (fast, reads images)' },
+      { value: 'openai', label: 'OpenAI (fast, reads images, edits images)' },
+    ] },
   'ai.manus.api_key':      { env: config.ai.manus.apiKey, def: '', secret: true, label: 'Manus API key' },
   'ai.manus.agent_profile':{ env: config.ai.manus.agentProfile, def: 'manus-1.6', label: 'Manus agent profile' },
   'ai.anthropic.api_key':  { env: config.ai.anthropic.apiKey, def: '', secret: true, label: 'Anthropic API key' },
@@ -22,11 +27,20 @@ export const SETTING_DEFS = {
   'ai.openai.model':       { env: config.ai.openai.model, def: 'gpt-4o', label: 'OpenAI model' },
   'ai.openai.image_model': { env: config.ai.openai.imageModel, def: 'gpt-image-1', label: 'OpenAI image model' },
 
-  'tracking.provider':     { env: config.tracking.provider, def: 'yuntrack', label: 'Tracking provider' },
+  'tracking.provider':     { env: config.tracking.provider, def: 'yuntrack', label: 'Tracking provider',
+    options: [
+      { value: 'yuntrack', label: 'YunTrack (direct query)' },
+      { value: 'yuntrack-browser', label: 'YunTrack (via a real browser)' },
+      { value: 'seventeentrack', label: '17TRACK (paid API key)' },
+      { value: 'manual', label: 'Manual only (no automatic lookups)' },
+    ] },
   'tracking.url_template': { env: config.tracking.publicUrlTemplate, def: 'https://www.yuntrack.com/parcelTracking?id={code}', label: 'Tracking link template' },
   'tracking.stale_days':   { env: String(config.tracking.staleAfterDays), def: '4', label: 'Alert after N days without movement' },
   'tracking.sync_minutes': { env: String(config.tracking.autoSyncMinutes), def: '180', label: 'Auto-sync interval (minutes)' },
   'tracking.seventeentrack_key': { env: config.tracking.seventeentrackKey, def: '', secret: true, label: '17TRACK API key' },
+  'tracking.api_endpoint':  { env: process.env.YUNTRACK_API || '', def: 'https://services.yuntrack.com/Track/Query', label: 'YunTrack query endpoint' },
+  'tracking.browser_headed':{ env: '', def: 'false', label: 'Show the browser window (to solve a captcha once)' },
+  'tracking.browser_path':  { env: process.env.PLAYWRIGHT_CHROMIUM_PATH || '', def: '', label: 'Chromium path for the browser provider' },
 
   'pricing.discount_percent': { env: String(config.pricing.discountPercent), def: '30', label: 'Discount percentage' },
   'orders.default_carrier':   { env: '', def: '', label: 'Default carrier for bulk tracking' },
@@ -60,6 +74,7 @@ export function listSettings() {
       key,
       label: def.label,
       secret: !!def.secret,
+      options: def.options ?? null,
       value: def.secret ? maskSecret(value) : value,
       isSet: !!value,
       source: stored ? 'app' : def.env ? 'env' : 'default',

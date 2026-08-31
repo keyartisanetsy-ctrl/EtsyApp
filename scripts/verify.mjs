@@ -147,6 +147,57 @@ await check('manual status + stale alert lifecycle', async () => {
   assert(events.length >= 1, 'no event recorded');
 });
 
+await check('yuntrack signature matches the page algorithm', async () => {
+  const y = await import('../server/src/services/tracking/yuntrack.js');
+  // Reference vector computed from the site's own getSign implementation.
+  const expected = '4fd305d37e67f452d209d7d4815d4e75c9f1f604e8fb18b3253bfe7133e20a80';
+  assert(y.sign(1788186762569, ['YT2616000700920111']) === expected, 'HMAC-SHA256 signature mismatch');
+  const req = y.buildRequest(['YT123']);
+  for (const k of ['NumberList', 'CaptchaVerification', 'Timestamp', 'Signature']) {
+    assert(k in req, `request body missing ${k}`);
+  }
+});
+await check('yuntrack status codes match the published mapping', async () => {
+  const y = await import('../server/src/services/tracking/yuntrack.js');
+  const expect = { 0: 'not_found', 10: 'pre_shipped', 20: 'in_transit', 30: 'in_transit',
+                   40: 'exception', 50: 'delivered', 60: 'exception', 70: 'exception',
+                   90: 'returned', 100: 'exception' };
+  for (const [code, want] of Object.entries(expect)) {
+    assert(y.YUNTRACK_STATUS[code] === want, `code ${code} should map to ${want}, got ${y.YUNTRACK_STATUS[code]}`);
+  }
+});
+await check('yuntrack event parsing splits content and location', async () => {
+  const y = await import('../server/src/services/tracking/yuntrack.js');
+  assert(y.splitContent('Departed----SHENZHEN, CN').location === 'SHENZHEN, CN', 'location not split on ----');
+  const p = y.normalise({ TrackInfo: { WaybillNumber: 'YT1', TrackingStatus: 50,
+    LastTrackEvent: { TrackingStatus: 50 },
+    ProcessGroupList: [{ ProcessGroupDate: '2024-05-29 10:00:00', ProcessDetailList: [
+      { ProcessDate: '2024-05-29 16:26:40', ProcessContent: 'Delivered, signed for----BERLIN, DE', IsPod: true, Pod: 'http://pod' },
+      { ProcessDate: '2024-05-20 10:00:00', ProcessContent: 'Departed----SHENZHEN, CN' }] }] } });
+  assert(p.status === 'delivered', `status ${p.status}`);
+  assert(p.events.length === 2, `expected 2 events, got ${p.events.length}`);
+  assert(p.events[0].location === 'BERLIN, DE', 'newest event location wrong');
+  assert(p.podUrl === 'http://pod', 'proof-of-delivery url not captured');
+});
+await check('tracking providers are all selectable', async () => {
+  const { body } = await req('/api/settings');
+  const provider = body.settings.find((s) => s.key === 'tracking.provider');
+  assert(provider?.options?.length === 4, `expected 4 provider options, got ${provider?.options?.length}`);
+  const values = provider.options.map((o) => o.value);
+  for (const v of ['yuntrack', 'yuntrack-browser', 'seventeentrack', 'manual']) {
+    assert(values.includes(v), `missing provider ${v}`);
+  }
+});
+await check('browser provider reports a clear setup message when unavailable', async () => {
+  const b = await import('../server/src/services/tracking/yuntrack-browser.js');
+  try {
+    await b.fetchTracking(['YT1'], { timeoutMs: 3000 });
+  } catch (err) {
+    // Either Playwright is missing (clear message) or it launched -- both fine.
+    assert(/Playwright|browser/i.test(err.message), `unhelpful message: ${err.message}`);
+  }
+});
+
 console.log('\nAI');
 await check('provider status', async () => {
   const { body } = await req('/api/ai/status');

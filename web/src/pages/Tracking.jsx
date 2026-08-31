@@ -23,6 +23,7 @@ export default function Tracking() {
   const [syncing, setSyncing] = useState(false);
   const [detail, setDetail] = useState(null);
   const [selected, setSelected] = useState(new Set());
+  const [blocked, setBlocked] = useState(null);
 
   const toast = useToast();
   const showError = useErrorToast();
@@ -41,7 +42,10 @@ export default function Tracking() {
     setSyncing(true);
     try {
       const r = await api.post('/tracking/sync', codes ? { codes } : {});
-      if (r.errors?.length) {
+      setBlocked(r.blocked ?? null);
+      if (r.blocked) {
+        toast({ kind: 'warn', title: 'Carrier lookup blocked', body: 'See the note above the board.', duration: 8000 });
+      } else if (r.errors?.length) {
         toast({
           kind: 'warn',
           title: `Checked ${r.checked}, ${r.errors.length} unreachable`,
@@ -105,6 +109,17 @@ export default function Tracking() {
     >
       <div style={{ padding: 16, paddingBottom: 0 }}>
         {error && <Banner kind="err">{error.message}</Banner>}
+        {blocked && (
+          <Banner kind="warn" onClose={() => setBlocked(null)}>
+            <div>
+              {blocked}
+              <div className="mt8 small">
+                Parcels keep their last known status, every number still opens on YunTrack, and the
+                no-movement alert keeps counting — it measures elapsed time, not carrier replies.
+              </div>
+            </div>
+          </Banner>
+        )}
         {summary && (
           <div className="grid c5 mb16">
             <Stat label="Tracked" value={summary.total} />

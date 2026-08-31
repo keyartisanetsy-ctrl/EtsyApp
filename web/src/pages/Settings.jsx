@@ -110,9 +110,17 @@ export default function Settings() {
 
       {tab === 'tracking' && (
         <Banner kind="info">
-          Every tracking number links to the template below — YunTrack by default. If YunTrack refuses automated
-          requests from your network, parcels keep their last known state and you can set a status by hand; the
-          no-movement alert still works, because it counts elapsed time.
+          <div>
+            Every tracking number links to the template below — <code className="mono">{'https://www.yuntrack.com/parcelTracking?id={code}'}</code> by
+            default, and <code className="mono">{'{code}'}</code> is substituted with the number. Change it here to
+            use a different tracker.
+            <div className="mt8">
+              <strong>YunTrack (direct query)</strong> calls the same endpoint the tracking page calls for itself. Some
+              networks are refused by its WAF; if that happens, switch to <strong>via a real browser</strong>, which
+              loads the actual page (needs <code className="mono">npm install playwright</code>). Either way the
+              no-movement alert keeps working, because it counts elapsed time rather than depending on the feed.
+            </div>
+          </div>
         </Banner>
       )}
 
@@ -124,13 +132,23 @@ export default function Settings() {
               <span className="muted mono small"> · {s.key}</span>
               {s.source !== 'app' && <span className="badge grey" style={{ marginLeft: 6 }}>from {s.source}</span>}
             </label>
-            <input
-              className="input"
-              type={s.secret ? 'password' : 'text'}
-              placeholder={s.secret && s.isSet ? s.value : ''}
-              value={draft[s.key] ?? (s.secret ? '' : s.value)}
-              onChange={(e) => setDraft({ ...draft, [s.key]: e.target.value })}
-            />
+            {s.options ? (
+              <select
+                className="select"
+                value={draft[s.key] ?? s.value}
+                onChange={(e) => setDraft({ ...draft, [s.key]: e.target.value })}
+              >
+                {s.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            ) : (
+              <input
+                className="input"
+                type={s.secret ? 'password' : 'text'}
+                placeholder={s.secret && s.isSet ? s.value : ''}
+                value={draft[s.key] ?? (s.secret ? '' : s.value)}
+                onChange={(e) => setDraft({ ...draft, [s.key]: e.target.value })}
+              />
+            )}
             {s.secret && s.isSet && <div className="hint">A value is stored ({s.value}). Type to replace it; leave blank to keep it.</div>}
           </div>
         ))}
