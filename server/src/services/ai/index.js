@@ -55,11 +55,25 @@ export function savePrompt({ id, name, kind, body, isDefault = false }) {
 }
 
 export function deletePrompt(id) {
+  const db = getDb();
   const p = getPrompt(id);
   if (!p) throw notFound(`Prompt ${id} not found.`);
   if (p.is_system) throw badRequest('Built-in prompts cannot be deleted. Edit it or make another one the default.');
-  getDb().prepare('DELETE FROM prompts WHERE id = ?').run(id);
-  return { deleted: id };
+
+  let promoted = null;
+  db.transaction(() => {
+    db.prepare('DELETE FROM prompts WHERE id = ?').run(id);
+    // A kind must never be left without a default, or the AI screens have
+    // nothing to fall back to. Promote the next prompt of that kind.
+    if (p.is_default) {
+      const next = db.prepare('SELECT id FROM prompts WHERE kind = ? ORDER BY is_system DESC, id LIMIT 1').get(p.kind);
+      if (next) {
+        db.prepare('UPDATE prompts SET is_default = 1 WHERE id = ?').run(next.id);
+        promoted = next.id;
+      }
+    }
+  })();
+  return { deleted: id, promotedToDefault: promoted };
 }
 
 export function setDefaultPrompt(id) {

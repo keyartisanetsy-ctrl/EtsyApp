@@ -85,7 +85,9 @@ app.use('/api/etsy', etsyRoutes);
 const webDist = path.join(ROOT, 'web', 'dist');
 if (fs.existsSync(webDist)) {
   app.use(express.static(webDist));
-  app.get(/^(?!\/api).*/, (req, res) => res.sendFile(path.join(webDist, 'index.html')));
+  // Client-side routes fall through to the SPA. The lookahead must be anchored
+  // to /api/ (or exactly /api) so a page route like /api-explorer still works.
+  app.get(/^(?!\/api(?:\/|$)).*/, (req, res) => res.sendFile(path.join(webDist, 'index.html')));
 } else {
   app.get('/', (req, res) => res.status(200).send(
     '<h1>Etsy Command Center API</h1><p>The web build is missing. Run <code>npm run build</code>, or use <code>npm run dev</code> for the dev server.</p>',

@@ -1,0 +1,147 @@
+import React, { useEffect, useState, useCallback } from 'react';
+import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
+import api from './lib/api.js';
+import { ToastHost } from './components/ui.jsx';
+
+import Dashboard from './pages/Dashboard.jsx';
+import Listings from './pages/Listings.jsx';
+import Skus from './pages/Skus.jsx';
+import Orders from './pages/Orders.jsx';
+import Tracking from './pages/Tracking.jsx';
+import AiStudio from './pages/AiStudio.jsx';
+import Prompts from './pages/Prompts.jsx';
+import Research from './pages/Research.jsx';
+import BulkJobs from './pages/BulkJobs.jsx';
+import Exports from './pages/Exports.jsx';
+import ShopSettings from './pages/ShopSettings.jsx';
+import Settings from './pages/Settings.jsx';
+import ApiExplorer from './pages/ApiExplorer.jsx';
+import NewListing from './pages/NewListing.jsx';
+
+const NAV = [
+  {
+    label: 'Overview',
+    items: [{ to: '/', icon: '◆', label: 'Dashboard', end: true }],
+  },
+  {
+    label: 'Catalogue',
+    items: [
+      { to: '/listings', icon: '▤', label: 'Listings', badge: 'listings' },
+      { to: '/skus', icon: '⧉', label: 'SKUs & variations', badge: 'missingSku', badgeKind: 'muted' },
+      { to: '/listings/new', icon: '＋', label: 'Create listing' },
+      { to: '/research', icon: '◎', label: 'Product research' },
+    ],
+  },
+  {
+    label: 'Fulfilment',
+    items: [
+      { to: '/orders', icon: '▣', label: 'Orders', badge: 'newOrders' },
+      { to: '/tracking', icon: '➤', label: 'Tracking', badge: 'alerts', badgeKind: 'alert' },
+      { to: '/exports', icon: '⤓', label: 'Excel exports' },
+    ],
+  },
+  {
+    label: 'AI',
+    items: [
+      { to: '/ai', icon: '✦', label: 'AI studio' },
+      { to: '/prompts', icon: '❝', label: 'Prompt library' },
+    ],
+  },
+  {
+    label: 'System',
+    items: [
+      { to: '/jobs', icon: '⚙', label: 'Bulk jobs' },
+      { to: '/shop', icon: '🏬', label: 'Shop settings' },
+      { to: '/api-explorer', icon: '⌘', label: 'API explorer' },
+      { to: '/settings', icon: '⚒', label: 'Settings' },
+    ],
+  },
+];
+
+export default function App() {
+  const [summary, setSummary] = useState(null);
+  const location = useLocation();
+
+  const refresh = useCallback(async () => {
+    try { setSummary(await api.dashboard()); } catch { /* offline or not connected yet */ }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh, location.pathname]);
+  useEffect(() => {
+    const t = setInterval(refresh, 60_000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  const counts = {
+    listings: summary?.listings?.total || 0,
+    missingSku: summary?.listings?.missingSku || 0,
+    newOrders: summary?.orders?.newOrders || 0,
+    alerts: summary?.tracking?.alerts || 0,
+  };
+
+  return (
+    <ToastHost>
+      <div className="app">
+        <nav className="sidebar">
+          <div className="brand">
+            <div className="brand-mark">E</div>
+            <div>
+              <div className="brand-name">Command Center</div>
+              <div className="brand-sub">Etsy Open API v3</div>
+            </div>
+          </div>
+
+          <div className="shop-chip">
+            <span className={`dot ${summary?.connected ? 'on' : 'off'}`} />
+            {summary?.connected
+              ? <span>{summary.shop?.shopName || `Shop ${summary.shop?.shopId ?? ''}`}</span>
+              : <span className="muted">Not connected</span>}
+          </div>
+
+          <div className="nav">
+            {NAV.map((group) => (
+              <div className="nav-group" key={group.label}>
+                <div className="nav-label">{group.label}</div>
+                {group.items.map((item) => {
+                  const count = item.badge ? counts[item.badge] : 0;
+                  return (
+                    <NavLink
+                      key={item.to}
+                      to={item.to}
+                      end={item.end}
+                      className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                    >
+                      <span className="ico">{item.icon}</span>
+                      <span>{item.label}</span>
+                      {count > 0 && <span className={`nav-badge ${item.badgeKind ?? ''}`}>{count > 999 ? '999+' : count}</span>}
+                    </NavLink>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </nav>
+
+        <main className="main">
+          <Routes>
+            <Route path="/" element={<Dashboard summary={summary} onRefresh={refresh} />} />
+            <Route path="/listings" element={<Listings />} />
+            <Route path="/listings/new" element={<NewListing />} />
+            <Route path="/skus" element={<Skus />} />
+            <Route path="/orders" element={<Orders />} />
+            <Route path="/tracking" element={<Tracking />} />
+            <Route path="/ai" element={<AiStudio />} />
+            <Route path="/prompts" element={<Prompts />} />
+            <Route path="/research" element={<Research />} />
+            <Route path="/jobs" element={<BulkJobs />} />
+            <Route path="/exports" element={<Exports />} />
+            <Route path="/shop" element={<ShopSettings />} />
+            <Route path="/api-explorer" element={<ApiExplorer />} />
+            <Route path="/settings" element={<Settings />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </main>
+      </div>
+    </ToastHost>
+  );
+}

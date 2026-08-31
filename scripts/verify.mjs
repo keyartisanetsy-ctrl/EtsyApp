@@ -1,0 +1,271 @@
+/**
+ * End-to-end smoke test against a running server.
+ * Exercises the read paths and the local write paths that do not need Etsy,
+ * so a broken build is caught before it reaches the shop.
+ */
+const BASE = process.env.VERIFY_BASE || 'http://127.0.0.1:4317';
+let pass = 0;
+let fail = 0;
+const failures = [];
+
+async function check(name, fn) {
+  try {
+    await fn();
+    pass += 1;
+    console.log(`  ok   ${name}`);
+  } catch (err) {
+    fail += 1;
+    failures.push(`${name}: ${err.message}`);
+    console.log(`  FAIL ${name}: ${err.message}`);
+  }
+}
+
+const req = async (path, opts = {}) => {
+  const res = await fetch(BASE + path, {
+    method: opts.method ?? 'GET',
+    headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const text = await res.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!opts.allowError && !res.ok) throw new Error(`${res.status} ${body?.error ?? text.slice(0, 120)}`);
+  return { status: res.status, body };
+};
+
+const assert = (cond, msg) => { if (!cond) throw new Error(msg); };
+
+console.log('\nEtsy Command Center - verification\n');
+
+console.log('Core');
+await check('health responds', async () => {
+  const { body } = await req('/api/health');
+  assert(body.ok === true, 'not ok');
+  assert(body.operations === 105, `expected 105 operations, got ${body.operations}`);
+});
+await check('dashboard aggregates', async () => {
+  const { body } = await req('/api/dashboard');
+  assert(body.listings && body.orders && body.tracking, 'missing sections');
+});
+await check('auth status', async () => {
+  const { body } = await req('/api/auth/status');
+  assert(Array.isArray(body.availableScopes) && body.availableScopes.length === 12, 'expected 12 OAuth scopes');
+});
+
+console.log('\nEtsy operation catalogue');
+await check('all 105 operations exposed', async () => {
+  const { body } = await req('/api/etsy/operations');
+  assert(body.count === 105, `count ${body.count}`);
+  assert(body.tags.length === 27, `expected 27 tags, got ${body.tags.length}`);
+});
+await check('every documented tag is present', async () => {
+  const { body } = await req('/api/etsy/operations');
+  const expected = ['ShopListing', 'ShopListing Inventory', 'ShopListing VariationImage', 'Shop Receipt',
+    'Shop Receipt Transactions', 'Payment', 'Ledger Entry', 'Review', 'Shop ShippingProfile',
+    'Shop Return Policy', 'Shop HolidayPreferences', 'Shop ProductionPartner', 'SellerTaxonomy',
+    'BuyerTaxonomy', 'User', 'UserAddress', 'Shop Section'];
+  const missing = expected.filter((t) => !body.tags.includes(t));
+  assert(!missing.length, `missing tags: ${missing.join(', ')}`);
+});
+await check('operation detail carries a schema', async () => {
+  const { body } = await req('/api/etsy/operations/updateListingInventory');
+  assert(body.method === 'PUT', 'wrong method');
+  assert(body.body?.props?.products, 'inventory body schema missing');
+});
+await check('unknown operation is rejected', async () => {
+  const { status } = await req('/api/etsy/operations/nope', { allowError: true });
+  assert(status === 404, `expected 404, got ${status}`);
+});
+
+console.log('\nSKU / inventory');
+await check('sku grid responds with discount column', async () => {
+  const { body } = await req('/api/skus');
+  assert(typeof body.total === 'number', 'no total');
+  assert(body.discountPercent === 30, `discount ${body.discountPercent}`);
+});
+await check('duplicate SKU detection', async () => { await req('/api/skus/duplicates'); });
+await check('reverse pricing helper', async () => {
+  const { body } = await req('/api/skus/price-for-target?target=70&percent=30');
+  assert(body.listPrice === 100, `expected 100, got ${body.listPrice}`);
+});
+await check('supply-link metadata round-trips', async () => {
+  const sku = `VERIFY-${Date.now()}`;
+  await req(`/api/skus/${sku}/meta`, { method: 'PUT', body: { supplyLink: 'https://supplier.example/x', supplyCost: 4.5 } });
+  const { body } = await req(`/api/skus/${sku}/meta`);
+  assert(body.supply_link === 'https://supplier.example/x', 'link not stored');
+  assert(body.supply_cost === 4.5, 'cost not stored');
+  await req(`/api/skus/${sku}/meta`, { method: 'DELETE' });
+});
+
+console.log('\nOrders');
+await check('order list responds', async () => { await req('/api/orders'); });
+await check('order counters', async () => {
+  const { body } = await req('/api/orders/counters');
+  for (const k of ['total', 'newOrders', 'notDone', 'unshipped', 'noTracking', 'alerts']) {
+    assert(typeof body[k] === 'number', `missing counter ${k}`);
+  }
+});
+await check('missing order returns 404', async () => {
+  const { status } = await req('/api/orders/999999999', { allowError: true });
+  assert(status === 404, `expected 404, got ${status}`);
+});
+
+console.log('\nTracking');
+await check('board and summary', async () => {
+  await req('/api/tracking');
+  const { body } = await req('/api/tracking/summary');
+  assert(body.staleDays === 4, `stale window should be 4, got ${body.staleDays}`);
+});
+await check('status vocabulary complete', async () => {
+  const { body } = await req('/api/tracking/statuses');
+  for (const s of ['pre_shipped', 'in_transit', 'delivered', 'exception']) {
+    assert(body.statuses.includes(s), `missing status ${s}`);
+  }
+  assert(body.labels.in_transit === 'On its way', 'in_transit label wrong');
+});
+await check('bulk paste parser accepts and rejects correctly', async () => {
+  const { body } = await req('/api/tracking/parse', {
+    method: 'POST',
+    body: { text: '3456789012, LP00432300758472, YunExpress\n3456789013\tYT2024001234567\nbroken line' },
+  });
+  assert(body.rows.length === 2, `expected 2 rows, got ${body.rows.length}`);
+  assert(body.errors.length === 1, `expected 1 error, got ${body.errors.length}`);
+  assert(body.rows[0].carrierName === 'YunExpress', 'carrier not parsed');
+});
+await check('tracking deep link uses the YunTrack template', async () => {
+  const { body } = await req('/api/tracking/LP00432300758472/link');
+  assert(body.url === 'https://www.yuntrack.com/parcelTracking?id=LP00432300758472', `got ${body.url}`);
+});
+await check('manual status + stale alert lifecycle', async () => {
+  const code = `VERIFY${Date.now()}`;
+  await req(`/api/tracking/${code}/status`, { method: 'POST', body: { status: 'in_transit', note: 'verification' } });
+  const { body } = await req(`/api/tracking/${code}`);
+  assert(body.status === 'in_transit', `status ${body.status}`);
+  assert(body.statusLabel === 'On its way', 'label wrong');
+  assert(body.trackingUrl.includes(code), 'link missing code');
+  const { body: events } = await req(`/api/tracking/${code}/events`);
+  assert(events.length >= 1, 'no event recorded');
+});
+
+console.log('\nAI');
+await check('provider status', async () => {
+  const { body } = await req('/api/ai/status');
+  for (const p of ['manus', 'anthropic', 'openai']) assert(p in body, `missing provider ${p}`);
+  assert(body.anthropic.supportsImages === true, 'anthropic should support images');
+  assert(body.manus.async === true, 'manus should be async');
+});
+await check('prompt library seeded', async () => {
+  const { body } = await req('/api/ai/prompts');
+  assert(body.prompts.length >= 8, `only ${body.prompts.length} prompts`);
+  for (const kind of ['reply', 'title', 'description', 'tags', 'listing', 'image', 'research']) {
+    assert(body.prompts.some((p) => p.kind === kind), `no prompt for kind ${kind}`);
+  }
+});
+await check('default prompt per kind', async () => {
+  const { body } = await req('/api/ai/prompts/default/reply');
+  assert(body?.is_default === 1, 'reply default missing');
+});
+await check('prompt create / default / delete', async () => {
+  const { body: created } = await req('/api/ai/prompts', {
+    method: 'POST', body: { name: `verify-${Date.now()}`, kind: 'reply', body: 'Test prompt body' },
+  });
+  assert(created.id, 'no id returned');
+  await req(`/api/ai/prompts/${created.id}/default`, { method: 'POST' });
+  const { body: after } = await req('/api/ai/prompts/default/reply');
+  assert(after.id === created.id, 'default did not move');
+  await req(`/api/ai/prompts/${created.id}`, { method: 'DELETE' });
+});
+await check('built-in prompts are protected', async () => {
+  const { body: list } = await req('/api/ai/prompts');
+  const builtin = list.prompts.find((p) => p.is_system === 1);
+  const { status } = await req(`/api/ai/prompts/${builtin.id}`, { method: 'DELETE', allowError: true });
+  assert(status === 400, `expected 400, got ${status}`);
+});
+await check('AI call without a key fails cleanly', async () => {
+  const { status, body } = await req('/api/ai/reply', { method: 'POST', body: { message: 'hello' }, allowError: true });
+  assert(status === 400, `expected 400, got ${status}`);
+  assert(/provider/i.test(body.error), `unhelpful error: ${body.error}`);
+});
+
+console.log('\nBulk engine');
+await check('action catalogue', async () => {
+  const { body } = await req('/api/bulk/actions');
+  assert(body.length >= 20, `only ${body.length} actions`);
+  for (const t of ['listing.activate', 'listing.price', 'sku.generate', 'order.tracking', 'ai.tags']) {
+    assert(body.some((a) => a.type === t), `missing action ${t}`);
+  }
+});
+await check('dry run produces a plan without calling Etsy', async () => {
+  const { body } = await req('/api/bulk/jobs', {
+    method: 'POST', body: { type: 'listing.activate', targets: [111, 222], dryRun: true },
+  });
+  assert(body.status === 'completed', `status ${body.status}`);
+  assert(body.items.length === 2, 'wrong item count');
+  assert(body.items[0].label.includes('111'), 'label missing target');
+});
+await check('unknown bulk action rejected', async () => {
+  const { status } = await req('/api/bulk/jobs', { method: 'POST', body: { type: 'nope', targets: [1] }, allowError: true });
+  assert(status === 400, `expected 400, got ${status}`);
+});
+
+console.log('\nExcel exports');
+for (const [name, path] of [['orders', '/api/exports/orders'], ['skus', '/api/exports/skus'],
+                            ['listings', '/api/exports/listings'], ['tracking', '/api/exports/tracking'],
+                            ['tracking template', '/api/exports/tracking-template']]) {
+  await check(`${name} workbook builds`, async () => {
+    const { body } = await req(path, { method: 'POST', body: {} });
+    assert(body.filename?.endsWith('.xlsx'), 'not an xlsx');
+    assert(body.bytes > 3000, `suspiciously small: ${body.bytes} bytes`);
+  });
+}
+await check('export download serves the file', async () => {
+  const { body: list } = await req('/api/exports');
+  const res = await fetch(`${BASE}/api/exports/download/${encodeURIComponent(list[0].filename)}`);
+  assert(res.ok, `download failed ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  assert(buf.length > 3000, 'empty download');
+  assert(buf[0] === 0x50 && buf[1] === 0x4b, 'not a zip/xlsx signature');
+});
+await check('path traversal on download is blocked', async () => {
+  const res = await fetch(`${BASE}/api/exports/download/..%2F..%2F.env`);
+  assert(res.status === 404, `expected 404, got ${res.status}`);
+});
+
+console.log('\nSettings');
+await check('settings expose sources and mask secrets', async () => {
+  const { body } = await req('/api/settings');
+  assert(body.settings.length >= 15, 'too few settings');
+  const secret = body.settings.find((s) => s.secret);
+  assert(secret, 'no secret setting defined');
+  assert(!secret.value || secret.value.includes('•'), 'secret not masked');
+});
+await check('setting writes and reads back', async () => {
+  await req('/api/settings', { method: 'PUT', body: { 'pricing.discount_percent': '25' } });
+  const { body } = await req('/api/skus');
+  assert(body.discountPercent === 25, `discount did not apply: ${body.discountPercent}`);
+  await req('/api/settings', { method: 'PUT', body: { 'pricing.discount_percent': '30' } });
+});
+
+console.log('\nGuards');
+await check('unauthenticated Etsy write is refused with guidance', async () => {
+  const { status, body } = await req('/api/listings', {
+    method: 'POST',
+    body: { title: 'x', description: 'y', price: 1, quantity: 1, who_made: 'i_did', when_made: 'made_to_order', taxonomy_id: 1 },
+    allowError: true,
+  });
+  assert(status === 401, `expected 401, got ${status}`);
+  assert(/connect/i.test(body.error), `unhelpful error: ${body.error}`);
+});
+await check('unknown route returns json 404', async () => {
+  const { status, body } = await req('/api/nope', { allowError: true });
+  assert(status === 404 && body.error, 'bad 404 shape');
+});
+
+console.log(`\n${'='.repeat(52)}`);
+console.log(`  ${pass} passed, ${fail} failed`);
+console.log('='.repeat(52));
+if (fail) {
+  console.log('\nFailures:');
+  for (const f of failures) console.log(`  - ${f}`);
+  process.exit(1);
+}
