@@ -1,0 +1,25 @@
+{
+  "name": "etsy-command-center",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Etsy Command Center - bulk listing/SKU management, order & tracking operations, AI studio and product research on the Etsy Open API v3.",
+  "workspaces": ["server", "web"],
+  "engines": { "node": ">=20.11" },
+  "scripts": {
+    "setup": "npm install && npm run codegen",
+    "codegen": "node scripts/generate-operations.mjs",
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "node --watch server/src/index.js",
+    "dev:web": "npm -w web run dev",
+    "build": "npm -w web run build",
+    "start": "cross-env NODE_ENV=production node server/src/index.js",
+    "package": "node scripts/package-dist.mjs",
+    "verify": "node scripts/verify.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "archiver": "^7.0.1"
+  }
+}
