@@ -4,7 +4,7 @@ import cookieParser from 'cookie-parser';
 import fs from 'node:fs';
 import path from 'node:path';
 import config, { ROOT } from './config.js';
-import { getDb } from './db/index.js';
+import { initDb } from './db/index.js';
 import { createLogger } from './lib/logger.js';
 import { AppError } from './lib/errors.js';
 import { OPERATION_COUNT } from './etsy/operations.generated.js';
@@ -109,7 +109,7 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   });
 });
 
-getDb();
+await initDb();
 
 const server = app.listen(config.port, config.host, () => {
   log.info(`Etsy Command Center on http://${config.host}:${config.port}`);

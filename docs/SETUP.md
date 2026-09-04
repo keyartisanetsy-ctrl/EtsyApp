@@ -2,12 +2,16 @@
 
 ## 1. Requirements
 
-- **Node.js 20.11 or newer** (`node --version`). Node 22 LTS is what this was built against.
-- A C toolchain for the SQLite driver. Most machines already have one; if
-  `npm install` fails compiling `better-sqlite3`, install build tools:
-  - macOS: `xcode-select --install`
-  - Debian/Ubuntu: `sudo apt install build-essential python3`
-  - Windows: `npm i -g windows-build-tools`, or use WSL
+- **Node.js 22.5 or newer** (`node --version`). Any newer version works,
+  including the latest non-LTS releases.
+- **Nothing else.** No compiler, no Python, no Visual Studio. The app uses the
+  SQLite built into Node (`node:sqlite`), so `npm install` never compiles
+  native code.
+
+  If you are on an older Node that lacks `node:sqlite`, the app falls back to
+  `better-sqlite3`, which is declared as an *optional* dependency — if it
+  cannot build, installation still succeeds and the app tells you to upgrade
+  Node rather than failing at install time.
 
 ## 2. Install
 
@@ -183,9 +187,10 @@ Either the token lacks the scope (Settings shows what was granted), or the
 endpoint is one Etsy gates behind an application review. The API explorer marks
 gated endpoints.
 
-**`better-sqlite3` fails to install**
-It compiles native code. Install the build tools listed above and retry, or
-`npm rebuild better-sqlite3`.
+**`better-sqlite3` fails to build during install**
+Harmless — it is optional and the app uses Node's built-in SQLite instead.
+The message is npm being noisy, not a failure. If the app genuinely will not
+start, `npm run doctor` will say so; the usual fix is upgrading to Node 22.5+.
 
 **Inventory update rejected**
 Etsy validates the whole product array. The app strips read-only fields and

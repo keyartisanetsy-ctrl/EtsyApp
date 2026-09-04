@@ -16,7 +16,11 @@ See [`docs/etsy-api-coverage.md`](docs/etsy-api-coverage.md) for the full table.
 ## Quick start
 
 The app runs on your own computer — nothing is hosted. Install
-[Node.js 20 or newer](https://nodejs.org) first, then:
+[Node.js 22.5 or newer](https://nodejs.org) first, then:
+
+No build tools are needed — no Visual Studio, no Python, no compiler. The
+database is the SQLite that ships inside Node itself, so there is nothing to
+compile at install time.
 
 **Windows** — double-click `START-WINDOWS.bat`
 **macOS / Linux** — double-click `START-MAC-LINUX.command`
@@ -165,7 +169,10 @@ web/src/      React + Vite; 14 screens
 scripts/      generate-operations.mjs, verify.mjs, demo-data.mjs, package-dist.mjs
 ```
 
-**Storage.** Everything is local: SQLite at `data/etsy-command-center.db`. Etsy
+**Storage.** Everything is local: SQLite at `data/etsy-command-center.db`, via
+Node's built-in `node:sqlite`. `better-sqlite3` is an optional fallback for
+older Node builds; because it is optional, a machine without a C++ toolchain
+still installs cleanly. Etsy
 mirrors into it so the grids and exports are instant and work offline; Etsy stays
 the source of truth and every write goes straight to the API.
 

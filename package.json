@@ -9,7 +9,7 @@
     "web"
   ],
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22.5"
   },
   "scripts": {
     "setup": "npm install && npm run codegen",

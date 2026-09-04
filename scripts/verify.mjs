@@ -52,6 +52,52 @@ await check('auth status', async () => {
   assert(Array.isArray(body.availableScopes) && body.availableScopes.length === 12, 'expected 12 OAuth scopes');
 });
 
+await check('sqlite driver resolves without a native build', async () => {
+  const d = await import('../server/src/db/driver.js');
+  // The kind is only known once a database has actually been opened.
+  const db = await d.openDatabase(':memory:');
+  db.exec('SELECT 1');
+  assert(d.driverKind(), 'no driver resolved');
+  console.log(`       (driver: ${d.driverKind()})`);
+});
+await check('transactions commit, roll back, and nest correctly', async () => {
+  const { openDatabase } = await import('../server/src/db/driver.js');
+  const db = await openDatabase(':memory:');
+  db.exec('CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)');
+  const ins = db.prepare('INSERT INTO t (v) VALUES (?)');
+  const count = () => db.prepare('SELECT COUNT(*) c FROM t').get().c;
+
+  db.transaction(() => { ins.run('a'); ins.run('b'); })();
+  assert(count() === 2, `commit lost rows: ${count()}`);
+
+  try { db.transaction(() => { ins.run('c'); throw new Error('x'); })(); } catch { /* expected */ }
+  assert(count() === 2, `rollback did not discard: ${count()}`);
+
+  // An inner failure must not destroy the outer transaction's work.
+  db.transaction(() => {
+    ins.run('d');
+    try { db.transaction(() => { ins.run('e'); throw new Error('x'); })(); } catch { /* expected */ }
+  })();
+  assert(count() === 3, `nested savepoint wrong: ${count()}`);
+
+  try {
+    db.transaction(() => { ins.run('f'); db.transaction(() => ins.run('g'))(); throw new Error('x'); })();
+  } catch { /* expected */ }
+  assert(count() === 3, `outer rollback did not unwind inner: ${count()}`);
+
+  assert(db.transaction((x, y) => x + y)(2, 3) === 5, 'transaction did not pass args/return');
+});
+await check('driver coerces values sqlite cannot bind', async () => {
+  const { openDatabase } = await import('../server/src/db/driver.js');
+  const db = await openDatabase(':memory:');
+  db.exec('CREATE TABLE c(b, u, d)');
+  db.prepare('INSERT INTO c VALUES (?,?,?)').run(true, undefined, new Date('2024-01-01T00:00:00Z'));
+  const row = db.prepare('SELECT * FROM c').get();
+  assert(row.b === 1, 'boolean not coerced to 1');
+  assert(row.u === null, 'undefined not coerced to null');
+  assert(String(row.d).startsWith('2024-01-01'), 'Date not coerced to ISO');
+});
+
 console.log('\nEtsy operation catalogue');
 await check('all 105 operations exposed', async () => {
   const { body } = await req('/api/etsy/operations');

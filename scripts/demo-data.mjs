@@ -5,9 +5,9 @@
  *   node scripts/demo-data.mjs         load
  *   node scripts/demo-data.mjs --clear remove it again
  */
-import { getDb } from '../server/src/db/index.js';
+import { initDb } from '../server/src/db/index.js';
 
-const db = getDb();
+const db = await initDb();
 const clear = process.argv.includes('--clear');
 
 // Demo rows use ids in a reserved band so they are easy to remove cleanly.

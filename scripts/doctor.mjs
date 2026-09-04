@@ -21,10 +21,10 @@ const warn = (m) => { console.log(`  \x1b[33mnote\x1b[0m  ${m}`); notes.push(m);
 console.log('\nEtsy Command Center - checking your setup\n');
 
 // 1. Node version -----------------------------------------------------------
-const major = Number(process.versions.node.split('.')[0]);
-if (major >= 20) ok(`Node.js ${process.versions.node}`);
-else bad(`Node.js ${process.versions.node} is too old (need 20 or newer)`,
-         'Install the LTS build from https://nodejs.org then run this again.');
+const [major, minor] = process.versions.node.split('.').map(Number);
+if (major > 22 || (major === 22 && minor >= 5)) ok(`Node.js ${process.versions.node}`);
+else bad(`Node.js ${process.versions.node} is too old (need 22.5 or newer)`,
+         'Install the current build from https://nodejs.org then run this again.');
 
 // 2. Dependencies -----------------------------------------------------------
 if (!fs.existsSync(path.join(root, 'node_modules'))) {
@@ -32,14 +32,15 @@ if (!fs.existsSync(path.join(root, 'node_modules'))) {
 } else {
   ok('Dependencies installed');
 
-  // better-sqlite3 is native: a mismatched build is a common failure.
+  // SQLite comes from Node itself; better-sqlite3 is only a fallback.
   try {
-    const require = (await import('node:module')).createRequire(import.meta.url);
-    require('better-sqlite3');
-    ok('SQLite driver loads');
+    const { openDatabase, driverKind } = await import('../server/src/db/driver.js');
+    const probe = await openDatabase(':memory:');
+    probe.exec('SELECT 1');
+    ok(`SQLite driver works (${driverKind()})`);
   } catch (err) {
-    bad(`SQLite driver will not load: ${err.message.split('\n')[0]}`,
-        'Run:  npm rebuild better-sqlite3');
+    bad(`No SQLite driver: ${err.message.split('\n')[0]}`,
+        'Install Node.js 22.5 or newer from https://nodejs.org');
   }
 }
 

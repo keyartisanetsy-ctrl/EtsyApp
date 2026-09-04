@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Database from 'better-sqlite3';
+import { openDatabase, driverKind } from './driver.js';
 import config from '../config.js';
 import { createLogger } from '../lib/logger.js';
 import { seal, open as unseal } from '../lib/crypto.js';
@@ -11,15 +11,22 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 let db;
 
-export function getDb() {
+/** Opening the driver is async, so the app initialises it once at boot and
+ *  every later getDb() call is synchronous, as the rest of the code expects. */
+export async function initDb() {
   if (db) return db;
   fs.mkdirSync(path.dirname(config.dbFile), { recursive: true });
-  db = new Database(config.dbFile);
+  db = await openDatabase(config.dbFile);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(fs.readFileSync(path.join(here, 'schema.sql'), 'utf8'));
   seedDefaults(db);
-  log.info(`ready at ${config.dbFile}`);
+  log.info(`ready at ${config.dbFile} (${driverKind()})`);
+  return db;
+}
+
+export function getDb() {
+  if (!db) throw new Error('Database is not initialised yet - call initDb() during startup.');
   return db;
 }
 
