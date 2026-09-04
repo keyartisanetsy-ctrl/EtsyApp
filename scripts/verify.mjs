@@ -358,6 +358,22 @@ await check('setting writes and reads back', async () => {
   await req('/api/settings', { method: 'PUT', body: { 'pricing.discount_percent': '30' } });
 });
 
+await check('opening a browser never crashes the server', async () => {
+  const { openBrowser, shouldOpenBrowser } = await import('../server/src/lib/open-browser.js');
+  // On a machine with no opener installed this must degrade quietly. A missing
+  // binary arrives as an async 'error' event, which would otherwise be
+  // unhandled and kill the process.
+  const result = openBrowser('http://127.0.0.1:9/should-not-open');
+  assert(result === true, 'openBrowser should report that it tried');
+  await new Promise((r) => setTimeout(r, 400)); // let any spawn error fire
+  assert(shouldOpenBrowser() === false, 'browser opening should be opt-in, not default');
+  process.env.OPEN_BROWSER = '1';
+  assert(shouldOpenBrowser() === true, 'OPEN_BROWSER=1 should enable it');
+  process.env.OPEN_BROWSER = '0';
+  assert(shouldOpenBrowser() === false, 'OPEN_BROWSER=0 should disable it');
+  delete process.env.OPEN_BROWSER;
+});
+
 console.log('\nGuards');
 await check('unauthenticated Etsy write is refused with guidance', async () => {
   const { status, body } = await req('/api/listings', {

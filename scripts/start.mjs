@@ -18,7 +18,8 @@ if (major < 20) {
 }
 
 if (!fs.existsSync(path.join(root, 'node_modules'))) {
-  console.log('First run: installing dependencies (a few minutes)...\n');
+  console.log('First run: downloading what the app needs.');
+  console.log('This takes a minute or two. Please wait - it is not frozen.\n');
   run('npm install');
 }
 
@@ -28,9 +29,14 @@ if (!fs.existsSync(path.join(root, 'server/src/etsy/operations.generated.js'))) 
 }
 
 if (!fs.existsSync(path.join(root, 'web/dist/index.html'))) {
-  console.log('Building the web interface (first run only)...\n');
+  console.log('\nBuilding the interface (first run only)...\n');
   run('npm run build');
 }
 
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
+// The server opens the browser from its listen callback, once the port is
+// really accepting connections. Opt out with OPEN_BROWSER=0.
+process.env.OPEN_BROWSER = process.env.OPEN_BROWSER ?? '1';
+
+console.log('Starting the server...');
 await import('../server/src/index.js');

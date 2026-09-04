@@ -19,11 +19,14 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo Starting... the first run installs things and takes a few minutes.
+echo Please wait. The browser opens BY ITSELF once the app is ready.
+echo Do not open it yourself - too early and it will say
+echo "site cannot be reached".
+echo.
+echo The first run downloads what the app needs (a minute or two).
 echo Leave this window OPEN while you use the app.
 echo.
 
-start "" http://127.0.0.1:4317
 call npm start
 
 echo.

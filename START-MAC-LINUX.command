@@ -17,12 +17,13 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Starting... the first run installs things and takes a few minutes."
+echo "Please wait. The browser opens BY ITSELF once the app is ready."
+echo "Do not open it yourself - too early and it will say"
+echo "\"site cannot be reached\"."
+echo
+echo "The first run downloads what the app needs (a minute or two)."
 echo "Leave this window OPEN while you use the app."
 echo
-
-( sleep 6; command -v open >/dev/null && open http://127.0.0.1:4317 \
-  || (command -v xdg-open >/dev/null && xdg-open http://127.0.0.1:4317) ) >/dev/null 2>&1 &
 
 npm start
 

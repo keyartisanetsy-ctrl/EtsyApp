@@ -25,6 +25,7 @@ import exportRoutes from './routes/exports.js';
 import etsyRoutes from './routes/etsy.js';
 
 import { startScheduler } from './scheduler.js';
+import { openBrowser, shouldOpenBrowser } from './lib/open-browser.js';
 
 const log = createLogger('server');
 const app = express();
@@ -111,10 +112,37 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 
 await initDb();
 
+const url = `http://${config.host}:${config.port}`;
+
 const server = app.listen(config.port, config.host, () => {
-  log.info(`Etsy Command Center on http://${config.host}:${config.port}`);
+  log.info(`Etsy Command Center on ${url}`);
   log.info(`${OPERATION_COUNT} Etsy operations available | data: ${config.dataDir}`);
   startScheduler();
+
+  // Only now is the port actually accepting connections, so this is the
+  // earliest moment a browser will get a page instead of a refusal.
+  if (shouldOpenBrowser()) {
+    log.info('opening your browser...');
+    openBrowser(url);
+  }
+  process.stdout.write(
+    `\n  Ready. Open  ${url}\n`
+    + '  Keep this window open while you use the app.\n\n',
+  );
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    log.error(`Port ${config.port} is already in use.`);
+    process.stdout.write(
+      `\n  Something else is using port ${config.port}.\n`
+      + `  The app may already be running - try opening ${url} first.\n`
+      + '  Otherwise start it on another port:  PORT=4400 npm start\n\n',
+    );
+  } else {
+    log.error(`Server could not start: ${err.message}`);
+  }
+  process.exit(1);
 });
 
 const shutdown = (signal) => {
