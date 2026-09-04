@@ -39,7 +39,8 @@ for (const dir of ['server', 'web/src', 'web/dist', 'scripts', 'docs']) {
   archive.directory(path.join(root, dir), dir);
 }
 for (const file of ['package.json', 'package-lock.json', 'README.md', '.env.example', '.gitignore',
-                    'web/package.json', 'web/index.html', 'web/vite.config.js']) {
+                    'web/package.json', 'web/index.html', 'web/vite.config.js',
+                    'START-WINDOWS.bat', 'START-MAC-LINUX.command']) {
   try { archive.file(path.join(root, file), { name: file }); } catch { /* optional */ }
 }
 
@@ -52,15 +53,22 @@ archive.append(
   `Etsy Command Center v${pkg.version}
 Packaged ${new Date().toISOString()}
 
-Run:
+Easiest way to run it:
+  Windows  -> double-click START-WINDOWS.bat
+  Mac      -> double-click START-MAC-LINUX.command
+  Linux    -> double-click (or run) START-MAC-LINUX.command
+
+Or from a terminal:
   ${withDeps ? 'npm start' : 'npm install && npm run build && npm start'}
 
-Then open http://127.0.0.1:4317 and connect your shop under Settings.
-${withDeps ? `
-node_modules is bundled, but better-sqlite3 is a native module compiled for the
-packaging machine. If the server fails to start with a MODULE_VERSION or
-invalid ELF header error, run: npm rebuild better-sqlite3
-` : ''}
+The app opens your browser automatically once it's ready, at
+http://localhost:4317. Connect your shop under Settings — the redirect URI
+shown there is what you paste into your Etsy app's dashboard.
+
+Storage uses Node's built-in SQLite driver, so nothing needs to be compiled
+on your machine. (better-sqlite3 is only an optional fallback dependency;
+if it fails to install that's fine and can be ignored.)
+
 Docs: README.md, docs/SETUP.md, docs/etsy-api-coverage.md
 `,
   { name: 'READ-ME-FIRST.txt' },
