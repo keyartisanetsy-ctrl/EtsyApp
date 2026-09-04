@@ -59,8 +59,11 @@ Easiest way to run it:
   Linux    -> double-click (or run) START-MAC-LINUX.command
 
 Or from a terminal:
-  ${withDeps ? 'npm start' : 'npm install && npm run build && npm start'}
-
+  npm start
+${withDeps ? '' : `
+First run downloads what the app needs (needs internet once) — this can
+take a minute or two, it is not frozen. After that it starts offline.
+`}
 The app opens your browser automatically once it's ready, at
 http://localhost:4317. Connect your shop under Settings — the redirect URI
 shown there is what you paste into your Etsy app's dashboard.
