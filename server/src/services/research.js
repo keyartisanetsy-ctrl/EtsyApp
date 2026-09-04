@@ -8,6 +8,7 @@
  * the AI pass only interprets numbers it is given.
  */
 import { call, callAll } from '../etsy/client.js';
+import { activeShopId } from '../etsy/shop.js';
 import { getDb, json, parse } from '../db/index.js';
 import { money } from '../lib/money.js';
 import { badRequest } from '../lib/errors.js';
@@ -112,8 +113,8 @@ export async function researchKeyword({
   };
 
   const db = getDb();
-  const info = db.prepare('INSERT INTO research_runs (keyword, taxonomy_id, scope, result_count, metrics) VALUES (?,?,?,?,?)')
-    .run(keyword || '', taxonomyId ?? null, sortOn, rows.length, json(metrics));
+  const info = db.prepare('INSERT INTO research_runs (shop_id, keyword, taxonomy_id, scope, result_count, metrics) VALUES (?,?,?,?,?,?)')
+    .run(activeShopId(), keyword || '', taxonomyId ?? null, sortOn, rows.length, json(metrics));
   const runId = info.lastInsertRowid;
 
   const ins = db.prepare(`INSERT INTO research_results (run_id, listing_id, title, shop_name, price_amount,
@@ -155,7 +156,7 @@ export async function benchmarkAgainstKeyword(keyword, { sample = 100 } = {}) {
   if (!research.metrics) return research;
 
   const mine = getDb().prepare(`SELECT listing_id, title, price_amount, price_divisor, price_currency, views, num_favorers, tags
-    FROM listings WHERE state = 'active'`).all();
+    FROM listings WHERE state = 'active' AND shop_id IS ?`).all(activeShopId());
 
   const marketTags = new Set(research.metrics.topTags.slice(0, 20).map((t) => t.tag));
   const rows = mine.map((l) => {
@@ -180,12 +181,13 @@ export async function benchmarkAgainstKeyword(keyword, { sample = 100 } = {}) {
 }
 
 export const listRuns = (limit = 50) =>
-  getDb().prepare('SELECT id, keyword, taxonomy_id, result_count, created_at, summary IS NOT NULL AS has_summary FROM research_runs ORDER BY id DESC LIMIT ?')
-    .all(limit);
+  getDb().prepare(`SELECT id, keyword, taxonomy_id, result_count, created_at, summary IS NOT NULL AS has_summary
+    FROM research_runs WHERE shop_id IS ? ORDER BY id DESC LIMIT ?`)
+    .all(activeShopId(), limit);
 
 export function getRun(id) {
   const db = getDb();
-  const run = db.prepare('SELECT * FROM research_runs WHERE id = ?').get(id);
+  const run = db.prepare('SELECT * FROM research_runs WHERE id = ? AND shop_id IS ?').get(id, activeShopId());
   if (!run) return null;
   return {
     ...run,

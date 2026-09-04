@@ -450,6 +450,31 @@ await check('opening a browser never crashes the server', async () => {
   delete process.env.OPEN_BROWSER;
 });
 
+await check('the default redirect URI uses a hostname, not an IP literal', async () => {
+  // Etsy's own app dashboard rejects IP-literal redirect URIs outright
+  // ("IP addresses are not allowed", e.g. 127.0.0.1) but accepts a hostname.
+  const { body } = await req('/api/auth/status');
+  const host = new URL(body.redirectUri).hostname;
+  assert(!/^\d{1,3}(\.\d{1,3}){3}$/.test(host), `redirect URI host "${host}" is an IP literal - Etsy will refuse it`);
+  assert(host === 'localhost', `expected "localhost", got "${host}"`);
+});
+await check('connecting a shop writes exactly one account row (no orphan)', async () => {
+  // Regression test for a real bug: the old two-step save (persist with no
+  // shop_id, then insert again once resolved) left a permanent orphan row
+  // behind on every single connection. saveToken must now be atomic.
+  const { setSetting } = await import('../server/src/db/index.js');
+  const { saveToken, listAccounts, removeAccount } = await import('../server/src/etsy/client.js');
+  const before = listAccounts().length;
+  saveToken({
+    access_token: '910001.faketoken', refresh_token: 'fake', expires_in: 3600,
+    user_id: 910001, shop_id: 910001, shop_name: 'Verify Atomic Shop', scopes: 'listings_r',
+  });
+  const after = listAccounts();
+  assert(after.length === before + 1, `expected exactly 1 new account, got ${after.length - before}`);
+  assert(!after.some((a) => a.shopId == null), 'an orphan shop_id=NULL row was created');
+  removeAccount(910001);
+});
+
 console.log('\nGuards');
 await check('unauthenticated Etsy write is refused with guidance', async () => {
   const { status, body } = await req('/api/listings', {

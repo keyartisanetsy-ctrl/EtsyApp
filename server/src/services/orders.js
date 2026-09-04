@@ -58,7 +58,7 @@ export function listOrders({
     LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
     LEFT JOIN (SELECT receipt_id, MAX(id) AS sid FROM shipments GROUP BY receipt_id) ls ON ls.receipt_id = r.receipt_id
     LEFT JOIN shipments s ON s.id = ls.sid
-    LEFT JOIN tracking t ON t.tracking_code = s.tracking_code
+    LEFT JOIN tracking t ON t.tracking_code = s.tracking_code AND t.shop_id IS s.shop_id
     ${clause}`;
 
   const rows = db.prepare(`
@@ -141,7 +141,7 @@ export function getOrder(receiptId) {
   const shipments = db.prepare(`
     SELECT s.*, t.status, t.status_detail, t.last_event_at, t.last_event_text, t.days_since_move,
            t.is_stale, t.alert_reason, t.event_count
-    FROM shipments s LEFT JOIN tracking t ON t.tracking_code = s.tracking_code
+    FROM shipments s LEFT JOIN tracking t ON t.tracking_code = s.tracking_code AND t.shop_id IS s.shop_id
     WHERE s.receipt_id = ? ORDER BY s.id DESC`).all(receiptId);
 
   return {

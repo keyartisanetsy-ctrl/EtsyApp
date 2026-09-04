@@ -54,7 +54,8 @@ else bad('Web interface is not built (the browser would get an API-only page)', 
 
 // 5. Port availability ------------------------------------------------------
 const port = Number(process.env.PORT) || 4317;
-const host = process.env.HOST || '127.0.0.1';
+const host = process.env.HOST || '127.0.0.1'; // actual bind-check address
+const displayHost = process.env.PUBLIC_HOST || 'localhost'; // what the user opens / registers with Etsy
 const portFree = await new Promise((resolve) => {
   const srv = net.createServer();
   srv.once('error', (e) => resolve(e.code !== 'EADDRINUSE'));
@@ -62,7 +63,7 @@ const portFree = await new Promise((resolve) => {
   srv.listen(port, host);
 });
 if (portFree) ok(`Port ${port} is free`);
-else warn(`Port ${port} is already in use — the app may already be running at http://${host}:${port}, `
+else warn(`Port ${port} is already in use — the app may already be running at http://${displayHost}:${port}, `
         + `or another program has the port. Start on a different one with:  PORT=4400 npm start`);
 
 // 6. Writable data directory ------------------------------------------------
@@ -79,7 +80,7 @@ try {
 console.log('');
 if (!problems.length) {
   console.log('\x1b[32mEverything checks out.\x1b[0m');
-  console.log(`Start the app with:  npm start      then open  http://${host}:${port}\n`);
+  console.log(`Start the app with:  npm start      then open  http://${displayHost}:${port}\n`);
   process.exit(0);
 }
 

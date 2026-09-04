@@ -71,22 +71,27 @@ export async function exchangeCode({ code, state }) {
 
   // Etsy encodes the user id as the prefix of the access token: "<user_id>.<token>".
   const userId = Number(String(body.access_token).split('.')[0]) || null;
-  saveToken({ ...body, user_id: userId, scopes: row.scopes });
 
-  // Resolve the shop straight away so the rest of the app has a shop_id.
+  // Resolve which shop this token belongs to BEFORE writing anything. Doing
+  // this with the freshly-exchanged token directly (accessToken:) rather than
+  // saving first and looking it up afterwards means exactly one row is ever
+  // written per connection -- the earlier two-step version left a permanent
+  // orphan row behind (shop_id NULL) on every single connect, which could
+  // also get silently reused by the NEXT shop's connection.
   let shop = null;
   try {
-    const me = await call('getMe', {});
-    shop = await call('getShopByOwnerUserId', { user_id: me.user_id ?? userId });
+    const me = await call('getMe', {}, { accessToken: body.access_token });
+    shop = await call('getShopByOwnerUserId', { user_id: me.user_id ?? userId }, { accessToken: body.access_token });
   } catch (err) {
     log.warn(`connected, but shop lookup failed: ${err.message}`);
   }
 
   const shopId = shop?.shop_id ?? shop?.results?.[0]?.shop_id ?? null;
   const shopName = shop?.shop_name ?? shop?.results?.[0]?.shop_name ?? null;
-  if (shopId) saveToken({ ...body, user_id: userId, shop_id: shopId, shop_name: shopName, scopes: row.scopes });
 
-  log.info(`connected shop ${shopName ?? '(unknown)'} (${shopId ?? 'no id'})`);
+  saveToken({ ...body, user_id: userId, shop_id: shopId, shop_name: shopName, scopes: row.scopes });
+
+  log.info(`connected shop ${shopName ?? '(unknown)'} (${shopId ?? 'no id - shop lookup failed, reconnect to retry'})`);
   return { userId, shopId, shopName, scopes: row.scopes };
 }
 

@@ -60,7 +60,7 @@ export function getCredentials() {
     sharedSecret,
     apiKeyHeader: buildApiKeyHeader(keystring, sharedSecret),
     redirectUri: resolveSetting('etsy.redirect_uri', config.etsy.redirectUri) ||
-      `http://127.0.0.1:${config.port}/api/auth/callback`,
+      `http://${config.publicHost}:${config.port}/api/auth/callback`,
   };
 }
 
@@ -258,7 +258,7 @@ const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
  */
 export async function request(pathname, {
   method = 'GET', query, body, bodyKind = 'json', headers = {},
-  auth = true, operationId, raw = false,
+  auth = true, operationId, raw = false, accessToken = null,
 } = {}) {
   const { keystring, sharedSecret, apiKeyHeader } = getCredentials();
   if (!keystring) throw unauthorized('Etsy API keystring is not configured. Add it in Settings.');
@@ -282,7 +282,9 @@ export async function request(pathname, {
     const started = Date.now();
     const h = { 'x-api-key': apiKeyHeader, Accept: 'application/json', ...headers };
 
-    if (auth) {
+    if (accessToken) {
+      h.Authorization = `Bearer ${accessToken}`;
+    } else if (auth) {
       const token = await ensureFreshToken();
       h.Authorization = `Bearer ${token.access_token}`;
     }
@@ -398,9 +400,11 @@ export async function call(operationId, args = {}, opts = {}) {
   if (opts.body !== undefined) body = opts.body;
 
   // Some operations accept a token but do not require one; use it when present.
-  const auth = opts.auth ?? (operationNeedsAuth(op) || !!getStoredToken());
+  const auth = opts.auth ?? (operationNeedsAuth(op) || opts.accessToken || !!getStoredToken());
 
-  return request(pathname, { method: op.method, query, body, bodyKind, auth, operationId, raw: opts.raw });
+  return request(pathname, {
+    method: op.method, query, body, bodyKind, auth, operationId, raw: opts.raw, accessToken: opts.accessToken,
+  });
 }
 
 /**

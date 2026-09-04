@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import { asyncRoute, int, required } from '../lib/http.js';
 import { call, callAll } from '../etsy/client.js';
-import { requireShopId, currentShop } from '../etsy/shop.js';
+import { requireShopId, currentShop, activeShopId } from '../etsy/shop.js';
 import { syncShopSections } from '../services/sync.js';
 import { getDb } from '../db/index.js';
 
@@ -16,7 +16,9 @@ router.get('/me', asyncRoute(async (req, res) => res.json({ ...currentShop(), us
 
 // ----------------------------------------------------------------- sections
 router.get('/sections', asyncRoute(async (req, res) => {
-  if (req.query.local) return res.json(getDb().prepare('SELECT * FROM shop_sections ORDER BY rank').all());
+  if (req.query.local) {
+    return res.json(getDb().prepare('SELECT * FROM shop_sections WHERE shop_id IS ? ORDER BY rank').all(activeShopId()));
+  }
   res.json(await call('getShopSections', { shop_id: shop() }));
 }));
 router.post('/sections/sync', asyncRoute(async (req, res) => res.json({ synced: await syncShopSections() })));

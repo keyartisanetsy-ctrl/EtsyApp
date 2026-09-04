@@ -26,6 +26,7 @@ import etsyRoutes from './routes/etsy.js';
 
 import { startScheduler } from './scheduler.js';
 import { openBrowser, shouldOpenBrowser } from './lib/open-browser.js';
+import http from 'node:http';
 
 const log = createLogger('server');
 const app = express();
@@ -112,15 +113,28 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 
 await initDb();
 
-const url = `http://${config.host}:${config.port}`;
+// The URL shown to the user, and the one registered with Etsy, uses a
+// hostname ("localhost") because Etsy's app dashboard rejects an IP-literal
+// redirect URI outright ("IP addresses are not allowed"). But which loopback
+// address "localhost" actually resolves to varies by OS -- some Windows
+// configurations prefer the IPv6 ::1 -- so if the server only bound the IPv4
+// address a user could get ERR_CONNECTION_REFUSED depending on their machine.
+// When the bind host is the untouched default, listen on both loopback
+// addresses; a custom HOST (LAN exposure, a container, etc.) is honoured as a
+// single explicit bind instead.
+const url = `http://${config.publicHost}:${config.port}`;
+const usingDefaultHost = config.host === '127.0.0.1' && !process.env.HOST;
 
-const server = app.listen(config.port, config.host, () => {
+const primary = http.createServer(app);
+const servers = [primary];
+
+function announceReady() {
   log.info(`Etsy Command Center on ${url}`);
   log.info(`${OPERATION_COUNT} Etsy operations available | data: ${config.dataDir}`);
   startScheduler();
 
-  // Only now is the port actually accepting connections, so this is the
-  // earliest moment a browser will get a page instead of a refusal.
+  // Only now is at least one bind actually accepting connections, so this is
+  // the earliest moment a browser will get a page instead of a refusal.
   if (shouldOpenBrowser()) {
     log.info('opening your browser...');
     openBrowser(url);
@@ -129,9 +143,14 @@ const server = app.listen(config.port, config.host, () => {
     `\n  Ready. Open  ${url}\n`
     + '  Keep this window open while you use the app.\n\n',
   );
+}
+
+let announced = false;
+primary.listen(config.port, config.host, () => {
+  if (!announced) { announced = true; announceReady(); }
 });
 
-server.on('error', (err) => {
+primary.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     log.error(`Port ${config.port} is already in use.`);
     process.stdout.write(
@@ -139,15 +158,30 @@ server.on('error', (err) => {
       + `  The app may already be running - try opening ${url} first.\n`
       + '  Otherwise start it on another port:  PORT=4400 npm start\n\n',
     );
+    process.exit(1);
   } else {
-    log.error(`Server could not start: ${err.message}`);
+    log.error(`Server could not start on ${config.host}: ${err.message}`);
+    process.exit(1);
   }
-  process.exit(1);
 });
+
+if (usingDefaultHost) {
+  const secondary = http.createServer(app);
+  servers.push(secondary);
+  secondary.listen(config.port, '::1', () => {
+    if (!announced) { announced = true; announceReady(); }
+  });
+  // IPv6 loopback can be unavailable (disabled stack, some containers) --
+  // that is not an error worth stopping for, since the primary IPv4 bind
+  // still serves "localhost" wherever it resolves to 127.0.0.1.
+  secondary.on('error', (err) => {
+    log.debug(`IPv6 loopback bind skipped: ${err.message}`);
+  });
+}
 
 const shutdown = (signal) => {
   log.info(`${signal} received, shutting down`);
-  server.close(() => process.exit(0));
+  Promise.all(servers.map((s) => new Promise((resolve) => s.close(resolve)))).then(() => process.exit(0));
   setTimeout(() => process.exit(0), 5000).unref();
 };
 process.on('SIGTERM', () => shutdown('SIGTERM'));

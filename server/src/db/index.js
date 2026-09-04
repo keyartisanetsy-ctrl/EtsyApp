@@ -5,7 +5,7 @@ import { openDatabase, driverKind } from './driver.js';
 import config from '../config.js';
 import { createLogger } from '../lib/logger.js';
 import { seal, open as unseal } from '../lib/crypto.js';
-import { migrate } from './migrate.js';
+import { migrateSchema, migrateData } from './migrate.js';
 
 const log = createLogger('db');
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -20,8 +20,14 @@ export async function initDb() {
   db = await openDatabase(config.dbFile);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  // migrateSchema runs first: schema.sql defines indexes on columns
+  // (tracking.shop_id, etc.) that an upgrading database may not have yet, so
+  // the shape has to be fixed up before schema.sql's CREATE INDEX statements
+  // run against it. migrateData runs after, once schema.sql guarantees
+  // etsy_accounts exists (created fresh here on someone's very first run).
+  migrateSchema(db);
   db.exec(fs.readFileSync(path.join(here, 'schema.sql'), 'utf8'));
-  migrate(db);
+  migrateData(db);
   seedDefaults(db);
   log.info(`ready at ${config.dbFile} (${driverKind()})`);
   return db;

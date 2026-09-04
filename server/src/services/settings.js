@@ -11,7 +11,7 @@ import { maskSecret } from '../lib/crypto.js';
 export const SETTING_DEFS = {
   'etsy.keystring':        { env: config.etsy.keystring, def: '', secret: true, label: 'Etsy keystring' },
   'etsy.shared_secret':    { env: config.etsy.sharedSecret, def: '', secret: true, label: 'Etsy shared secret' },
-  'etsy.redirect_uri':     { env: config.etsy.redirectUri, def: `http://127.0.0.1:${config.port}/api/auth/callback`, label: 'OAuth redirect URI' },
+  'etsy.redirect_uri':     { env: config.etsy.redirectUri, def: `http://${config.publicHost}:${config.port}/api/auth/callback`, label: 'OAuth redirect URI' },
 
   'ai.provider':           { env: config.ai.defaultProvider, def: 'manus', label: 'Default AI provider',
     options: [

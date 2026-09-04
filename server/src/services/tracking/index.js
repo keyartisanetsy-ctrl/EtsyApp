@@ -63,17 +63,17 @@ export async function addTracking(entries, { pushToEtsy = true, noteToBuyer = ''
     if (dryRun) { results.push({ ...record, status: 'dry-run' }); continue; }
 
     try {
-      db.prepare(`INSERT INTO shipments (receipt_id, tracking_code, carrier_name, note_to_buyer, send_bcc)
-                  VALUES (?,?,?,?,?)
+      const shopIdForEntry = activeShopId();
+      db.prepare(`INSERT INTO shipments (shop_id, receipt_id, tracking_code, carrier_name, note_to_buyer, send_bcc)
+                  VALUES (?,?,?,?,?,?)
                   ON CONFLICT(receipt_id, tracking_code) DO UPDATE SET carrier_name = excluded.carrier_name`)
-        .run(entry.receiptId, entry.trackingCode, carrier, noteToBuyer || null, sendBcc ? 1 : 0);
+        .run(shopIdForEntry, entry.receiptId, entry.trackingCode, carrier, noteToBuyer || null, sendBcc ? 1 : 0);
 
-      db.prepare(`INSERT INTO tracking (tracking_code, receipt_id, shop_id, carrier_name, provider, status)
+      db.prepare(`INSERT INTO tracking (shop_id, tracking_code, receipt_id, carrier_name, provider, status)
                   VALUES (?,?,?,?,?,'pre_shipped')
-                  ON CONFLICT(tracking_code) DO UPDATE SET receipt_id = excluded.receipt_id,
-                    shop_id = COALESCE(excluded.shop_id, tracking.shop_id),
+                  ON CONFLICT(shop_id, tracking_code) DO UPDATE SET receipt_id = excluded.receipt_id,
                     carrier_name = COALESCE(excluded.carrier_name, tracking.carrier_name)`)
-        .run(entry.trackingCode, entry.receiptId, activeShopId(), carrier, readSetting('tracking.provider'));
+        .run(shopIdForEntry, entry.trackingCode, entry.receiptId, carrier, readSetting('tracking.provider'));
 
       if (pushToEtsy) {
         const body = { tracking_code: entry.trackingCode };
@@ -142,18 +142,19 @@ const fingerprint = (e) =>
 export function applyParcel(parcel, { staleDays = getStaleDays() } = {}) {
   const db = getDb();
   const code = parcel.code;
-  const existing = db.prepare('SELECT * FROM tracking WHERE tracking_code = ?').get(code);
+  const shopId = activeShopId();
+  const existing = db.prepare('SELECT * FROM tracking WHERE shop_id IS ? AND tracking_code = ?').get(shopId, code);
 
   const insertEvent = db.prepare(`INSERT OR IGNORE INTO tracking_events
-    (tracking_code, event_at, description, location, status_hint, fingerprint) VALUES (?,?,?,?,?,?)`);
+    (shop_id, tracking_code, event_at, description, location, status_hint, fingerprint) VALUES (?,?,?,?,?,?,?)`);
   db.transaction(() => {
     for (const e of parcel.events || []) {
-      insertEvent.run(code, e.at ?? null, e.description ?? '', e.location ?? '', e.statusHint ?? null, fingerprint(e));
+      insertEvent.run(shopId, code, e.at ?? null, e.description ?? '', e.location ?? '', e.statusHint ?? null, fingerprint(e));
     }
   })();
 
-  const latest = db.prepare('SELECT event_at, description, location FROM tracking_events WHERE tracking_code = ? ORDER BY event_at DESC LIMIT 1').get(code);
-  const eventCount = db.prepare('SELECT COUNT(*) AS c FROM tracking_events WHERE tracking_code = ?').get(code).c;
+  const latest = db.prepare('SELECT event_at, description, location FROM tracking_events WHERE shop_id IS ? AND tracking_code = ? ORDER BY event_at DESC LIMIT 1').get(shopId, code);
+  const eventCount = db.prepare('SELECT COUNT(*) AS c FROM tracking_events WHERE shop_id IS ? AND tracking_code = ?').get(shopId, code).c;
 
   const status = parcel.status ?? existing?.status ?? STATUS.PRE_SHIPPED;
   const lastEventAt = latest?.event_at ?? existing?.last_event_at ?? null;
@@ -172,11 +173,11 @@ export function applyParcel(parcel, { staleDays = getStaleDays() } = {}) {
   else if (isStale) alertReason = `No movement for ${daysSinceMove} days`;
 
   db.prepare(`
-    INSERT INTO tracking (tracking_code, receipt_id, carrier_name, provider, status, status_detail,
+    INSERT INTO tracking (shop_id, tracking_code, receipt_id, carrier_name, provider, status, status_detail,
       origin_country, destination_country, last_event_at, last_event_text, last_event_location,
       event_count, days_since_move, is_stale, alert_reason, delivered_at, last_checked_at, check_error, raw)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),NULL,?)
-    ON CONFLICT(tracking_code) DO UPDATE SET
+    ON CONFLICT(shop_id, tracking_code) DO UPDATE SET
       status = excluded.status, status_detail = excluded.status_detail,
       origin_country = COALESCE(excluded.origin_country, tracking.origin_country),
       destination_country = COALESCE(excluded.destination_country, tracking.destination_country),
@@ -188,7 +189,7 @@ export function applyParcel(parcel, { staleDays = getStaleDays() } = {}) {
       last_checked_at = datetime('now'), check_error = NULL, raw = excluded.raw,
       -- a fresh scan after an acknowledged alert re-arms the alert
       alert_ack = CASE WHEN excluded.last_event_at IS NOT tracking.last_event_at THEN 0 ELSE tracking.alert_ack END`)
-    .run(code, existing?.receipt_id ?? null, existing?.carrier_name ?? null,
+    .run(shopId, code, existing?.receipt_id ?? null, existing?.carrier_name ?? null,
       parcel.manual ? (existing?.provider ?? 'manual') : readSetting('tracking.provider'),
       status, parcel.statusDetail ?? '', parcel.originCountry ?? null, parcel.destinationCountry ?? null,
       lastEventAt, latest?.description ?? existing?.last_event_text ?? null, latest?.location ?? null,
@@ -200,8 +201,8 @@ export function applyParcel(parcel, { staleDays = getStaleDays() } = {}) {
 }
 
 function recordCheckError(code, message) {
-  getDb().prepare("UPDATE tracking SET last_checked_at = datetime('now'), check_error = ? WHERE tracking_code = ?")
-    .run(message, code);
+  getDb().prepare("UPDATE tracking SET last_checked_at = datetime('now'), check_error = ? WHERE shop_id IS ? AND tracking_code = ?")
+    .run(message, activeShopId(), code);
 }
 
 /**
@@ -254,10 +255,13 @@ export async function syncTracking({ codes = null, batchSize = 30, includeDelive
 /** Time-based alerting; independent of whether the carrier API answered. */
 export function refreshStaleFlags(staleDays = getStaleDays()) {
   const db = getDb();
-  const rows = db.prepare("SELECT tracking_code, status, last_event_at, first_seen_at FROM tracking WHERE status NOT IN ('delivered','returned')").all();
-  // Staleness is pure arithmetic and shop-independent, so every shop's parcels
-  // stay correct even while another shop is selected.
-  const upd = db.prepare('UPDATE tracking SET days_since_move = ?, is_stale = ?, alert_reason = ? WHERE tracking_code = ?');
+  const rows = db.prepare("SELECT shop_id, tracking_code, status, last_event_at, first_seen_at FROM tracking WHERE status NOT IN ('delivered','returned')").all();
+  // Staleness is pure arithmetic and shop-independent, so this runs across
+  // every connected shop's parcels regardless of which one is active. The
+  // update still matches on (shop_id, tracking_code) -- not tracking_code
+  // alone -- because two shops can share a carrier-assigned number, and each
+  // occurrence's own last_event_at must drive its own row.
+  const upd = db.prepare('UPDATE tracking SET days_since_move = ?, is_stale = ?, alert_reason = ? WHERE shop_id IS ? AND tracking_code = ?');
   db.transaction(() => {
     for (const r of rows) {
       const anchor = r.last_event_at ? new Date(r.last_event_at).getTime() : new Date(`${r.first_seen_at}Z`).getTime();
@@ -265,7 +269,7 @@ export function refreshStaleFlags(staleDays = getStaleDays()) {
       const stale = days >= staleDays;
       upd.run(days, stale ? 1 : 0,
         stale ? (r.last_event_at ? `No movement for ${days} days` : `No carrier scan after ${days} days`) : '',
-        r.tracking_code);
+        r.shop_id, r.tracking_code);
     }
   })();
   return rows.length;
@@ -275,22 +279,23 @@ export function refreshStaleFlags(staleDays = getStaleDays()) {
 export function setManualStatus(code, { status, note = '' }) {
   if (!Object.values(STATUS).includes(status)) throw badRequest(`Unknown status "${status}"`);
   const db = getDb();
-  db.prepare(`INSERT INTO tracking (tracking_code, status, status_detail, provider, last_event_at, last_event_text, last_checked_at)
-              VALUES (?,?,?,'manual',datetime('now'),?,datetime('now'))
-              ON CONFLICT(tracking_code) DO UPDATE SET status = excluded.status,
+  const shopId = activeShopId();
+  db.prepare(`INSERT INTO tracking (shop_id, tracking_code, status, status_detail, provider, last_event_at, last_event_text, last_checked_at)
+              VALUES (?,?,?,?,'manual',datetime('now'),?,datetime('now'))
+              ON CONFLICT(shop_id, tracking_code) DO UPDATE SET status = excluded.status,
                 status_detail = excluded.status_detail, provider = 'manual',
                 last_event_at = datetime('now'), last_event_text = excluded.last_event_text,
                 last_checked_at = datetime('now'), is_stale = 0, alert_reason = '', alert_ack = 0`)
-    .run(code, status, note, note || `Set to ${STATUS_LABELS[status]} manually`);
-  db.prepare(`INSERT OR IGNORE INTO tracking_events (tracking_code, event_at, description, location, status_hint, fingerprint)
-              VALUES (?, datetime('now'), ?, '', ?, ?)`)
-    .run(code, note || `Manually set to ${STATUS_LABELS[status]}`, status, fingerprint({ at: Date.now(), description: note, location: '' }));
+    .run(shopId, code, status, note, note || `Set to ${STATUS_LABELS[status]} manually`);
+  db.prepare(`INSERT OR IGNORE INTO tracking_events (shop_id, tracking_code, event_at, description, location, status_hint, fingerprint)
+              VALUES (?, ?, datetime('now'), ?, '', ?, ?)`)
+    .run(shopId, code, note || `Manually set to ${STATUS_LABELS[status]}`, status, fingerprint({ at: Date.now(), description: note, location: '' }));
   audit('tracking.manual', { entity: 'tracking', entityId: code, detail: { status, note } });
   return board({ codes: [code] }).rows[0] ?? null;
 }
 
 export const acknowledgeAlert = (code, ack = true) =>
-  getDb().prepare('UPDATE tracking SET alert_ack = ? WHERE tracking_code = ?').run(ack ? 1 : 0, code);
+  getDb().prepare('UPDATE tracking SET alert_ack = ? WHERE shop_id IS ? AND tracking_code = ?').run(ack ? 1 : 0, activeShopId(), code);
 
 // ------------------------------------------------------------------- board
 
@@ -358,7 +363,8 @@ export function board({ status = '', alertsOnly = false, search = '', codes = nu
 }
 
 export const trackingEvents = (code) =>
-  getDb().prepare('SELECT event_at, description, location, status_hint FROM tracking_events WHERE tracking_code = ? ORDER BY event_at DESC').all(code);
+  getDb().prepare('SELECT event_at, description, location, status_hint FROM tracking_events WHERE shop_id IS ? AND tracking_code = ? ORDER BY event_at DESC')
+    .all(activeShopId(), code);
 
 export function trackingSummary() {
   const db = getDb();

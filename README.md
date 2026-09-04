@@ -224,6 +224,21 @@ fail cleanly when a shop is not connected.
 
 ---
 
+## Multiple shops
+
+Connect as many Etsy shops as you like from Settings → Etsy shops. One
+keystring/shared secret pair registers a single Etsy app; each shop
+authorizes against that same app through its own OAuth exchange, so
+connecting a second shop with a different owner means logging into Etsy as
+that owner (a private window works) before pressing **Connect another shop**.
+
+Every screen — listings, orders, SKUs, tracking, bulk jobs, research — shows
+only the active shop's data. This is enforced at the database level (every
+shop-owned table is keyed or filtered by shop_id, including tracking numbers,
+which are carrier-assigned and can coincidentally repeat across two shops
+using the same courier) and covered by a test that connects two shops and
+asserts neither can see the other's rows.
+
 ## When the browser says the site cannot be reached
 
 `ERR_CONNECTION_REFUSED` on `127.0.0.1:4317` means no server is listening. It is

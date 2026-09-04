@@ -123,15 +123,19 @@ CREATE TABLE IF NOT EXISTS variation_images (
 );
 
 -- Shop-private data attached to a SKU. Never sent to Etsy.
+-- Keyed by (shop_id, sku): two different shops can legitimately reuse the
+-- same SKU string, and their supply data must never merge.
 CREATE TABLE IF NOT EXISTS sku_meta (
-  sku            TEXT PRIMARY KEY,
+  shop_id        INTEGER,
+  sku            TEXT NOT NULL,
   supply_link    TEXT DEFAULT '',   -- informational supplier URL
   supplier_name  TEXT DEFAULT '',
   supply_cost    REAL,
   supply_currency TEXT DEFAULT 'USD',
   lead_time_days INTEGER,
   notes          TEXT DEFAULT '',
-  updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (shop_id, sku)
 );
 
 CREATE TABLE IF NOT EXISTS shop_sections (
@@ -216,6 +220,7 @@ CREATE TABLE IF NOT EXISTS order_flags (
 -- ---------------------------------------------------------------- tracking
 CREATE TABLE IF NOT EXISTS shipments (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  shop_id        INTEGER,
   receipt_id     INTEGER NOT NULL,
   tracking_code  TEXT NOT NULL,
   carrier_name   TEXT,
@@ -228,11 +233,16 @@ CREATE TABLE IF NOT EXISTS shipments (
   UNIQUE (receipt_id, tracking_code)
 );
 CREATE INDEX IF NOT EXISTS idx_ship_code ON shipments(tracking_code);
+CREATE INDEX IF NOT EXISTS idx_ship_shop ON shipments(shop_id);
 
+-- Keyed by (shop_id, tracking_code), never tracking_code alone: a tracking
+-- number is assigned by the CARRIER, not Etsy, so two different shops -- most
+-- plausibly two shops fulfilled by the same 3PL or courier account -- can
+-- legitimately be given the same number for two different parcels.
 CREATE TABLE IF NOT EXISTS tracking (
-  tracking_code    TEXT PRIMARY KEY,
-  receipt_id       INTEGER,
   shop_id          INTEGER,
+  tracking_code    TEXT NOT NULL,
+  receipt_id       INTEGER,
   carrier_name     TEXT,
   provider         TEXT,            -- yuntrack | seventeentrack | manual
   status           TEXT NOT NULL DEFAULT 'pre_shipped',
@@ -253,7 +263,8 @@ CREATE TABLE IF NOT EXISTS tracking (
   first_seen_at    TEXT NOT NULL DEFAULT (datetime('now')),
   last_checked_at  TEXT,
   check_error      TEXT,
-  raw              TEXT
+  raw              TEXT,
+  PRIMARY KEY (shop_id, tracking_code)
 );
 CREATE INDEX IF NOT EXISTS idx_tracking_status ON tracking(status);
 CREATE INDEX IF NOT EXISTS idx_tracking_stale ON tracking(is_stale);
@@ -261,6 +272,7 @@ CREATE INDEX IF NOT EXISTS idx_tracking_shop ON tracking(shop_id);
 
 CREATE TABLE IF NOT EXISTS tracking_events (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  shop_id       INTEGER,
   tracking_code TEXT NOT NULL,
   event_at      TEXT,
   description   TEXT,
@@ -268,9 +280,9 @@ CREATE TABLE IF NOT EXISTS tracking_events (
   status_hint   TEXT,
   fingerprint   TEXT NOT NULL,
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (tracking_code, fingerprint)
+  UNIQUE (shop_id, tracking_code, fingerprint)
 );
-CREATE INDEX IF NOT EXISTS idx_tevents_code ON tracking_events(tracking_code, event_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tevents_code ON tracking_events(shop_id, tracking_code, event_at DESC);
 
 -- ---------------------------------------------------------------------- AI
 CREATE TABLE IF NOT EXISTS prompts (
@@ -320,6 +332,7 @@ CREATE TABLE IF NOT EXISTS attachments (
 -- --------------------------------------------------------------- bulk jobs
 CREATE TABLE IF NOT EXISTS bulk_jobs (
   id          TEXT PRIMARY KEY,
+  shop_id     INTEGER,
   type        TEXT NOT NULL,
   label       TEXT,
   status      TEXT NOT NULL DEFAULT 'queued',  -- queued|running|completed|failed|canceled
@@ -334,6 +347,7 @@ CREATE TABLE IF NOT EXISTS bulk_jobs (
   finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON bulk_jobs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_shop ON bulk_jobs(shop_id);
 
 CREATE TABLE IF NOT EXISTS bulk_job_items (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -353,6 +367,7 @@ CREATE INDEX IF NOT EXISTS idx_jobitems_job ON bulk_job_items(job_id, seq);
 -- ---------------------------------------------------------------- research
 CREATE TABLE IF NOT EXISTS research_runs (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  shop_id     INTEGER,
   keyword     TEXT NOT NULL,
   taxonomy_id INTEGER,
   scope       TEXT,

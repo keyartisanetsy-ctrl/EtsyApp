@@ -16,6 +16,7 @@ import * as orders from './orders.js';
 import * as tracking from './tracking/index.js';
 import * as ai from './ai/index.js';
 import { call } from '../etsy/client.js';
+import { activeShopId } from '../etsy/shop.js';
 import { requireShopId } from '../etsy/shop.js';
 import { fetchInventory, toWritablePayload, writeInventory } from './inventory.js';
 
@@ -299,10 +300,11 @@ export function createJob({ type, targets, params = {}, label, dryRun = false, c
 
   const db = getDb();
   const id = `job_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
+  const shopId = activeShopId();
 
   db.transaction(() => {
-    db.prepare('INSERT INTO bulk_jobs (id, type, label, status, total, dry_run, params) VALUES (?,?,?,?,?,?,?)')
-      .run(id, type, label || handler.label, dryRun ? 'running' : 'queued', list.length, dryRun ? 1 : 0, json(params));
+    db.prepare('INSERT INTO bulk_jobs (id, shop_id, type, label, status, total, dry_run, params) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id, shopId, type, label || handler.label, dryRun ? 'running' : 'queued', list.length, dryRun ? 1 : 0, json(params));
     const ins = db.prepare('INSERT INTO bulk_job_items (job_id, seq, target_id, label, status) VALUES (?,?,?,?,?)');
     list.forEach((target, i) => ins.run(id, i, target, safeDescribe(handler, target, params), 'pending'));
   })();
@@ -373,7 +375,7 @@ async function runJob(jobId, concurrency = 2) {
 
 export function getJob(id) {
   const db = getDb();
-  const job = db.prepare('SELECT * FROM bulk_jobs WHERE id = ?').get(id);
+  const job = db.prepare('SELECT * FROM bulk_jobs WHERE id = ? AND shop_id IS ?').get(id, activeShopId());
   if (!job) throw notFound(`Job ${id} not found.`);
   const items = db.prepare('SELECT * FROM bulk_job_items WHERE job_id = ? ORDER BY seq').all(id);
   return {
@@ -389,8 +391,9 @@ export function getJob(id) {
 }
 
 export const listJobs = (limit = 30) =>
-  getDb().prepare('SELECT id, type, label, status, total, succeeded, failed, dry_run, created_at, finished_at FROM bulk_jobs ORDER BY created_at DESC LIMIT ?')
-    .all(limit).map((j) => ({ ...j, dryRun: !!j.dry_run }));
+  getDb().prepare(`SELECT id, type, label, status, total, succeeded, failed, dry_run, created_at, finished_at
+    FROM bulk_jobs WHERE shop_id IS ? ORDER BY created_at DESC LIMIT ?`)
+    .all(activeShopId(), limit).map((j) => ({ ...j, dryRun: !!j.dry_run }));
 
 export function cancelJob(id) {
   const control = running.get(id);

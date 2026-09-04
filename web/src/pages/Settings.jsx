@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import api from '../lib/api.js';
 import Page from '../components/Page.jsx';
-import { Spinner, Banner, Tabs, useAsync, useToast, useErrorToast, fmtAgo } from '../components/ui.jsx';
+import { Spinner, Banner, Tabs, CopyButton, useAsync, useToast, useErrorToast, fmtAgo } from '../components/ui.jsx';
 
 const GROUPS = [
   { id: 'etsy', label: 'Etsy shops', prefix: 'etsy.' },
@@ -129,8 +129,18 @@ export default function Settings() {
           )}
 
           <Banner kind="info">
-            You can connect as many Etsy shops as you like. Only the <strong>active</strong> shop is shown on the
-            other screens, and each shop's listings, orders and tracking are stored separately — they never mix.
+            <div>
+              You can connect as many Etsy shops as you like — <strong>every</strong> screen (listings, orders,
+              SKUs, tracking, bulk jobs, research) shows only the active shop's own data; nothing is ever mixed
+              between shops.
+              <div className="mt8">
+                The keystring and shared secret below register <strong>one Etsy app</strong> — you only enter them
+                once. Each shop connects to that same app through its own separate authorization. If the second
+                shop has a different Etsy login than the one already signed in in your browser, log out of Etsy
+                (or open a private/incognito window) before pressing <strong>Connect another shop</strong>, so Etsy
+                asks you to sign in as that shop's owner instead of re-authorizing the one you're already on.
+              </div>
+            </div>
           </Banner>
 
           <div className="flex mb16">
@@ -292,6 +302,16 @@ export default function Settings() {
               >
                 {s.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
+            ) : s.key === 'etsy.redirect_uri' ? (
+              <div className="flex gap4">
+                <input
+                  className="input mono"
+                  readOnly
+                  value={draft[s.key] ?? s.value}
+                  onFocus={(e) => e.target.select()}
+                />
+                <CopyButton text={draft[s.key] ?? s.value} label="Copy" className="btn sm" />
+              </div>
             ) : (
               <input
                 className="input"
@@ -300,6 +320,15 @@ export default function Settings() {
                 value={draft[s.key] ?? (s.secret ? '' : s.value)}
                 onChange={(e) => setDraft({ ...draft, [s.key]: e.target.value })}
               />
+            )}
+            {s.key === 'etsy.redirect_uri' && (
+              <div className="hint">
+                Paste this <strong>exact</strong> address into your Etsy app's "Callback URL" field at{' '}
+                <a href="https://www.etsy.com/developers/your-apps" target="_blank" rel="noreferrer">etsy.com/developers/your-apps</a>.
+                It uses <code className="mono">localhost</code> rather than an IP address because Etsy's own
+                validation rejects IP-literal hosts outright ("IP addresses are not allowed", e.g. 127.0.0.1) —
+                <code className="mono">http://</code> itself is fine, Etsy does not require https here.
+              </div>
             )}
             {s.secret && s.isSet && <div className="hint">A value is stored ({s.value}). Type to replace it; leave blank to keep it.</div>}
           </div>

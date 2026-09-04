@@ -150,7 +150,7 @@ const GRID_SQL = `
     m.supply_link, m.supplier_name, m.supply_cost, m.supply_currency, m.lead_time_days, m.notes
   FROM listing_products p
   JOIN listings l ON l.listing_id = p.listing_id
-  LEFT JOIN sku_meta m ON m.sku = p.sku AND p.sku <> ''
+  LEFT JOIN sku_meta m ON m.sku = p.sku AND m.shop_id IS l.shop_id AND p.sku <> ''
   WHERE p.is_deleted = 0
 `;
 
@@ -193,7 +193,7 @@ export function skuGrid({
 
   const total = db.prepare(
     `SELECT COUNT(*) AS c FROM listing_products p JOIN listings l ON l.listing_id = p.listing_id
-     LEFT JOIN sku_meta m ON m.sku = p.sku AND p.sku <> '' WHERE p.is_deleted = 0${clause}`,
+     LEFT JOIN sku_meta m ON m.sku = p.sku AND m.shop_id IS l.shop_id AND p.sku <> '' WHERE p.is_deleted = 0${clause}`,
   ).get(...params).c;
 
   const pct = discountPercent ?? getDiscountPercent();
@@ -258,7 +258,8 @@ export const priceForTarget = (target, percent = getDiscountPercent()) =>
 export function setSkuMeta(sku, meta = {}) {
   if (!sku) throw badRequest('A SKU is required to attach supply information.');
   const db = getDb();
-  const existing = db.prepare('SELECT * FROM sku_meta WHERE sku = ?').get(sku) || {};
+  const shopId = activeShopId();
+  const existing = db.prepare('SELECT * FROM sku_meta WHERE shop_id IS ? AND sku = ?').get(shopId, sku) || {};
   const merged = {
     supply_link: meta.supplyLink ?? existing.supply_link ?? '',
     supplier_name: meta.supplierName ?? existing.supplier_name ?? '',
@@ -268,18 +269,20 @@ export function setSkuMeta(sku, meta = {}) {
     notes: meta.notes ?? existing.notes ?? '',
   };
   db.prepare(`
-    INSERT INTO sku_meta (sku, supply_link, supplier_name, supply_cost, supply_currency, lead_time_days, notes, updated_at)
-    VALUES (?,?,?,?,?,?,?,datetime('now'))
-    ON CONFLICT(sku) DO UPDATE SET supply_link=excluded.supply_link, supplier_name=excluded.supplier_name,
+    INSERT INTO sku_meta (shop_id, sku, supply_link, supplier_name, supply_cost, supply_currency, lead_time_days, notes, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,datetime('now'))
+    ON CONFLICT(shop_id, sku) DO UPDATE SET supply_link=excluded.supply_link, supplier_name=excluded.supplier_name,
       supply_cost=excluded.supply_cost, supply_currency=excluded.supply_currency,
       lead_time_days=excluded.lead_time_days, notes=excluded.notes, updated_at=datetime('now')`)
-    .run(sku, merged.supply_link, merged.supplier_name, merged.supply_cost,
+    .run(shopId, sku, merged.supply_link, merged.supplier_name, merged.supply_cost,
          merged.supply_currency, merged.lead_time_days, merged.notes);
   return { sku, ...merged };
 }
 
-export const getSkuMeta = (sku) => getDb().prepare('SELECT * FROM sku_meta WHERE sku = ?').get(sku) || null;
-export const deleteSkuMeta = (sku) => getDb().prepare('DELETE FROM sku_meta WHERE sku = ?').run(sku);
+export const getSkuMeta = (sku) =>
+  getDb().prepare('SELECT * FROM sku_meta WHERE shop_id IS ? AND sku = ?').get(activeShopId(), sku) || null;
+export const deleteSkuMeta = (sku) =>
+  getDb().prepare('DELETE FROM sku_meta WHERE shop_id IS ? AND sku = ?').run(activeShopId(), sku);
 
 /** Flag SKUs used by more than one variation - usually a copy/paste slip. */
 export function duplicateSkus() {
@@ -289,6 +292,8 @@ export function duplicateSkus() {
     FROM listing_products p JOIN listings l ON l.listing_id = p.listing_id
     WHERE p.sku <> '' AND p.is_deleted = 0 AND l.shop_id IS ?
     GROUP BY p.sku HAVING COUNT(*) > 1 ORDER BY uses DESC`)
+    // Duplicates are only meaningful within one shop; a coincidence with
+    // another connected shop's SKU is not a mistake worth flagging.
     .all(activeShopId()).map((r) => ({ sku: r.sku, uses: r.uses, rows: parse(r.rows, []) }));
 }
 

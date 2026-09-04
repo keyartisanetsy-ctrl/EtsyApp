@@ -380,16 +380,16 @@ export function saveTransactions(receiptId, transactions = []) {
 /** Records tracking Etsy already knows about so the tracking board is complete. */
 export function saveShipmentsFromEtsy(receiptId, shipments = []) {
   const db = getDb();
-  const ins = db.prepare(`INSERT OR IGNORE INTO shipments (receipt_id, tracking_code, carrier_name, pushed_to_etsy, pushed_at)
-    VALUES (?,?,?,1,datetime('now'))`);
   const shopId = activeShopId();
-  const track = db.prepare(`INSERT OR IGNORE INTO tracking (tracking_code, receipt_id, shop_id, carrier_name, provider, status)
+  const ins = db.prepare(`INSERT OR IGNORE INTO shipments (shop_id, receipt_id, tracking_code, carrier_name, pushed_to_etsy, pushed_at)
+    VALUES (?,?,?,?,1,datetime('now'))`);
+  const track = db.prepare(`INSERT OR IGNORE INTO tracking (shop_id, tracking_code, receipt_id, carrier_name, provider, status)
     VALUES (?,?,?,?,'manual','pre_shipped')`);
   for (const s of shipments) {
     const code = s.tracking_code || s.tracking_number;
     if (!code) continue;
-    ins.run(receiptId, code, s.carrier_name ?? null);
-    track.run(code, receiptId, shopId, s.carrier_name ?? null);
+    ins.run(shopId, receiptId, code, s.carrier_name ?? null);
+    track.run(shopId, code, receiptId, s.carrier_name ?? null);
   }
 }
 

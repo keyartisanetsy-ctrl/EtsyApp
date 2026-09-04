@@ -31,11 +31,14 @@ npm run build       # builds the web app into web/dist
 3. Add this callback URL to the app, **exactly**:
 
    ```
-   http://127.0.0.1:4317/api/auth/callback
+   http://localhost:4317/api/auth/callback
    ```
 
-   Etsy matches this string literally. `localhost` is *not* the same as
-   `127.0.0.1`, and a trailing slash will break the exchange.
+   Etsy's own validation on that field is strict and explicit: **"IP addresses
+   are not allowed (e.g. 127.0.0.1)."** It must be a hostname, `localhost`
+   qualifies, `http://` is fine (https is not required). Etsy matches the
+   whole string literally otherwise too — get the port and path exactly
+   right, no trailing slash.
 
 ## 4. Add your credentials
 
@@ -175,8 +178,15 @@ read and you will have to re-enter them (nothing else is lost).
 ## Troubleshooting
 
 **`invalid_request` / `redirect_uri mismatch` when connecting**
-The callback URL on the Etsy app must match byte for byte. Check for
-`localhost` vs `127.0.0.1`, http vs https, and a trailing slash.
+The callback URL on the Etsy app must match byte for byte what Settings
+shows you. Check for a trailing slash, and that it says `localhost` — Etsy's
+own dashboard refuses to save `127.0.0.1` or any other IP address there.
+
+**Etsy's "Your Apps" page won't accept the callback URL**
+Its own validation reads: "Must start with http:// or https://", "Host must
+be a domain name", "IP addresses are not allowed (e.g. 127.0.0.1)". Use the
+address exactly as Settings shows it (`http://localhost:<port>/api/auth/callback`)
+— `localhost` is a hostname, not an IP literal, so it passes.
 
 **`403 Shared secret is required in x-api-key header`**
 The shared secret is missing. Etsy needs `x-api-key: keystring:shared_secret`.
