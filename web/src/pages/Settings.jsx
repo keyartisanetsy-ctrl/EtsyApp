@@ -4,7 +4,8 @@ import Page from '../components/Page.jsx';
 import { Spinner, Banner, Tabs, useAsync, useToast, useErrorToast, fmtAgo } from '../components/ui.jsx';
 
 const GROUPS = [
-  { id: 'etsy', label: 'Etsy connection', prefix: 'etsy.' },
+  { id: 'etsy', label: 'Etsy shops', prefix: 'etsy.' },
+  { id: 'privacy', label: 'Privacy', prefix: 'privacy.' },
   { id: 'ai', label: 'AI providers', prefix: 'ai.' },
   { id: 'tracking', label: 'Tracking', prefix: 'tracking.' },
   { id: 'pricing', label: 'Pricing & orders', prefix: ['pricing.', 'orders.'] },
@@ -16,6 +17,7 @@ export default function Settings() {
   const [busy, setBusy] = useState(false);
   const { data, loading, reload } = useAsync(() => api.get('/settings'), []);
   const { data: auth, reload: reloadAuth } = useAsync(() => api.get('/auth/status'), []);
+  const { data: privacy, reload: reloadPrivacy } = useAsync(() => api.get('/settings/privacy'), []);
   const toast = useToast();
   const showError = useErrorToast();
 
@@ -27,6 +29,7 @@ export default function Settings() {
       setDraft({});
       reload();
       reloadAuth();
+      reloadPrivacy();
     } catch (err) { showError(err, 'Could not save'); } finally { setBusy(false); }
   };
 
@@ -76,10 +79,59 @@ export default function Settings() {
       {tab === 'etsy' && (
         <div className="card mb16">
           <div className="card-head">
-            <h3>Shop connection</h3>
+            <h3>Connected shops</h3>
             <div className="spacer" />
-            <span className={`badge ${auth?.connected ? 'green' : 'grey'}`}>{auth?.connected ? 'connected' : 'not connected'}</span>
+            <span className={`badge ${auth?.accountCount ? 'green' : 'grey'}`}>
+              {auth?.accountCount ? `${auth.accountCount} connected` : 'none connected'}
+            </span>
           </div>
+
+          {auth?.accounts?.length > 0 && (
+            <table className="data mb16">
+              <thead><tr><th /><th>Shop</th><th>Shop ID</th><th>Connected</th><th /></tr></thead>
+              <tbody>
+                {auth.accounts.map((a) => (
+                  <tr key={a.shopId}>
+                    <td>{a.isActive ? <span className="badge green">active</span> : <span className="badge grey">idle</span>}</td>
+                    <td>
+                      <input
+                        className="input sm"
+                        defaultValue={a.label || a.shopName || ''}
+                        placeholder={a.shopName || 'nickname'}
+                        onBlur={async (e) => {
+                          if (e.target.value === (a.label || '')) return;
+                          try { await api.put(`/auth/accounts/${a.shopId}`, { label: e.target.value }); reloadAuth(); }
+                          catch (err) { showError(err); }
+                        }}
+                      />
+                    </td>
+                    <td className="mono small">{a.shopId}</td>
+                    <td className="small muted">{fmtAgo(a.connectedAt)}</td>
+                    <td>
+                      <div className="flex gap4">
+                        {!a.isActive && (
+                          <button className="btn xs" onClick={async () => {
+                            try { await api.post(`/auth/accounts/${a.shopId}/activate`, {}); reloadAuth(); toast({ kind: 'ok', title: 'Switched shop' }); }
+                            catch (err) { showError(err); }
+                          }}>Use this</button>
+                        )}
+                        <button className="btn xs danger" onClick={async () => {
+                          if (!confirm(`Disconnect ${a.label || a.shopName || a.shopId}?\n\nIts locally stored listings, orders and tracking are removed too. Nothing on Etsy changes.`)) return;
+                          try { await api.del(`/auth/accounts/${a.shopId}`); reloadAuth(); toast({ kind: 'ok', title: 'Shop disconnected' }); }
+                          catch (err) { showError(err); }
+                        }}>Remove</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          <Banner kind="info">
+            You can connect as many Etsy shops as you like. Only the <strong>active</strong> shop is shown on the
+            other screens, and each shop's listings, orders and tracking are stored separately — they never mix.
+          </Banner>
 
           <div className="flex mb16">
             <button className="btn" onClick={testConnection} disabled={testing}>
@@ -111,15 +163,15 @@ export default function Settings() {
               <code className="mono"> keystring:shared_secret</code> — the keystring on its own is rejected on
               every endpoint, so the secret is not optional.
             </Banner>
-          ) : auth?.connected ? (
+          ) : auth?.accountCount ? (
             <>
               <dl className="kv mb16">
-                <dt>Shop</dt><dd>{auth.shop?.shopName ?? '—'} <span className="muted mono">({auth.shop?.shopId ?? '—'})</span></dd>
-                <dt>Connected</dt><dd>{fmtAgo(auth.connectedAt)}</dd>
+                <dt>Active shop</dt><dd>{auth.shop?.shopName ?? '—'} <span className="muted mono">({auth.shop?.shopId ?? '—'})</span></dd>
                 <dt>Token expires</dt><dd>{fmtAgo(auth.expiresAt)} <span className="muted">(refreshed automatically)</span></dd>
                 <dt>Scopes</dt><dd className="small">{auth.scopes.join(' ') || '—'}</dd>
               </dl>
-              <button className="btn danger" onClick={disconnect}>Disconnect</button>
+              <button className="btn primary" onClick={connect}>+ Connect another shop</button>
+              <button className="btn danger" style={{ marginLeft: 8 }} onClick={disconnect}>Disconnect all</button>
             </>
           ) : (
             <>
@@ -131,6 +183,70 @@ export default function Settings() {
             </>
           )}
         </div>
+      )}
+
+      {tab === 'privacy' && privacy && (
+        <>
+          <div className="card mb16">
+            <div className="card-head">
+              <h3>What leaves this computer</h3>
+              <div className="spacer" />
+              <span className={`badge ${privacy.proxyConfigured ? 'green' : 'amber'}`}>
+                {privacy.proxyConfigured ? 'proxied' : 'direct connection'}
+              </span>
+            </div>
+
+            <div className="section-title">Never sent — to Etsy or anyone else</div>
+            <ul className="privacy-list good">
+              {privacy.neverSent.map((x) => <li key={x}>{x}</li>)}
+            </ul>
+
+            <div className="section-title">Sent with every request</div>
+            <div className="pill-row mb8">
+              {privacy.headersSent.map((h) => <span key={h} className="tag mono">{h}</span>)}
+            </div>
+            <div className="small dim">
+              The identifying header is a fixed <code className="mono">{privacy.userAgent}</code> — it carries no
+              version, platform or machine detail. These are stripped before sending:{' '}
+              {privacy.headersStripped.join(', ')}.
+            </div>
+
+            <div className="section-title">Your IP address</div>
+            <Banner kind={privacy.ipAddress.hidden ? 'ok' : 'warn'}>
+              {privacy.ipAddress.note}
+            </Banner>
+          </div>
+
+          <div className="card mb16">
+            <div className="card-head"><h3>Where the app can connect</h3></div>
+            <div className="card-sub">
+              This is the complete list. Everything marked optional is only contacted when you use that feature.
+            </div>
+            <table className="data">
+              <thead><tr><th>Destination</th><th>Why</th><th>What it receives</th><th /></tr></thead>
+              <tbody>
+                {privacy.destinations.map((d) => (
+                  <tr key={d.host}>
+                    <td className="mono small">{d.host}</td>
+                    <td className="small">{d.purpose}</td>
+                    <td className="small dim">{d.sends}</td>
+                    <td>
+                      <span className={`badge ${d.optional ? 'grey' : 'blue'}`}>
+                        {d.optional ? 'optional' : 'required'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="card mb16">
+            <div className="card-head"><h3>Where your data lives</h3></div>
+            <div className="small dim">{privacy.storage.note}</div>
+            <div className="mono small mt8">{privacy.storage.database}</div>
+          </div>
+        </>
       )}
 
       {tab === 'ai' && (

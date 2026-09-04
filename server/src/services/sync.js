@@ -3,7 +3,7 @@
  * exports are instant and work offline. Nothing here mutates Etsy.
  */
 import { call, callAll } from '../etsy/client.js';
-import { requireShopId } from '../etsy/shop.js';
+import { requireShopId, activeShopId } from '../etsy/shop.js';
 import { getDb, json, audit } from '../db/index.js';
 import { money } from '../lib/money.js';
 import { createLogger } from '../lib/logger.js';
@@ -51,7 +51,9 @@ function listingRow(l) {
   const firstImage = (l.images || [])[0];
   return {
     listing_id: l.listing_id,
-    shop_id: l.shop_id ?? null,
+    // Stamp the shop even when Etsy omits it, or the row would be invisible
+    // to every shop-scoped query.
+    shop_id: l.shop_id ?? activeShopId(),
     title: l.title ?? null,
     description: l.description ?? null,
     state: l.state ?? null,
@@ -261,12 +263,13 @@ export async function syncShopSections() {
   const shopId = requireShopId();
   const res = await call('getShopSections', { shop_id: shopId });
   const db = getDb();
-  const stmt = db.prepare(`INSERT INTO shop_sections (shop_section_id, title, rank, active_listing_count, raw)
-    VALUES (?,?,?,?,?) ON CONFLICT(shop_section_id) DO UPDATE SET title=excluded.title,
-    rank=excluded.rank, active_listing_count=excluded.active_listing_count, raw=excluded.raw`);
+  const stmt = db.prepare(`INSERT INTO shop_sections (shop_section_id, shop_id, title, rank, active_listing_count, raw)
+    VALUES (?,?,?,?,?,?) ON CONFLICT(shop_section_id) DO UPDATE SET shop_id=excluded.shop_id,
+    title=excluded.title, rank=excluded.rank,
+    active_listing_count=excluded.active_listing_count, raw=excluded.raw`);
   db.transaction(() => {
     for (const s of res?.results || []) {
-      stmt.run(s.shop_section_id, s.title ?? null, s.rank ?? null, s.active_listing_count ?? null, json(s));
+      stmt.run(s.shop_section_id, shopId, s.title ?? null, s.rank ?? null, s.active_listing_count ?? null, json(s));
     }
   })();
   return res?.results?.length ?? 0;
@@ -302,7 +305,7 @@ function receiptRow(r) {
   const total = money(r.grandtotal);
   return {
     receipt_id: r.receipt_id,
-    shop_id: r.shop_id ?? null,
+    shop_id: r.shop_id ?? activeShopId(),
     receipt_type: r.receipt_type ?? null,
     status: r.status ?? null,
     buyer_user_id: r.buyer_user_id ?? null,
@@ -379,13 +382,14 @@ export function saveShipmentsFromEtsy(receiptId, shipments = []) {
   const db = getDb();
   const ins = db.prepare(`INSERT OR IGNORE INTO shipments (receipt_id, tracking_code, carrier_name, pushed_to_etsy, pushed_at)
     VALUES (?,?,?,1,datetime('now'))`);
-  const track = db.prepare(`INSERT OR IGNORE INTO tracking (tracking_code, receipt_id, carrier_name, provider, status)
-    VALUES (?,?,?,'manual','pre_shipped')`);
+  const shopId = activeShopId();
+  const track = db.prepare(`INSERT OR IGNORE INTO tracking (tracking_code, receipt_id, shop_id, carrier_name, provider, status)
+    VALUES (?,?,?,?,'manual','pre_shipped')`);
   for (const s of shipments) {
     const code = s.tracking_code || s.tracking_number;
     if (!code) continue;
     ins.run(receiptId, code, s.carrier_name ?? null);
-    track.run(code, receiptId, s.carrier_name ?? null);
+    track.run(code, receiptId, shopId, s.carrier_name ?? null);
   }
 }
 

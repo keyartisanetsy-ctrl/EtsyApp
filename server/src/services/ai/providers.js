@@ -10,6 +10,7 @@ import config from '../../config.js';
 import { readSetting } from '../settings.js';
 import { AppError, badRequest } from '../../lib/errors.js';
 import { createLogger } from '../../lib/logger.js';
+import { outboundFetch } from '../../lib/outbound.js';
 
 const log = createLogger('ai');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -27,6 +28,14 @@ export function providerStatus() {
 
 /** Pick a provider that is actually usable for this request. */
 export function resolveProvider(requested, { needsImages = false } = {}) {
+  // A hard opt-out: when AI sharing is off, no text or image leaves the
+  // machine for any provider, whatever the caller asked for.
+  if (!/^(1|true|yes|on)$/i.test(String(readSetting('privacy.share_ai')))) {
+    throw badRequest(
+      'AI features are switched off in Settings > Privacy. Nothing has been sent anywhere. '
+      + 'Turn "Allow AI features to send your text to the AI provider" back on to use them.',
+    );
+  }
   const status = providerStatus();
   const wanted = requested || status.active;
 
@@ -55,7 +64,7 @@ async function manusComplete({ prompt, system, onProgress, signal }) {
     agentProfile: readSetting('ai.manus.agent_profile') || 'manus-1.6',
   };
 
-  const res = await fetch(`${base}/v1/tasks`, {
+  const res = await outboundFetch(`${base}/v1/tasks`, {
     method: 'POST',
     headers: { API_KEY: apiKey, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -81,7 +90,7 @@ async function manusComplete({ prompt, system, onProgress, signal }) {
     if (Date.now() > deadline) throw new AppError(504, `Manus task ${taskId} did not finish within the timeout. It may still complete at ${taskUrl ?? 'manus.im'}.`);
     await sleep(config.ai.manus.pollIntervalMs);
 
-    const poll = await fetch(`${base}/v1/tasks/${taskId}`, { headers: { API_KEY: apiKey }, signal });
+    const poll = await outboundFetch(`${base}/v1/tasks/${taskId}`, { headers: { API_KEY: apiKey }, signal });
     if (!poll.ok) { log.warn(`Manus poll ${poll.status}, retrying`); continue; }
     const task = await poll.json();
     onProgress?.({ stage: task.status, taskId, taskUrl });
@@ -121,7 +130,7 @@ async function anthropicComplete({ prompt, system, images = [], maxTokens = 4096
   }
   content.push({ type: 'text', text: prompt });
 
-  const res = await fetch(`${config.ai.anthropic.base}/v1/messages`, {
+  const res = await outboundFetch(`${config.ai.anthropic.base}/v1/messages`, {
     method: 'POST',
     headers: { 'x-api-key': apiKey, 'anthropic-version': config.ai.anthropic.version, 'content-type': 'application/json' },
     body: JSON.stringify({ model, max_tokens: maxTokens, ...(system ? { system } : {}), messages: [{ role: 'user', content }] }),
@@ -150,7 +159,7 @@ async function openaiComplete({ prompt, system, images = [], maxTokens = 4096, s
   }
   const messages = [...(system ? [{ role: 'system', content: system }] : []), { role: 'user', content }];
 
-  const res = await fetch(`${config.ai.openai.base}/v1/chat/completions`, {
+  const res = await outboundFetch(`${config.ai.openai.base}/v1/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, messages, max_tokens: maxTokens }),
@@ -174,7 +183,7 @@ export async function editImage({ prompt, image, size = '1024x1024', signal }) {
     form.append('prompt', prompt);
     form.append('size', size);
     form.append('image', new Blob([image.buffer], { type: image.mime || 'image/png' }), image.filename || 'image.png');
-    const res = await fetch(`${config.ai.openai.base}/v1/images/edits`, {
+    const res = await outboundFetch(`${config.ai.openai.base}/v1/images/edits`, {
       method: 'POST', headers: { Authorization: `Bearer ${apiKey}` }, body: form, signal,
     });
     const body = await res.json().catch(() => ({}));
@@ -182,7 +191,7 @@ export async function editImage({ prompt, image, size = '1024x1024', signal }) {
     return { b64: body.data?.[0]?.b64_json ?? null, url: body.data?.[0]?.url ?? null, raw: body };
   }
 
-  const res = await fetch(`${config.ai.openai.base}/v1/images/generations`, {
+  const res = await outboundFetch(`${config.ai.openai.base}/v1/images/generations`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, prompt, size, n: 1 }),

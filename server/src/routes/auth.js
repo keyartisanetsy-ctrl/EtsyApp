@@ -1,18 +1,39 @@
 import { Router } from 'express';
 import { asyncRoute } from '../lib/http.js';
 import { buildAuthorizationUrl, exchangeCode, verifyScopes, DEFAULT_SCOPES } from '../etsy/oauth.js';
-import { getStoredToken, disconnect, getCredentials, call } from '../etsy/client.js';
+import { getStoredToken, disconnect, getCredentials, call, listAccounts, setActiveAccount, removeAccount, renameAccount } from '../etsy/client.js';
 import { maskSecret } from '../lib/crypto.js';
 import { currentShop } from '../etsy/shop.js';
 import { OPERATION_COUNT } from '../etsy/operations.generated.js';
 
 const router = Router();
 
+// ------------------------------------------------------------- accounts
+
+router.get('/accounts', asyncRoute(async (req, res) => res.json(listAccounts())));
+
+/** Switch which connected shop the screens work with. */
+router.post('/accounts/:shopId/activate', asyncRoute(async (req, res) => {
+  res.json(setActiveAccount(Number(req.params.shopId)));
+}));
+
+router.put('/accounts/:shopId', asyncRoute(async (req, res) => {
+  res.json(renameAccount(Number(req.params.shopId), req.body?.label ?? ''));
+}));
+
+/** Disconnect one shop. Its mirrored data is removed with it unless asked otherwise. */
+router.delete('/accounts/:shopId', asyncRoute(async (req, res) => {
+  res.json(removeAccount(Number(req.params.shopId), { purgeData: req.body?.keepData !== true }));
+}));
+
 router.get('/status', asyncRoute(async (req, res) => {
   const token = getStoredToken();
   const creds = getCredentials();
+  const accounts = listAccounts();
   res.json({
     connected: !!token,
+    accounts,
+    accountCount: accounts.length,
     hasKeystring: !!creds.keystring,
     redirectUri: creds.redirectUri,
     shop: currentShop(),

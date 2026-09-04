@@ -138,6 +138,82 @@ await check('a call without the shared secret is refused before it reaches Etsy'
   assert(fmt, 'missing the x-api-key format check');
 });
 
+await check('two shops stay isolated from each other', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const listings = await import('../server/src/services/listings.js');
+  const orders = await import('../server/src/services/orders.js');
+  await initDb();
+  const db = getDb();
+
+  // Two pretend shops, each with one listing and one order.
+  const seal = 'v1.x.y.z'; // token contents are irrelevant here
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id IN (990001, 990002)').run();
+  for (const [shopId, name] of [[990001, 'Verify Shop A'], [990002, 'Verify Shop B']]) {
+    db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+                VALUES (?,?,?,?,datetime('now','+1 hour'),0)`).run(shopId, name, seal, seal);
+    db.prepare(`INSERT OR REPLACE INTO listings (listing_id, shop_id, title, state, price_amount, price_divisor, price_currency)
+                VALUES (?,?,?,'active',1000,100,'EUR')`).run(shopId + 1, shopId, `Listing for ${name}`);
+    db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, name, was_canceled, was_shipped, was_paid, grandtotal_amount, grandtotal_divisor, grandtotal_currency)
+                VALUES (?,?,?,0,0,1,1000,100,'EUR')`).run(shopId + 2, shopId, `Buyer at ${name}`);
+    db.prepare('INSERT OR IGNORE INTO order_flags (receipt_id) VALUES (?)').run(shopId + 2);
+  }
+
+  client.setActiveAccount(990001);
+  let l = listings.localListings({ limit: 50 });
+  let o = orders.listOrders({ limit: 50 });
+  assert(l.rows.every((r) => r.listingId === 990002), `shop A saw foreign listings: ${l.rows.map((r) => r.listingId)}`);
+  assert(o.rows.every((r) => r.receiptId === 990003), `shop A saw foreign orders: ${o.rows.map((r) => r.receiptId)}`);
+
+  client.setActiveAccount(990002);
+  l = listings.localListings({ limit: 50 });
+  o = orders.listOrders({ limit: 50 });
+  assert(l.rows.every((r) => r.listingId === 990003), `shop B saw foreign listings: ${l.rows.map((r) => r.listingId)}`);
+  assert(o.rows.every((r) => r.receiptId === 990004), `shop B saw foreign orders: ${o.rows.map((r) => r.receiptId)}`);
+
+  // An order belonging to the other shop must not be reachable by id.
+  let leaked = false;
+  try { orders.getOrder(990003); leaked = true; } catch { /* correct */ }
+  assert(!leaked, 'getOrder returned another shop\'s order');
+
+  // Removing a shop takes its data and hands the active flag to the survivor.
+  client.removeAccount(990002);
+  const remaining = client.listAccounts().filter((a) => [990001, 990002].includes(a.shopId));
+  assert(remaining.length === 1 && remaining[0].shopId === 990001, 'removeAccount left the wrong set');
+  assert(remaining[0].isActive, 'no shop became active after removing the active one');
+  assert(db.prepare('SELECT COUNT(*) c FROM listings WHERE shop_id = 990002').get().c === 0, 'removed shop left listings behind');
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id IN (990001, 990002)').run();
+  db.prepare('DELETE FROM listings WHERE shop_id IN (990001, 990002)').run();
+  db.prepare('DELETE FROM receipts WHERE shop_id IN (990001, 990002)').run();
+});
+await check('privacy report discloses every destination', async () => {
+  const { body } = await req('/api/settings/privacy');
+  assert(body.destinations?.length >= 5, 'destinations missing');
+  assert(body.neverSent?.length >= 5, 'never-sent list missing');
+  assert(body.headersStripped?.includes('Accept-Language'), 'locale header not declared as stripped');
+  // The IP claim must stay honest: not hidden unless a proxy is actually set.
+  assert(body.ipAddress.hidden === body.proxyConfigured,
+    'IP privacy claim does not match whether a proxy is configured');
+  assert(/cannot change it|proxy/i.test(body.ipAddress.note), 'IP note is not explicit about the limitation');
+});
+await check('AI opt-out blocks every provider call', async () => {
+  await req('/api/settings', { method: 'PUT', body: { 'privacy.share_ai': 'false' } });
+  const { status, body } = await req('/api/ai/reply', { method: 'POST', body: { message: 'hello' }, allowError: true });
+  assert(status === 400, `expected 400, got ${status}`);
+  assert(/switched off|Privacy/i.test(body.error), `unhelpful error: ${body.error}`);
+  assert(/Nothing has been sent/i.test(body.error), 'error should confirm nothing was transmitted');
+  await req('/api/settings', { method: 'PUT', body: { 'privacy.share_ai': 'true' } });
+});
+
+await check('outbound requests carry no machine or locale information', async () => {
+  const { USER_AGENT, DESTINATIONS } = await import('../server/src/lib/outbound.js');
+  assert(!/node|win|mac|linux|\d+\.\d+\.\d+/i.test(USER_AGENT.replace('1.0', '')),
+    `User-Agent leaks platform detail: ${USER_AGENT}`);
+  assert(DESTINATIONS.length >= 5, 'destination disclosure list is incomplete');
+  assert(DESTINATIONS.every((d) => d.host && d.purpose && d.sends), 'a destination is missing its disclosure');
+});
+
 console.log('\nSKU / inventory');
 await check('sku grid responds with discount column', async () => {
   const { body } = await req('/api/skus');

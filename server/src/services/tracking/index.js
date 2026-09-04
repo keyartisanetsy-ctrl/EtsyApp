@@ -4,7 +4,7 @@
  */
 import crypto from 'node:crypto';
 import { call } from '../../etsy/client.js';
-import { requireShopId } from '../../etsy/shop.js';
+import { requireShopId, activeShopId } from '../../etsy/shop.js';
 import { getDb, json, audit } from '../../db/index.js';
 import { readSetting, getStaleDays, trackingUrl, isTruthy } from '../settings.js';
 import { badRequest } from '../../lib/errors.js';
@@ -68,11 +68,12 @@ export async function addTracking(entries, { pushToEtsy = true, noteToBuyer = ''
                   ON CONFLICT(receipt_id, tracking_code) DO UPDATE SET carrier_name = excluded.carrier_name`)
         .run(entry.receiptId, entry.trackingCode, carrier, noteToBuyer || null, sendBcc ? 1 : 0);
 
-      db.prepare(`INSERT INTO tracking (tracking_code, receipt_id, carrier_name, provider, status)
-                  VALUES (?,?,?,?,'pre_shipped')
+      db.prepare(`INSERT INTO tracking (tracking_code, receipt_id, shop_id, carrier_name, provider, status)
+                  VALUES (?,?,?,?,?,'pre_shipped')
                   ON CONFLICT(tracking_code) DO UPDATE SET receipt_id = excluded.receipt_id,
+                    shop_id = COALESCE(excluded.shop_id, tracking.shop_id),
                     carrier_name = COALESCE(excluded.carrier_name, tracking.carrier_name)`)
-        .run(entry.trackingCode, entry.receiptId, carrier, readSetting('tracking.provider'));
+        .run(entry.trackingCode, entry.receiptId, activeShopId(), carrier, readSetting('tracking.provider'));
 
       if (pushToEtsy) {
         const body = { tracking_code: entry.trackingCode };
@@ -212,9 +213,9 @@ export async function syncTracking({ codes = null, batchSize = 30, includeDelive
   const list = codes?.length
     ? codes
     : db.prepare(`SELECT tracking_code FROM tracking
-                  WHERE (? = 1 OR status NOT IN ('delivered','returned'))
+                  WHERE shop_id IS ? AND (? = 1 OR status NOT IN ('delivered','returned'))
                   ORDER BY COALESCE(last_checked_at, '1970') ASC`)
-        .all(includeDelivered ? 1 : 0).map((r) => r.tracking_code);
+        .all(activeShopId(), includeDelivered ? 1 : 0).map((r) => r.tracking_code);
 
   if (!list.length) return { checked: 0, updated: [], errors: [] };
 
@@ -254,6 +255,8 @@ export async function syncTracking({ codes = null, batchSize = 30, includeDelive
 export function refreshStaleFlags(staleDays = getStaleDays()) {
   const db = getDb();
   const rows = db.prepare("SELECT tracking_code, status, last_event_at, first_seen_at FROM tracking WHERE status NOT IN ('delivered','returned')").all();
+  // Staleness is pure arithmetic and shop-independent, so every shop's parcels
+  // stay correct even while another shop is selected.
   const upd = db.prepare('UPDATE tracking SET days_since_move = ?, is_stale = ?, alert_reason = ? WHERE tracking_code = ?');
   db.transaction(() => {
     for (const r of rows) {
@@ -294,8 +297,8 @@ export const acknowledgeAlert = (code, ack = true) =>
 /** The tracking board: one row per parcel with its order context. */
 export function board({ status = '', alertsOnly = false, search = '', codes = null, limit = 500, offset = 0 } = {}) {
   const db = getDb();
-  const where = [];
-  const params = [];
+  const where = ['t.shop_id IS ?'];
+  const params = [activeShopId()];
 
   if (status) { where.push('t.status = ?'); params.push(status); }
   if (alertsOnly) where.push("(t.is_stale = 1 OR t.status IN ('exception','not_found','returned')) AND t.alert_ack = 0");
@@ -304,7 +307,7 @@ export function board({ status = '', alertsOnly = false, search = '', codes = nu
     where.push('(t.tracking_code LIKE ? OR CAST(t.receipt_id AS TEXT) LIKE ? OR r.name LIKE ?)');
     const like = `%${search}%`; params.push(like, like, like);
   }
-  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const clause = `WHERE ${where.join(' AND ')}`;
 
   const rows = db.prepare(`
     SELECT t.*, r.name AS buyer_name, r.country_iso, r.created_ts AS order_created_ts,
@@ -359,10 +362,12 @@ export const trackingEvents = (code) =>
 
 export function trackingSummary() {
   const db = getDb();
-  const byStatus = db.prepare('SELECT status, COUNT(*) AS c FROM tracking GROUP BY status').all();
-  const alerts = db.prepare("SELECT COUNT(*) AS c FROM tracking WHERE (is_stale = 1 OR status IN ('exception','not_found','returned')) AND alert_ack = 0").get().c;
+  const shop = activeShopId();
+  const byStatus = db.prepare('SELECT status, COUNT(*) AS c FROM tracking WHERE shop_id IS ? GROUP BY status').all(shop);
+  const alerts = db.prepare(`SELECT COUNT(*) AS c FROM tracking WHERE shop_id IS ?
+    AND (is_stale = 1 OR status IN ('exception','not_found','returned')) AND alert_ack = 0`).get(shop).c;
   return {
-    total: db.prepare('SELECT COUNT(*) AS c FROM tracking').get().c,
+    total: db.prepare('SELECT COUNT(*) AS c FROM tracking WHERE shop_id IS ?').get(shop).c,
     alerts,
     staleDays: getStaleDays(),
     byStatus: Object.fromEntries(byStatus.map((r) => [r.status, r.c])),

@@ -18,18 +18,23 @@ CREATE TABLE IF NOT EXISTS oauth_state (
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS oauth_token (
-  id             INTEGER PRIMARY KEY CHECK (id = 1),   -- single connected shop
-  user_id        INTEGER,
-  shop_id        INTEGER,
+-- One row per connected Etsy shop. Several shops can be connected at once;
+-- exactly one is active, and the active shop scopes what the screens show.
+CREATE TABLE IF NOT EXISTS etsy_accounts (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  shop_id        INTEGER UNIQUE,
   shop_name      TEXT,
+  user_id        INTEGER,
+  label          TEXT DEFAULT '',                      -- optional nickname
   access_token   TEXT NOT NULL,                        -- sealed
   refresh_token  TEXT NOT NULL,                        -- sealed
   scopes         TEXT NOT NULL DEFAULT '',
   expires_at     TEXT NOT NULL,
+  is_active      INTEGER NOT NULL DEFAULT 0,
   connected_at   TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_accounts_active ON etsy_accounts(is_active);
 
 -- ---------------------------------------------------------------- listings
 CREATE TABLE IF NOT EXISTS listings (
@@ -131,6 +136,7 @@ CREATE TABLE IF NOT EXISTS sku_meta (
 
 CREATE TABLE IF NOT EXISTS shop_sections (
   shop_section_id INTEGER PRIMARY KEY,
+  shop_id INTEGER,
   title TEXT, rank INTEGER, active_listing_count INTEGER, raw TEXT
 );
 
@@ -226,6 +232,7 @@ CREATE INDEX IF NOT EXISTS idx_ship_code ON shipments(tracking_code);
 CREATE TABLE IF NOT EXISTS tracking (
   tracking_code    TEXT PRIMARY KEY,
   receipt_id       INTEGER,
+  shop_id          INTEGER,
   carrier_name     TEXT,
   provider         TEXT,            -- yuntrack | seventeentrack | manual
   status           TEXT NOT NULL DEFAULT 'pre_shipped',
@@ -250,6 +257,7 @@ CREATE TABLE IF NOT EXISTS tracking (
 );
 CREATE INDEX IF NOT EXISTS idx_tracking_status ON tracking(status);
 CREATE INDEX IF NOT EXISTS idx_tracking_stale ON tracking(is_stale);
+CREATE INDEX IF NOT EXISTS idx_tracking_shop ON tracking(shop_id);
 
 CREATE TABLE IF NOT EXISTS tracking_events (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,

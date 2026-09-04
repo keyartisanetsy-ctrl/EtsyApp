@@ -5,6 +5,7 @@ import { openDatabase, driverKind } from './driver.js';
 import config from '../config.js';
 import { createLogger } from '../lib/logger.js';
 import { seal, open as unseal } from '../lib/crypto.js';
+import { migrate } from './migrate.js';
 
 const log = createLogger('db');
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -20,6 +21,7 @@ export async function initDb() {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(fs.readFileSync(path.join(here, 'schema.sql'), 'utf8'));
+  migrate(db);
   seedDefaults(db);
   log.info(`ready at ${config.dbFile} (${driverKind()})`);
   return db;

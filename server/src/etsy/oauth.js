@@ -8,6 +8,7 @@ import { getDb } from '../db/index.js';
 import { getCredentials, saveToken, request, call, clientId } from './client.js';
 import { ALL_SCOPES } from './operations.generated.js';
 import { EtsyApiError, badRequest } from '../lib/errors.js';
+import { outboundFetch } from '../lib/outbound.js';
 import { createLogger } from '../lib/logger.js';
 
 const log = createLogger('oauth');
@@ -52,7 +53,7 @@ export async function exchangeCode({ code, state }) {
   if (!row) throw badRequest('Unknown or expired OAuth state. Start the connection again.');
   getDb().prepare('DELETE FROM oauth_state WHERE state = ?').run(state);
 
-  const res = await fetch(config.etsy.tokenUrl, {
+  const res = await outboundFetch(config.etsy.tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({

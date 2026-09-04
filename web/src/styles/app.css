@@ -373,3 +373,44 @@ table.data td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .flex.col { flex-direction: column; align-items: stretch; }
 .gap4 { gap: 4px; } .gap12 { gap: 12px; }
 .mt8 { margin-top: 8px; } .mt16 { margin-top: 16px; } .mb8 { margin-bottom: 8px; } .mb16 { margin-bottom: 16px; }
+
+/* ------------------------------------------------------------ shop switcher */
+.shop-switch { position: relative; margin: 8px; }
+
+.shop-chip.as-button {
+  width: 100%; display: flex; align-items: center; gap: 7px;
+  cursor: pointer; font: inherit; color: inherit; margin: 0; text-align: left;
+}
+.shop-chip.as-button:hover { border-color: var(--accent); }
+.shop-chip .shop-name {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550;
+}
+.shop-chip .shop-count {
+  background: var(--surface-3); color: var(--text-dim);
+  font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 9px;
+}
+.shop-chip .caret { color: var(--text-faint); font-size: 10px; }
+.dot.idle { background: var(--text-faint); }
+
+.shop-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow); overflow: hidden;
+}
+.shop-option {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 11px; border: none; background: none; color: var(--text-dim);
+  font: inherit; font-size: 12.5px; cursor: pointer; text-align: left;
+  border-bottom: 1px solid var(--border-soft);
+}
+.shop-option:last-child { border-bottom: none; }
+.shop-option:hover:not(:disabled) { background: var(--surface-3); color: var(--text); text-decoration: none; }
+.shop-option.active { color: var(--text); cursor: default; }
+.shop-option.add { color: var(--brand); }
+.shop-option-name { display: block; }
+.shop-option-id { display: block; font-size: 10.5px; color: var(--text-faint); font-family: var(--mono); }
+
+/* ---------------------------------------------------------- privacy panel */
+.privacy-list { margin: 0 0 12px; padding-left: 20px; font-size: 13px; line-height: 1.7; }
+.privacy-list li { color: var(--text-dim); }
+.privacy-list.good li::marker { color: var(--good); content: '✓  '; }

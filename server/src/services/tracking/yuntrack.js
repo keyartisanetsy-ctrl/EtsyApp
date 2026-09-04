@@ -19,6 +19,7 @@
  */
 import crypto from 'node:crypto';
 import { STATUS } from './status.js';
+import { outboundFetch } from '../../lib/outbound.js';
 
 /** Client-side constant shipped in the public page bundle (not a credential). */
 const SIGN_KEY = 'f3c42837e3b46431ddf5d7db7d67017d';
@@ -154,7 +155,7 @@ export async function fetchTracking(codes, { endpoint = `${API_ROOT}/Track/Query
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(endpoint, {
+    const res = await outboundFetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

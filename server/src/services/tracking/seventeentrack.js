@@ -1,6 +1,7 @@
 /** Optional 17TRACK adapter - a paid API that works from any network, so it is
  *  the fallback when YunTrack refuses automated requests. */
 import { fromProviderCode, classify, STATUS } from './status.js';
+import { outboundFetch } from '../../lib/outbound.js';
 
 const BASE = 'https://api.17track.net/track/v2.2';
 
@@ -8,12 +9,12 @@ export async function fetchTracking(codes, { apiKey }) {
   if (!apiKey) throw new Error('17TRACK API key is not configured.');
   const headers = { '17token': apiKey, 'Content-Type': 'application/json' };
 
-  await fetch(`${BASE}/register`, {
+  await outboundFetch(`${BASE}/register`, {
     method: 'POST', headers,
     body: JSON.stringify(codes.map((number) => ({ number }))),
   }).catch(() => null); // already-registered numbers return an error we can ignore
 
-  const res = await fetch(`${BASE}/gettrackinfo`, {
+  const res = await outboundFetch(`${BASE}/gettrackinfo`, {
     method: 'POST', headers,
     body: JSON.stringify(codes.map((number) => ({ number }))),
   });

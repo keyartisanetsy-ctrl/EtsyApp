@@ -112,6 +112,31 @@ and strips the read-only fields Etsy refuses on write.
   configurable). This is time-based, so it still fires when the carrier feed is
   unreachable. Alerts can be acknowledged, and re-arm on the next real scan.
 
+### Multiple shops
+Connect as many Etsy shops as you like and switch between them from the sidebar.
+Each shop's listings, orders, variations and tracking are stored under its own
+shop id and every query is scoped to the active one, so two shops can never show
+each other's data — there is a test that proves it. Disconnecting a shop removes
+its local data with it. Tokens are refreshed per shop, and refreshing never
+changes which shop is selected.
+
+### Privacy
+The app is local-first and deliberately quiet:
+
+- **No telemetry, analytics or crash reporting.** None exists in the codebase.
+- **Nothing about you or your machine goes out.** Every outbound request carries
+  a fixed `EtsyCommandCenter/1.0` identifier with no version, platform or
+  hardware detail, and Node's default `Accept-Language`, `Sec-Fetch-*`, `Origin`
+  and `Referer` headers are stripped. No timezone, locale, username or file path
+  is ever transmitted.
+- **A complete destination list** is shown in Settings > Privacy — what each host
+  receives and whether it is required or optional. Nothing contacts the author of
+  this app, because there is nowhere for it to report to.
+- **AI is opt-out.** One switch blocks every provider call outright.
+- **Your IP address is the one thing an app cannot hide.** Any direct connection
+  reveals it. The Privacy panel says so plainly rather than implying otherwise,
+  and supports an outbound proxy (or use a system-wide VPN) if you need to mask it.
+
 ### Listings
 Every Etsy state — active, inactive, draft, expired, sold out — with activate,
 deactivate, delete, and full field editing. Create listings from scratch, upload

@@ -3,7 +3,7 @@
  * and copy-ready text blocks for pasting into supplier forms.
  */
 import { call } from '../etsy/client.js';
-import { requireShopId } from '../etsy/shop.js';
+import { requireShopId, activeShopId } from '../etsy/shop.js';
 import { getDb, parse, audit } from '../db/index.js';
 import { trackingUrl } from './settings.js';
 import { STATUS_LABELS } from './tracking/status.js';
@@ -22,8 +22,8 @@ export function listOrders({
   sort = 'created', dir = 'desc', limit = 100, offset = 0,
 } = {}) {
   const db = getDb();
-  const where = [];
-  const params = [];
+  const where = ['r.shop_id IS ?'];
+  const params = [activeShopId()];
 
   const flag = (col, v) => { if (v !== null && v !== undefined && v !== '') { where.push(`${col} = ?`); params.push(v ? 1 : 0); } };
   flag('COALESCE(f.is_done,0)', done);
@@ -50,7 +50,7 @@ export function listOrders({
   const sortable = { created: 'r.created_ts', updated: 'r.updated_ts', total: 'r.grandtotal_amount', name: 'r.name', status: 'r.status' };
   const orderBy = sortable[sort] || 'r.created_ts';
   const order = String(dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
-  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const clause = `WHERE ${where.join(' AND ')}`;
 
   // One shipment/tracking row per receipt (the most recent) keeps the join flat.
   const base = `
@@ -130,8 +130,8 @@ export function getOrder(receiptId) {
            COALESCE(f.is_flagged,0) AS is_flagged, COALESCE(f.supplier_ordered,0) AS supplier_ordered,
            f.supplier_order_ref, f.notes, 0 AS item_count
     FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
-    WHERE r.receipt_id = ?`).get(receiptId);
-  if (!r) throw notFound(`Order ${receiptId} is not in the local mirror. Sync orders first.`);
+    WHERE r.receipt_id = ? AND r.shop_id IS ?`).get(receiptId, activeShopId());
+  if (!r) throw notFound(`Order ${receiptId} is not in the active shop's local mirror. Sync orders first.`);
 
   const items = db.prepare(`
     SELECT x.*, m.supply_link, m.supplier_name, m.supply_cost
@@ -244,16 +244,21 @@ export const markSeen = (receiptIds) => setFlags(receiptIds, { seen: true });
 
 export function orderCounters() {
   const db = getDb();
-  const one = (sql, ...p) => db.prepare(sql).get(...p).c;
+  const shop = activeShopId();
+  const one = (sql) => db.prepare(sql).get(shop).c;
   return {
-    total: one('SELECT COUNT(*) AS c FROM receipts'),
-    newOrders: one('SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id WHERE COALESCE(f.is_seen,0) = 0'),
-    notDone: one('SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id WHERE COALESCE(f.is_done,0) = 0 AND r.was_canceled = 0'),
-    done: one('SELECT COUNT(*) AS c FROM order_flags WHERE is_done = 1'),
-    unshipped: one('SELECT COUNT(*) AS c FROM receipts WHERE was_shipped = 0 AND was_canceled = 0'),
-    noTracking: one(`SELECT COUNT(*) AS c FROM receipts r WHERE r.was_canceled = 0
+    total: one('SELECT COUNT(*) AS c FROM receipts WHERE shop_id IS ?'),
+    newOrders: one(`SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
+                    WHERE r.shop_id IS ? AND COALESCE(f.is_seen,0) = 0`),
+    notDone: one(`SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
+                  WHERE r.shop_id IS ? AND COALESCE(f.is_done,0) = 0 AND r.was_canceled = 0`),
+    done: one(`SELECT COUNT(*) AS c FROM order_flags f JOIN receipts r ON r.receipt_id = f.receipt_id
+               WHERE r.shop_id IS ? AND f.is_done = 1`),
+    unshipped: one('SELECT COUNT(*) AS c FROM receipts WHERE shop_id IS ? AND was_shipped = 0 AND was_canceled = 0'),
+    noTracking: one(`SELECT COUNT(*) AS c FROM receipts r WHERE r.shop_id IS ? AND r.was_canceled = 0
                      AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.receipt_id = r.receipt_id)`),
-    alerts: one(`SELECT COUNT(*) AS c FROM tracking WHERE (is_stale = 1 OR status IN ('exception','not_found','returned')) AND alert_ack = 0`),
+    alerts: one(`SELECT COUNT(*) AS c FROM tracking WHERE shop_id IS ?
+                 AND (is_stale = 1 OR status IN ('exception','not_found','returned')) AND alert_ack = 0`),
   };
 }
 

@@ -5,7 +5,7 @@
  */
 import fs from 'node:fs';
 import { call, callAll } from '../etsy/client.js';
-import { requireShopId } from '../etsy/shop.js';
+import { requireShopId, activeShopId } from '../etsy/shop.js';
 import { getDb, parse, json, audit } from '../db/index.js';
 import { saveListing, saveImages, syncVariationImages, LISTING_STATES } from './sync.js';
 import { getDiscountPercent } from './settings.js';
@@ -31,8 +31,10 @@ export function localListings({
   sort = 'updated', dir = 'desc', limit = 100, offset = 0,
 } = {}) {
   const db = getDb();
-  const where = [];
-  const params = [];
+  // Every listing query is scoped to the active shop so connected shops never
+  // show each other's catalogue.
+  const where = ['l.shop_id IS ?'];
+  const params = [activeShopId()];
 
   if (state) { where.push('l.state = ?'); params.push(state); }
   if (sectionId) { where.push('l.shop_section_id = ?'); params.push(sectionId); }
@@ -42,7 +44,7 @@ export function localListings({
     where.push('(l.title LIKE ? OR CAST(l.listing_id AS TEXT) LIKE ? OR l.tags LIKE ? OR l.description LIKE ?)');
     const like = `%${search}%`; params.push(like, like, like, like);
   }
-  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const clause = `WHERE ${where.join(' AND ')}`;
   const sortable = { updated: 'l.updated_ts', created: 'l.created_ts', title: 'l.title', price: 'l.price_amount', views: 'l.views', favorers: 'l.num_favorers', quantity: 'l.quantity' };
   const orderBy = sortable[sort] || 'l.updated_ts';
   const order = String(dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
@@ -56,7 +58,8 @@ export function localListings({
 
   const total = db.prepare(`SELECT COUNT(*) AS c FROM listings l ${clause}`).get(...params).c;
   const counts = Object.fromEntries(
-    db.prepare('SELECT state, COUNT(*) AS c FROM listings GROUP BY state').all().map((r) => [r.state, r.c]),
+    db.prepare('SELECT state, COUNT(*) AS c FROM listings WHERE shop_id IS ? GROUP BY state')
+      .all(activeShopId()).map((r) => [r.state, r.c]),
   );
 
   return {

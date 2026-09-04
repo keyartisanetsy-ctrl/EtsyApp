@@ -42,6 +42,10 @@ export const SETTING_DEFS = {
   'tracking.browser_headed':{ env: '', def: 'false', label: 'Show the browser window (to solve a captcha once)' },
   'tracking.browser_path':  { env: process.env.PLAYWRIGHT_CHROMIUM_PATH || '', def: '', label: 'Chromium path for the browser provider' },
 
+  'privacy.proxy_url':     { env: process.env.OUTBOUND_PROXY || '', def: '', label: 'Outbound proxy (masks your IP)' },
+  'privacy.share_ai':      { env: '', def: 'true', label: 'Allow AI features to send your text to the AI provider',
+    options: [ { value: 'true', label: 'Yes - AI features work' }, { value: 'false', label: 'No - block all AI calls' } ] },
+
   'pricing.discount_percent': { env: String(config.pricing.discountPercent), def: '30', label: 'Discount percentage' },
   'orders.default_carrier':   { env: '', def: '', label: 'Default carrier for bulk tracking' },
   'orders.notify_buyer':      { env: '', def: 'true', label: 'Email the buyer when tracking is added' },

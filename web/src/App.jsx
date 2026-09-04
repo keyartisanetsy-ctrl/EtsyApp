@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import api from './lib/api.js';
-import { ToastHost } from './components/ui.jsx';
+import { ToastHost, useToast, useErrorToast } from './components/ui.jsx';
 
 import Dashboard from './pages/Dashboard.jsx';
 import Listings from './pages/Listings.jsx';
@@ -58,6 +58,65 @@ const NAV = [
   },
 ];
 
+/** Sidebar shop selector. Several Etsy shops can be connected; exactly one is
+ *  active, and everything on screen belongs to that shop. */
+function ShopSwitcher({ summary, onSwitched }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const showError = useErrorToast();
+  const accounts = summary?.accounts ?? [];
+  const active = accounts.find((a) => a.isActive);
+
+  const switchTo = async (shopId) => {
+    setBusy(true);
+    try {
+      await api.post(`/auth/accounts/${shopId}/activate`, {});
+      const next = accounts.find((a) => a.shopId === shopId);
+      toast({ kind: 'ok', title: `Switched to ${next?.label || next?.shopName || shopId}` });
+      setOpen(false);
+      onSwitched();
+    } catch (err) { showError(err, 'Could not switch shop'); } finally { setBusy(false); }
+  };
+
+  if (!accounts.length) {
+    return (
+      <div className="shop-chip">
+        <span className="dot off" />
+        <span className="muted">No shop connected</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="shop-switch">
+      <button className="shop-chip as-button" onClick={() => setOpen((v) => !v)} disabled={busy}>
+        <span className="dot on" />
+        <span className="shop-name">{active?.label || active?.shopName || `Shop ${active?.shopId}`}</span>
+        {accounts.length > 1 && <span className="shop-count">{accounts.length}</span>}
+        <span className="caret">{open ? '▴' : '▾'}</span>
+      </button>
+      {open && (
+        <div className="shop-menu">
+          {accounts.map((a) => (
+            <button key={a.shopId} className={`shop-option ${a.isActive ? 'active' : ''}`}
+                    onClick={() => switchTo(a.shopId)} disabled={busy || a.isActive}>
+              <span className={`dot ${a.isActive ? 'on' : 'idle'}`} />
+              <span>
+                <span className="shop-option-name">{a.label || a.shopName || `Shop ${a.shopId}`}</span>
+                <span className="shop-option-id">{a.shopId}</span>
+              </span>
+            </button>
+          ))}
+          <NavLink to="/settings" className="shop-option add" onClick={() => setOpen(false)}>
+            <span className="ico">＋</span> Connect another shop
+          </NavLink>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [summary, setSummary] = useState(null);
   const location = useLocation();
@@ -91,12 +150,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="shop-chip">
-            <span className={`dot ${summary?.connected ? 'on' : 'off'}`} />
-            {summary?.connected
-              ? <span>{summary.shop?.shopName || `Shop ${summary.shop?.shopId ?? ''}`}</span>
-              : <span className="muted">Not connected</span>}
-          </div>
+          <ShopSwitcher summary={summary} onSwitched={refresh} />
 
           <div className="nav">
             {NAV.map((group) => (

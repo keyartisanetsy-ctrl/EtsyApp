@@ -8,7 +8,7 @@
  * is_deleted, scale_id on a non-scaled property).
  */
 import { call } from '../etsy/client.js';
-import { requireShopId } from '../etsy/shop.js';
+import { requireShopId, activeShopId } from '../etsy/shop.js';
 import { getDb, json, parse, audit } from '../db/index.js';
 import { saveInventory, syncVariationImages, variationLabel } from './sync.js';
 import { toMajor, discounted, listPriceForTarget } from '../lib/money.js';
@@ -165,8 +165,8 @@ export function skuGrid({
   sort = 'title', dir = 'asc', limit = 500, offset = 0,
 } = {}) {
   const db = getDb();
-  const where = [];
-  const params = [];
+  const where = ['l.shop_id IS ?'];
+  const params = [activeShopId()];
 
   if (state) { where.push('l.state = ?'); params.push(state); }
   if (listingId) { where.push('p.listing_id = ?'); params.push(listingId); }
@@ -186,7 +186,7 @@ export function skuGrid({
   const orderBy = sortable[sort] || 'l.title';
   const order = String(dir).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
 
-  const clause = where.length ? ` AND ${where.join(' AND ')}` : '';
+  const clause = ` AND ${where.join(' AND ')}`;
   const rows = db.prepare(
     `${GRID_SQL}${clause} ORDER BY ${orderBy} ${order}, p.product_id ASC LIMIT ? OFFSET ?`,
   ).all(...params, limit, offset);
@@ -287,9 +287,9 @@ export function duplicateSkus() {
     SELECT p.sku, COUNT(*) AS uses,
            json_group_array(json_object('productId', p.product_id, 'listingId', p.listing_id, 'title', l.title)) AS rows
     FROM listing_products p JOIN listings l ON l.listing_id = p.listing_id
-    WHERE p.sku <> '' AND p.is_deleted = 0
+    WHERE p.sku <> '' AND p.is_deleted = 0 AND l.shop_id IS ?
     GROUP BY p.sku HAVING COUNT(*) > 1 ORDER BY uses DESC`)
-    .all().map((r) => ({ sku: r.sku, uses: r.uses, rows: parse(r.rows, []) }));
+    .all(activeShopId()).map((r) => ({ sku: r.sku, uses: r.uses, rows: parse(r.rows, []) }));
 }
 
 export { variationLabel };
