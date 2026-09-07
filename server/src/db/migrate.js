@@ -79,6 +79,8 @@ export function migrateSchema(db) {
   addColumn(db, 'airtable_destinations', 'once_per_order', 'INTEGER NOT NULL DEFAULT 1');
   addColumn(db, 'order_flags', 'problem_state', "TEXT NOT NULL DEFAULT 'none'");
   addColumn(db, 'order_flags', 'problem_note', "TEXT DEFAULT ''");
+  addColumn(db, 'order_flags', 'offsite_ads', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'etsy_accounts', 'offsite_ads_rate', 'REAL DEFAULT 0.12');
 
   // What each shop is called over in Airtable.
   addColumn(db, 'etsy_accounts', 'airtable_name', "TEXT DEFAULT ''");

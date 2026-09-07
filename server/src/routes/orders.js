@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { asyncRoute, int, tri, bool, ids, required } from '../lib/http.js';
 import * as orders from '../services/orders.js';
+import * as offsiteAds from '../services/offsiteads.js';
+import { listAccounts } from '../etsy/client.js';
 import * as sync from '../services/sync.js';
 
 const router = Router();
@@ -49,6 +51,40 @@ router.post('/:id/flags', asyncRoute(async (req, res) => {
 router.post('/problem', asyncRoute(async (req, res) => {
   const { receiptIds = [], state = 'warning', note = '' } = req.body ?? {};
   res.json(orders.setProblem(receiptIds, { state, note }));
+}));
+
+/** Mark orders as having come from an Etsy Offsite Ad (or clear it). */
+router.post('/offsite-ads', asyncRoute(async (req, res) => {
+  const { receiptIds = [], on = true } = req.body ?? {};
+  res.json(offsiteAds.setOffsiteAds(receiptIds, on));
+}));
+
+/** The Offsite Ads rate each connected shop is on. */
+router.get('/offsite-ads/rates', asyncRoute(async (req, res) => {
+  res.json(listAccounts().map((a) => ({
+    shopId: a.shopId,
+    shopName: a.shopName,
+    isActive: a.isActive,
+    rate: offsiteAds.rateForShop(a.shopId),
+    ratePercent: Math.round(offsiteAds.rateForShop(a.shopId) * 1000) / 10,
+  })));
+}));
+
+router.put('/offsite-ads/rates/:shopId', asyncRoute(async (req, res) => {
+  // Accept either 12 or 0.12, since both readings are natural.
+  const raw = Number(req.body?.rate);
+  const rate = raw > 1 ? raw / 100 : raw;
+  res.json(offsiteAds.setRateForShop(Number(req.params.shopId), rate));
+}));
+
+/** What offsite ads cost over a period, and the rate this shop is on. */
+router.get('/offsite-ads/cost', asyncRoute(async (req, res) => {
+  res.json(offsiteAds.costSummary({
+    sinceDays: req.query.sinceDays ? Number(req.query.sinceDays) : 30,
+    since: req.query.since || null,
+    until: req.query.until || null,
+    currency: (req.query.currency || 'USD').toUpperCase(),
+  }));
 }));
 
 router.post('/seen', asyncRoute(async (req, res) => {

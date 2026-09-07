@@ -47,6 +47,13 @@ export function statusesFor(row = {}) {
       `Sent to Airtable ${row.airtable_pushed_at}. Sending again updates the same row.`);
   }
 
+  // Offsite ads cost real money, so it is worth seeing at a glance which
+  // orders carry the fee rather than discovering it at month end.
+  if (row.offsite_ads) {
+    add('offsite_ads', 'Offsite ad', 'warn',
+      row.offsite_ads_explanation || 'This order came from an Etsy Offsite Ad, so Etsy takes an advertising fee from it.');
+  }
+
   if (row.supplier_ordered) {
     add('ordered', 'Ordered', 'info',
       row.supplier_order_ref

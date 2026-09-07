@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS etsy_accounts (
   -- the option in an Airtable select column are often spelled differently, so
   -- the mapping writes this instead of guessing.
   airtable_name  TEXT DEFAULT '',
+  -- 0.12 for shops over $10k a year, 0.15 for smaller ones.
+  offsite_ads_rate REAL DEFAULT 0.12,
   access_token   TEXT NOT NULL,                        -- sealed
   refresh_token  TEXT NOT NULL,                        -- sealed
   scopes         TEXT NOT NULL DEFAULT '',
@@ -230,6 +232,9 @@ CREATE TABLE IF NOT EXISTS order_flags (
   -- An order can be delivered and still carry a warning.
   problem_state TEXT NOT NULL DEFAULT 'none',
   problem_note  TEXT DEFAULT '',
+  -- Etsy does not tell us which orders came from an offsite ad, so this is a
+  -- button you press. The fee is then worked out from the shop's rate.
+  offsite_ads   INTEGER NOT NULL DEFAULT 0,
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

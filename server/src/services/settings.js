@@ -48,6 +48,8 @@ export const SETTING_DEFS = {
 
   'etsy.write_gap_ms':     { env: '', def: '1200', label: 'Pause between writes to Etsy (milliseconds)' },
 
+  'offsite_ads.default_rate': { env: '', def: '0.12', label: 'Offsite Ads fee rate for a new shop (0.12 = 12%)' },
+
   'reporting.currency':    { env: '', def: 'USD', label: 'Currency to report money in',
     options: [
       { value: 'USD', label: 'USD - US dollar' },

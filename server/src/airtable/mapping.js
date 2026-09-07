@@ -168,6 +168,13 @@ const SYNONYMS = {
   carrier: 'tracking.carrier',
   'shipping company': 'tracking.carrier',
 
+  'offsite ads var mi': 'order.offsite_ads_yesno',
+  'offsite ads': 'order.offsite_ads_yesno',
+  'offsite ad': 'order.offsite_ads_yesno',
+  'offsite ads fee': 'order.offsite_ads_fee',
+  'offsite ads ucreti': 'order.offsite_ads_fee',
+  'reklam maliyeti': 'order.offsite_ads_fee',
+
   kod: 'order.code',
   code: 'order.code',
   'siparis kodu': 'order.code',

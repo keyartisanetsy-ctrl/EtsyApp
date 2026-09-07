@@ -35,7 +35,10 @@ export function sumReceipts({ sinceDays = null, since = null, until = null, curr
   const where = ['shop_id IS ?'];
   const params = [shopId];
 
-  if (!includeCanceled) where.push('was_canceled = 0');
+  // COALESCE, not `= 0`: Etsy leaves was_canceled null on plenty of receipts,
+  // and `null = 0` is null in SQL, so a plain comparison silently drops them
+  // from the totals.
+  if (!includeCanceled) where.push('COALESCE(was_canceled, 0) = 0');
   if (sinceDays) { where.push('created_ts >= ?'); params.push(Math.floor(Date.now() / 1000) - sinceDays * 86_400); }
   if (since) { where.push('created_ts >= ?'); params.push(Math.floor(Date.parse(since) / 1000)); }
   if (until) { where.push('created_ts < ?'); params.push(Math.floor(Date.parse(until) / 1000) + 86_400); }
@@ -131,7 +134,7 @@ export function monthlyBreakdown({ months = 6, currency = reportingCurrency(), s
   const since = Math.floor(Date.now() / 1000) - months * 31 * 86_400;
   const rows = db.prepare(`
     SELECT receipt_id, created_ts, grandtotal_amount, grandtotal_divisor, grandtotal_currency, refunded_amount
-    FROM receipts WHERE shop_id IS ? AND was_canceled = 0 AND created_ts >= ?`).all(shopId, since);
+    FROM receipts WHERE shop_id IS ? AND COALESCE(was_canceled, 0) = 0 AND created_ts >= ?`).all(shopId, since);
 
   const buckets = new Map();
   for (const r of rows) {

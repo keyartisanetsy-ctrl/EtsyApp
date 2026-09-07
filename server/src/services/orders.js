@@ -9,6 +9,7 @@ import { trackingUrl } from './settings.js';
 import { STATUS_LABELS } from './tracking/status.js';
 import { notFound, badRequest } from '../lib/errors.js';
 import { statusesFor } from './orderstatus.js';
+import { feeFor } from './offsiteads.js';
 
 const asMoney = (amount, divisor, currency) =>
   amount == null ? null : { value: amount / (divisor || 100), currency };
@@ -69,6 +70,7 @@ export function listOrders({
            COALESCE(f.is_flagged,0) AS is_flagged, COALESCE(f.supplier_ordered,0) AS supplier_ordered,
            f.supplier_order_ref, f.notes,
            COALESCE(f.problem_state,'none') AS problem_state, f.problem_note,
+           COALESCE(f.offsite_ads,0) AS offsite_ads,
            al.airtable_pushed_at,
            s.tracking_code, s.carrier_name, s.pushed_to_etsy,
            t.status AS tracking_status, t.days_since_move, t.is_stale, t.alert_reason,
@@ -107,6 +109,8 @@ function orderSummary(r) {
     // truth, e.g. delivered but with a problem raised afterwards.
     statuses: statusesFor(r),
     problemState: r.problem_state ?? 'none',
+    offsiteAds: !!r.offsite_ads,
+    offsiteAdsFee: feeFor(r),
     problemNote: r.problem_note ?? '',
     subtotal: asMoney(r.subtotal_amount, r.grandtotal_divisor, r.grandtotal_currency),
     // Small contact line under the buyer, so you can reach them without opening the order.
@@ -145,6 +149,7 @@ export function getOrder(receiptId) {
            COALESCE(f.is_flagged,0) AS is_flagged, COALESCE(f.supplier_ordered,0) AS supplier_ordered,
            f.supplier_order_ref, f.notes, 0 AS item_count,
            COALESCE(f.problem_state,'none') AS problem_state, f.problem_note,
+           COALESCE(f.offsite_ads,0) AS offsite_ads,
            al.airtable_pushed_at,
            s.tracking_code, s.carrier_name, t.status AS tracking_status, t.days_since_move
     FROM receipts r
@@ -300,11 +305,11 @@ export function orderCounters() {
     newOrders: one(`SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
                     WHERE r.shop_id IS ? AND COALESCE(f.is_seen,0) = 0`),
     notDone: one(`SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
-                  WHERE r.shop_id IS ? AND COALESCE(f.is_done,0) = 0 AND r.was_canceled = 0`),
+                  WHERE r.shop_id IS ? AND COALESCE(f.is_done,0) = 0 AND COALESCE(r.was_canceled,0) = 0`),
     done: one(`SELECT COUNT(*) AS c FROM order_flags f JOIN receipts r ON r.receipt_id = f.receipt_id
                WHERE r.shop_id IS ? AND f.is_done = 1`),
-    unshipped: one('SELECT COUNT(*) AS c FROM receipts WHERE shop_id IS ? AND was_shipped = 0 AND was_canceled = 0'),
-    noTracking: one(`SELECT COUNT(*) AS c FROM receipts r WHERE r.shop_id IS ? AND r.was_canceled = 0
+    unshipped: one('SELECT COUNT(*) AS c FROM receipts WHERE shop_id IS ? AND COALESCE(was_shipped,0) = 0 AND COALESCE(was_canceled,0) = 0'),
+    noTracking: one(`SELECT COUNT(*) AS c FROM receipts r WHERE r.shop_id IS ? AND COALESCE(r.was_canceled,0) = 0
                      AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.receipt_id = r.receipt_id)`),
     alerts: one(`SELECT COUNT(*) AS c FROM tracking WHERE shop_id IS ?
                  AND (is_stale = 1 OR status IN ('exception','not_found','returned')) AND alert_ack = 0`),

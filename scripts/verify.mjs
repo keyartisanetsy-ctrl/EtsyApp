@@ -148,7 +148,9 @@ await check('two shops stay isolated from each other', async () => {
 
   // Two pretend shops, each with one listing and one order.
   const seal = 'v1.x.y.z'; // token contents are irrelevant here
-  db.prepare('DELETE FROM etsy_accounts WHERE shop_id IN (990001, 990002)').run();
+  // Clear any account a previously failing check left behind, or removeAccount
+  // could promote a stray shop instead of the survivor we assert on.
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id >= 900000').run();
   for (const [shopId, name] of [[990001, 'Verify Shop A'], [990002, 'Verify Shop B']]) {
     db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
                 VALUES (?,?,?,?,datetime('now','+1 hour'),0)`).run(shopId, name, seal, seal);
@@ -838,21 +840,30 @@ await check('revenue is converted per order date, not mislabelled', async () => 
                 VALUES (?,940001,260310,100,'TRY',?,?,?,?)`).run(id, canceled, refunded, refunded ? 1 : 0, now);
   }
 
+  // Etsy leaves was_canceled null on plenty of receipts. `null = 0` is null in
+  // SQL, so comparing directly drops those rows from every total silently.
+  db.prepare(`INSERT INTO receipts (receipt_id, shop_id, grandtotal_amount, grandtotal_divisor,
+              grandtotal_currency, was_canceled, created_ts) VALUES (940103,940001,260310,100,'TRY',NULL,?)`)
+    .run(now);
+
   const usd = rep.sumReceipts({ sinceDays: 7, currency: 'USD' });
-  assert(usd.orders === 2, `cancelled order should be excluded, counted ${usd.orders}`);
+  assert(usd.orders === 3, `a null was_canceled must still count, got ${usd.orders} orders`);
   assert(usd.canceledOrders === 0, 'cancelled orders should not be summed at all');
   assert(usd.refundedOrders === 1, 'the refund was not noticed');
 
-  // Two orders of 2603.10 TRY at 48.443 = 107.48 USD, less a 1000 TRY refund.
-  const expectedGross = (2 * 2603.10) / 48.443;
+  // Three orders of 2603.10 TRY at 48.443, less a 1000 TRY refund.
+  const expectedGross = (3 * 2603.10) / 48.443;
   assert(Math.abs(usd.gross - expectedGross) < 0.02, `gross ${usd.gross}, expected ~${expectedGross.toFixed(2)}`);
   assert(Math.abs(usd.net - (expectedGross - 1000 / 48.443)) < 0.02, `net ${usd.net} did not subtract the refund`);
   assert(usd.byCurrency.TRY, 'should say the money arrived in lira');
   assert(usd.currency === 'USD', 'reported currency missing');
 
-  // The old bug: summing raw amounts and calling them dollars.
-  const raw = db.prepare('SELECT SUM(grandtotal_amount)/100.0 AS c FROM receipts WHERE shop_id IS 940001 AND was_canceled = 0').get().c;
-  assert(raw > usd.gross * 40, 'sanity: the raw lira sum should dwarf the dollar figure');
+  // The old bug: summing raw amounts and calling them dollars. Counted over the
+  // same rows, the lira sum is ~48x the dollar one.
+  const raw = db.prepare(`SELECT SUM(grandtotal_amount)/100.0 AS c FROM receipts
+    WHERE shop_id IS 940001 AND COALESCE(was_canceled,0) = 0`).get().c;
+  assert(Math.abs(raw / usd.gross - 48.443) < 1,
+    `the raw lira sum should be ~48x the dollar figure, ratio was ${(raw / usd.gross).toFixed(1)}`);
 
   db.prepare('DELETE FROM receipts WHERE receipt_id BETWEEN 940100 AND 940199').run();
   client.removeAccount(940001);
@@ -972,6 +983,69 @@ await check('an order can be delivered and still carry a warning', async () => {
   // A number that is not YunExpress cannot be followed automatically; say so.
   const foreign = statusesFor({ tracking_code: 'AB12', days_since_move: 6 }).find((s) => s.id.startsWith('idle'));
   assert(/not a YunExpress/i.test(foreign.hint), 'a non-YunExpress number should be called out');
+});
+
+await check("Etsy's offsite ads fee follows the published rules", async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const oa = await import('../server/src/services/offsiteads.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare(`INSERT INTO fx_rates (day, base, quote, rate, source) VALUES ('2026-09-04','USD','TRY',48.443,'test')
+              ON CONFLICT(day,base,quote) DO UPDATE SET rate = excluded.rate`).run();
+
+  for (const id of [920001, 920002]) db.prepare('DELETE FROM etsy_accounts WHERE shop_id = ?').run(id);
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active, offsite_ads_rate)
+              VALUES (920001,'Big Shop','v1.x','v1.x',datetime('now','+1 hour'),0,0.12)`).run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active, offsite_ads_rate)
+              VALUES (920002,'Small Shop','v1.x','v1.x',datetime('now','+1 hour'),0,0.15)`).run();
+
+  assert(oa.rateForShop(920001) === 0.12, 'a shop over $10k a year pays the discounted 12%');
+  assert(oa.rateForShop(920002) === 0.15, 'a smaller shop pays 15%');
+
+  const ts = Math.floor(Date.parse('2026-09-05T10:00:00Z') / 1000);
+  const order = (total, currency) => ({
+    offsite_ads: 1, grandtotal_amount: Math.round(total * 100), grandtotal_divisor: 100,
+    grandtotal_currency: currency, created_ts: ts,
+  });
+
+  assert(oa.feeFor(order(60, 'USD'), { shopId: 920001 }).fee === 7.2, '12% of $60 should be $7.20');
+  assert(oa.feeFor(order(60, 'USD'), { shopId: 920002 }).fee === 9, '15% of $60 should be $9');
+
+  // Etsy never charges more than $100 on one order.
+  const big = oa.feeFor(order(1200, 'USD'), { shopId: 920001 });
+  assert(big.fee === 100 && big.capped, `a $1200 order should cap at $100, got ${big.fee}`);
+
+  // The cap is in dollars, so on a lira order it has to be converted first -
+  // capping at a bare "100" would charge about two dollars instead of a hundred.
+  const lira = oa.feeFor(order(60000, 'TRY'), { shopId: 920001 });
+  assert(lira.capped, 'a 60,000 TRY order should hit the cap');
+  assert(Math.abs(lira.feeUsd - 100) < 0.5, `the cap should be $100 worth of lira, got $${lira.feeUsd}`);
+  assert(lira.fee > 4000, `the cap in lira should be thousands, got ${lira.fee}`);
+
+  // Under the cap, it is just the percentage.
+  const small = oa.feeFor(order(2603.10, 'TRY'), { shopId: 920001 });
+  assert(!small.capped && Math.abs(small.fee - 312.37) < 0.02, `12% of 2603.10 TRY, got ${small.fee}`);
+
+  // No fee unless the order is actually marked.
+  assert(oa.feeFor({ ...order(60, 'USD'), offsite_ads: 0 }, { shopId: 920001 }) === null,
+    'an unmarked order should have no fee');
+
+  // The button writes the flag through.
+  db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, grandtotal_amount, grandtotal_divisor,
+              grandtotal_currency, created_ts) VALUES (920100,920001,6000,100,'USD',?)`).run(ts);
+  client.setActiveAccount(920001);
+  oa.setOffsiteAds([920100], true);
+  assert(db.prepare('SELECT offsite_ads FROM order_flags WHERE receipt_id = 920100').get().offsite_ads === 1,
+    'the offsite ad mark was not saved');
+  oa.setOffsiteAds([920100], false);
+  assert(db.prepare('SELECT offsite_ads FROM order_flags WHERE receipt_id = 920100').get().offsite_ads === 0,
+    'the offsite ad mark could not be cleared');
+
+  db.prepare('DELETE FROM receipts WHERE receipt_id = 920100').run();
+  client.removeAccount(920001);
+  client.removeAccount(920002);
 });
 
 await check('Airtable is disclosed as a destination and needs a token', async () => {

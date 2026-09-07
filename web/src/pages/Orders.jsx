@@ -51,6 +51,15 @@ export default function Orders() {
   const toggleAll = () => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.receiptId)));
 
   /** The Done tick — the column the shop works down. */
+  /** Etsy does not report which orders came from an ad, so this is a button. */
+  const setOffsite = async (receiptIds, on) => {
+    try {
+      await api.post('/orders/offsite-ads', { receiptIds, on });
+      toast({ kind: 'ok', title: on ? `${receiptIds.length} marked as offsite ad` : 'Offsite ad mark cleared' });
+      refreshAll();
+    } catch (err) { showError(err, 'Could not change the offsite ad mark'); }
+  };
+
   const setFlag = async (receiptIds, patch) => {
     try {
       await api.post('/orders/flags', { receiptIds, ...patch });
@@ -103,6 +112,7 @@ export default function Orders() {
           <Filter label="Tracking" value={hasTracking} onChange={setHasTracking} />
           <Checkbox checked={alertsOnly} onChange={(v) => { setAlertsOnly(v); setOffset(0); }} label="Alerts only" />
           <div className="spacer" />
+          <OffsiteAdsPanel />
           {counters?.newOrders > 0 && (
             <button className="btn sm" onClick={() => setFlag(rows.map((r) => r.receiptId), { seen: true })}>
               Mark page seen
@@ -118,6 +128,10 @@ export default function Orders() {
           <button className="btn xs" onClick={() => setFlag([...selected], { seen: true })}>Mark seen</button>
           <button className="btn xs" onClick={() => setFlag([...selected], { flagged: true })}>⚑ Flag</button>
           <button className="btn xs" onClick={() => setFlag([...selected], { supplierOrdered: true })}>Supplier ordered</button>
+          <button className="btn xs" title="Mark these as having come from an Etsy Offsite Ad, so the fee is counted"
+            onClick={() => setOffsite([...selected], true)}>◈ Offsite ad</button>
+          <button className="btn xs ghost" title="Clear the offsite ad mark"
+            onClick={() => setOffsite([...selected], false)}>Not offsite</button>
           <button className="btn xs primary" onClick={() => setSendingToAirtable([...selected])}>⇉ Send to Airtable</button>
           <div className="spacer" />
           <button className="btn xs ghost" onClick={() => setSelected(new Set())}>Clear</button>
@@ -169,7 +183,15 @@ export default function Orders() {
                     {o.itemCount > 1 && <span className="badge blue" style={{ marginLeft: 4 }} title="More than one product in this order">multi</span>}
                   </td>
                   <td className="num subtotal-cell">{fmtMoney(o.subtotal?.value, o.subtotal?.currency)}</td>
-                  <td className="num">{fmtMoney(o.total?.value, o.total?.currency)}</td>
+                  <td className="num">
+                    {fmtMoney(o.total?.value, o.total?.currency)}
+                    {o.offsiteAdsFee && (
+                      <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}
+                           title={o.offsiteAdsFee.explanation}>
+                        −{o.offsiteAdsFee.fee} ads{o.offsiteAdsFee.capped ? ' (cap)' : ''}
+                      </div>
+                    )}
+                  </td>
                   <td>
                     {o.trackingCode ? (
                       <div className="flex gap4">
@@ -202,6 +224,80 @@ export default function Orders() {
         />
       )}
     </TablePage>
+  );
+}
+
+/**
+ * The Offsite Ads rate each shop is on, plus what the fee has cost lately.
+ *
+ * Etsy charges 15% to shops under $10,000 a year and a discounted 12% above
+ * that, never more than $100 on one order. Which band a shop is in is a fact
+ * about the shop, so it is set here rather than guessed per order.
+ */
+function OffsiteAdsPanel() {
+  const showError = useErrorToast();
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const rates = useAsync(() => api.get('/orders/offsite-ads/rates'), []);
+  const cost = useAsync(() => api.get('/orders/offsite-ads/cost?sinceDays=30'), []);
+  const [draft, setDraft] = useState({});
+
+  const save = async (shopId, percent) => {
+    try {
+      await api.put(`/orders/offsite-ads/rates/${shopId}`, { rate: Number(percent) });
+      toast({ kind: 'ok', title: `Rate set to ${percent}%` });
+      rates.reload(); cost.reload();
+    } catch (err) { showError(err, 'Could not save the rate'); }
+  };
+
+  const c = cost.data;
+  return (
+    <>
+      <button className="btn sm" onClick={() => setOpen(true)}
+        title="Etsy's advertising fee: which rate each shop is on, and what it has cost">
+        ◈ Offsite ads{c ? ` · ${c.fees} ${c.currency}/30d` : ''}
+      </button>
+
+      <Modal open={open} onClose={() => setOpen(false)} title="Offsite Ads">
+        <p className="small muted">
+          Etsy charges <strong>15%</strong> to shops turning over under $10,000 a year (who may opt out) and a
+          discounted <strong>12%</strong> at or above that, where it is mandatory. The fee is never more than
+          {' '}<strong>$100</strong> on a single order. Etsy does not tell the API which orders came from an ad,
+          so mark them yourself with the <em>Offsite ad</em> button — the fee is then worked out for you.
+        </p>
+
+        {c && (
+          <Banner kind="info">
+            Last 30 days: {c.orders} order(s) marked as offsite ads, {c.fees} {c.currency} in fees
+            {c.cappedOrders > 0 ? `, ${c.cappedOrders} of them hit the $100 cap` : ''}.
+          </Banner>
+        )}
+
+        <h4 className="mt8">Rate per shop</h4>
+        <table className="data">
+          <thead><tr><th>Shop</th><th className="col-tight">Rate %</th><th className="col-tight" /></tr></thead>
+          <tbody>
+            {(rates.data ?? []).map((r) => {
+              const value = draft[r.shopId] ?? r.ratePercent;
+              return (
+                <tr key={r.shopId}>
+                  <td>{r.shopName}{r.isActive && <span className="badge" style={{ marginLeft: 6 }}>active</span>}</td>
+                  <td>
+                    <input className="input sm" style={{ width: 70 }} type="number" step="0.1" value={value}
+                      onChange={(e) => setDraft((d) => ({ ...d, [r.shopId]: e.target.value }))} />
+                  </td>
+                  <td>
+                    <button className="btn sm" disabled={Number(value) === r.ratePercent}
+                      onClick={() => save(r.shopId, value)}>Save</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <p className="small muted mt8">Enter 12 or 15 (0.12 / 0.15 are understood too).</p>
+      </Modal>
+    </>
   );
 }
 

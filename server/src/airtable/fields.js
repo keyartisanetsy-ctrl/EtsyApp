@@ -13,6 +13,7 @@ import { readSetting } from '../services/settings.js';
 import { rateOn, convert } from '../services/fx.js';
 import { codeFor, monthLabelTr, monthLabelEn } from '../services/ordercode.js';
 import { imageForTransaction } from '../services/variantimages.js';
+import { feeFor as offsiteFeeFor } from '../services/offsiteads.js';
 
 const iso = (ts) => (ts ? new Date(ts * 1000).toISOString() : null);
 const isoDate = (ts) => (ts ? new Date(ts * 1000).toISOString().slice(0, 10) : null);
@@ -212,6 +213,33 @@ export const SOURCE_FIELDS = [
   { key: 'tracking.shipping_cost_usd', group: 'Tracking', label: 'Shipping cost in USD',
     hint: 'The shipping cost converted to USD at the rate of the order date',
     get: ({ order }) => round2(convert(order.shipping_cost, order.shipping_cost_currency || 'CNY', 'USD', isoDate(order.created_ts))) },
+
+  // ----------------------------------------------------------- offsite ads
+  // Etsy does not report which orders came from an offsite ad, so this
+  // follows the button you press on the order.
+  { key: 'order.offsite_ads', group: 'Offsite ads', label: 'Came from an offsite ad?',
+    hint: 'true/false. Whether you marked this order as having come from an Etsy Offsite Ad.',
+    get: ({ order }) => !!order.offsite_ads },
+  { key: 'order.offsite_ads_yesno', group: 'Offsite ads', label: 'Offsite ad (YES / empty)',
+    hint: 'Writes "YES" when the order came from an offsite ad and nothing when it did not - for a select column',
+    get: ({ order }) => (order.offsite_ads ? 'YES' : null) },
+  { key: 'order.offsite_ads_fee', group: 'Offsite ads', label: 'Offsite ads fee (order currency)',
+    hint: "Etsy's advertising fee on this order, in the order's own currency, capped at $100",
+    get: ({ order }) => offsiteFeeFor(order)?.fee ?? null },
+  { key: 'order.offsite_ads_fee_usd', group: 'Offsite ads', label: 'Offsite ads fee in USD',
+    hint: "Etsy's advertising fee on this order converted to USD at the order date, capped at $100",
+    get: ({ order }) => offsiteFeeFor(order)?.feeUsd ?? null },
+  { key: 'order.offsite_ads_rate', group: 'Offsite ads', label: 'Offsite ads rate (%)',
+    hint: 'The percentage this shop pays on offsite ad orders, 12 or 15',
+    get: ({ order }) => offsiteFeeFor(order)?.ratePercent ?? null },
+  { key: 'order.after_offsite_ads', group: 'Offsite ads', label: 'Order total after the offsite ads fee',
+    hint: 'The order total with the advertising fee already taken off, in the order currency',
+    get: ({ order }) => {
+      const fee = offsiteFeeFor(order);
+      const total = money(order.grandtotal_amount, order.grandtotal_divisor);
+      if (total === null) return null;
+      return round2(fee ? total - fee.fee : total);
+    } },
 
   // ------------------------------------------------- rates and conversions
   // Everything here uses the rate published for the order's own day (the last
