@@ -15,7 +15,10 @@ import { getDb } from '../db/index.js';
 import { activeShopId } from '../etsy/shop.js';
 import { readSetting } from './settings.js';
 
-export const DEFAULT_TEMPLATE = '{YY}-{DD}{MM}-{NN}';
+// Matches the codes already in these sheets: 26-0316-25, 25-1216-01,
+// 26-0105-40. Those are year-month-day; read as day-month the first would be
+// month 16, which cannot happen.
+export const DEFAULT_TEMPLATE = '{YY}-{MM}{DD}-{NN}';
 
 const template = () => readSetting('orders.code_template') || DEFAULT_TEMPLATE;
 

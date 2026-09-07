@@ -285,32 +285,48 @@ const upsertReceipt = (db) => db.prepare(`
     is_paid, is_shipped, was_paid, was_shipped, was_delivered, was_canceled,
     grandtotal_amount, grandtotal_divisor, grandtotal_currency, subtotal_amount,
     total_shipping_amount, total_tax_amount, discount_amount, gift_wrap_price_amount,
-    is_gift, gift_message, payment_method, created_ts, updated_ts, shipped_ts, expected_ship_ts, raw, synced_at)
+    is_gift, gift_message, payment_method, refunded_amount, refund_count, refunds, payment_email,
+    created_ts, updated_ts, shipped_ts, expected_ship_ts, raw, synced_at)
   VALUES (@receipt_id,@shop_id,@receipt_type,@status,@buyer_user_id,@buyer_email,@name,
     @first_line,@second_line,@city,@state,@zip,@country_iso,@formatted_address,
     @message_from_buyer,@message_from_seller,@message_from_payment,
     @is_paid,@is_shipped,@was_paid,@was_shipped,@was_delivered,@was_canceled,
     @grandtotal_amount,@grandtotal_divisor,@grandtotal_currency,@subtotal_amount,
     @total_shipping_amount,@total_tax_amount,@discount_amount,@gift_wrap_price_amount,
-    @is_gift,@gift_message,@payment_method,@created_ts,@updated_ts,@shipped_ts,@expected_ship_ts,@raw,datetime('now'))
+    @is_gift,@gift_message,@payment_method,@refunded_amount,@refund_count,@refunds,@payment_email,
+    @created_ts,@updated_ts,@shipped_ts,@expected_ship_ts,@raw,datetime('now'))
   ON CONFLICT(receipt_id) DO UPDATE SET
     status=excluded.status, is_paid=excluded.is_paid, is_shipped=excluded.is_shipped,
     was_paid=excluded.was_paid, was_shipped=excluded.was_shipped,
     was_delivered=excluded.was_delivered, was_canceled=excluded.was_canceled,
     message_from_buyer=excluded.message_from_buyer, message_from_seller=excluded.message_from_seller,
     updated_ts=excluded.updated_ts, shipped_ts=excluded.shipped_ts,
+    -- A refund can land long after the sale, so always take the newest figures.
+    refunded_amount=excluded.refunded_amount, refund_count=excluded.refund_count,
+    refunds=excluded.refunds,
+    buyer_email=COALESCE(excluded.buyer_email, receipts.buyer_email),
+    payment_email=COALESCE(excluded.payment_email, receipts.payment_email),
     expected_ship_ts=excluded.expected_ship_ts, raw=excluded.raw, synced_at=datetime('now')
 `);
 
 function receiptRow(r) {
   const total = money(r.grandtotal);
+  // Refunds come as a list; the sum is what actually left your pocket.
+  const refunds = Array.isArray(r.refunds) ? r.refunds : [];
+  const refundedAmount = refunds.reduce((sum, ref) => sum + (money(ref.amount).amount ?? 0), 0);
   return {
     receipt_id: r.receipt_id,
     shop_id: r.shop_id ?? activeShopId(),
     receipt_type: r.receipt_type ?? null,
     status: r.status ?? null,
     buyer_user_id: r.buyer_user_id ?? null,
+    // Etsy fills one or the other depending on the order; either is a way to
+    // reach the buyer, so keep both rather than losing the contact.
     buyer_email: r.buyer_email ?? null,
+    payment_email: r.payment_email ?? null,
+    refunded_amount: refundedAmount,
+    refund_count: refunds.length,
+    refunds: refunds.length ? json(refunds) : null,
     name: r.name ?? null,
     first_line: r.first_line ?? null,
     second_line: r.second_line ?? null,

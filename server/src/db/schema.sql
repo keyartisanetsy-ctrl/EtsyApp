@@ -176,6 +176,14 @@ CREATE TABLE IF NOT EXISTS receipts (
   discount_amount INTEGER, gift_wrap_price_amount INTEGER,
   is_gift         INTEGER, gift_message TEXT,
   payment_method  TEXT,
+  -- Money actually given back. Etsy reports refunds per receipt; without them
+  -- revenue reads high, which matters at month end.
+  refunded_amount INTEGER NOT NULL DEFAULT 0,
+  refund_count    INTEGER NOT NULL DEFAULT 0,
+  refunds         TEXT,
+  -- Etsy exposes several addresses; payment_email is often filled when
+  -- buyer_email is not, and either is better than having no way to reach them.
+  payment_email   TEXT,
   created_ts      INTEGER,
   updated_ts      INTEGER,
   shipped_ts      INTEGER,
@@ -218,6 +226,10 @@ CREATE TABLE IF NOT EXISTS order_flags (
   supplier_ordered   INTEGER NOT NULL DEFAULT 0,
   supplier_order_ref TEXT DEFAULT '',
   notes       TEXT DEFAULT '',
+  -- Set by you or the AI, not derived: none | warning | solved | out_of_stock.
+  -- An order can be delivered and still carry a warning.
+  problem_state TEXT NOT NULL DEFAULT 'none',
+  problem_note  TEXT DEFAULT '',
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -447,6 +459,7 @@ CREATE TABLE IF NOT EXISTS airtable_destinations (
   create_options INTEGER NOT NULL DEFAULT 1,    -- let Airtable add missing select options (typecast)
   create_links  INTEGER NOT NULL DEFAULT 0,     -- allow writing to linked-record columns
   send_empty    INTEGER NOT NULL DEFAULT 0,     -- write blanks instead of skipping empty values
+  once_per_order INTEGER NOT NULL DEFAULT 1,    -- order totals/address on the first row of an order only
   is_default    INTEGER NOT NULL DEFAULT 0,
   last_push_at  TEXT,
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),

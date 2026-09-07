@@ -46,10 +46,21 @@ export const SETTING_DEFS = {
   'privacy.share_ai':      { env: '', def: 'true', label: 'Allow AI features to send your text to the AI provider',
     options: [ { value: 'true', label: 'Yes - AI features work' }, { value: 'false', label: 'No - block all AI calls' } ] },
 
+  'etsy.write_gap_ms':     { env: '', def: '1200', label: 'Pause between writes to Etsy (milliseconds)' },
+
+  'reporting.currency':    { env: '', def: 'USD', label: 'Currency to report money in',
+    options: [
+      { value: 'USD', label: 'USD - US dollar' },
+      { value: 'TRY', label: 'TRY - Turkish lira' },
+      { value: 'EUR', label: 'EUR - Euro' },
+      { value: 'GBP', label: 'GBP - Pound' },
+      { value: 'CNY', label: 'CNY - Yuan' },
+    ] },
+
   'fx.history_days':       { env: '', def: '95', label: 'How many days of exchange rates to keep' },
   'fx.auto_refresh':       { env: '', def: 'true', label: 'Refresh exchange rates automatically',
     options: [ { value: 'true', label: 'Yes - keep the daily rates current' }, { value: 'false', label: 'No - only when I press refresh' } ] },
-  'orders.code_template':  { env: '', def: '{YY}-{DD}{MM}-{NN}', label: 'Short order code shape (e.g. 26-0709-01)' },
+  'orders.code_template':  { env: '', def: '{YY}-{MM}{DD}-{NN}', label: 'Short order code shape (e.g. 26-0907-01 for 7 September)' },
   'orders.shipping_cost_currency': { env: '', def: 'CNY', label: 'Currency you normally pay shipping in' },
 
   'airtable.token':        { env: process.env.AIRTABLE_TOKEN || '', def: '', secret: true, label: 'Airtable personal access token' },
@@ -57,6 +68,8 @@ export const SETTING_DEFS = {
     options: [ { value: 'false', label: 'No - I press the button myself' }, { value: 'true', label: 'Yes - push new orders automatically' } ] },
 
   'pricing.discount_percent': { env: String(config.pricing.discountPercent), def: '30', label: 'Discount percentage' },
+  'orders.ship_days_min':  { env: '', def: '2', label: 'Expected dispatch: minimum business days' },
+  'orders.ship_days_max':  { env: '', def: '5', label: 'Expected dispatch: maximum business days' },
   'orders.default_carrier':   { env: '', def: '', label: 'Default carrier for bulk tracking' },
   'orders.notify_buyer':      { env: '', def: 'true', label: 'Email the buyer when tracking is added' },
 };

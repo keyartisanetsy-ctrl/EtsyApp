@@ -8,6 +8,7 @@ import { getStoredToken, listAccounts } from '../etsy/client.js';
 import { providerStatus } from '../services/ai/index.js';
 import { getDiscountPercent } from '../services/settings.js';
 import * as sync from '../services/sync.js';
+import { revenueSummary, sumReceipts, monthlyBreakdown, reportingCurrency } from '../services/reporting.js';
 import { OPERATION_COUNT } from '../etsy/operations.generated.js';
 
 const router = Router();
@@ -48,19 +49,36 @@ router.get('/', asyncRoute(async (req, res) => {
     orders: orderCounters(),
     tracking: trackingSummary(),
     ai: providerStatus(),
-    revenue: {
-      last30: one(`SELECT COALESCE(SUM(grandtotal_amount),0)/100.0 AS c FROM receipts
-        WHERE shop_id IS ? AND was_canceled = 0 AND created_ts >= strftime('%s','now','-30 days')`).c,
-      last7: one(`SELECT COALESCE(SUM(grandtotal_amount),0)/100.0 AS c FROM receipts
-        WHERE shop_id IS ? AND was_canceled = 0 AND created_ts >= strftime('%s','now','-7 days')`).c,
-      currency: one('SELECT grandtotal_currency AS c FROM receipts WHERE shop_id IS ? AND grandtotal_currency IS NOT NULL LIMIT 1')?.c ?? null,
-    },
+    // Converted from each order's own currency at its own date, with refunds
+    // and cancellations removed. Summing the raw amounts and labelling them
+    // with one arbitrary receipt's currency read lira as dollars.
+    revenue: await revenueSummary(),
     lastSync: {
       listings: one('SELECT MAX(synced_at) AS c FROM listings WHERE shop_id IS ?')?.c ?? null,
       receipts: one('SELECT MAX(synced_at) AS c FROM receipts WHERE shop_id IS ?')?.c ?? null,
       tracking: one('SELECT MAX(last_checked_at) AS c FROM tracking WHERE shop_id IS ?')?.c ?? null,
     },
     recentJobs: db.prepare('SELECT id, type, label, status, total, succeeded, failed, created_at FROM bulk_jobs ORDER BY created_at DESC LIMIT 5').all(),
+  });
+}));
+
+/**
+ * Money over a period, in the reporting currency. Date and shop filters make
+ * this usable for a month-end close rather than only the headline figure.
+ */
+router.get('/money', asyncRoute(async (req, res) => {
+  const { since, until, sinceDays, currency, includeCanceled } = req.query;
+  res.json({
+    currency: (currency || reportingCurrency()).toUpperCase(),
+    period: sumReceipts({
+      since: since || null,
+      until: until || null,
+      sinceDays: sinceDays ? Number(sinceDays) : null,
+      currency: (currency || reportingCurrency()).toUpperCase(),
+      includeCanceled: includeCanceled === 'true',
+    }),
+    months: monthlyBreakdown({ months: Number(req.query.months) || 6,
+      currency: (currency || reportingCurrency()).toUpperCase() }),
   });
 }));
 

@@ -8,6 +8,7 @@ import { getDb, parse, audit } from '../db/index.js';
 import { trackingUrl } from './settings.js';
 import { STATUS_LABELS } from './tracking/status.js';
 import { notFound, badRequest } from '../lib/errors.js';
+import { statusesFor } from './orderstatus.js';
 
 const asMoney = (amount, divisor, currency) =>
   amount == null ? null : { value: amount / (divisor || 100), currency };
@@ -56,6 +57,8 @@ export function listOrders({
   const base = `
     FROM receipts r
     LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
+    LEFT JOIN (SELECT receipt_id, MAX(last_pushed_at) AS airtable_pushed_at
+               FROM airtable_links GROUP BY receipt_id) al ON al.receipt_id = r.receipt_id
     LEFT JOIN (SELECT receipt_id, MAX(id) AS sid FROM shipments GROUP BY receipt_id) ls ON ls.receipt_id = r.receipt_id
     LEFT JOIN shipments s ON s.id = ls.sid
     LEFT JOIN tracking t ON t.tracking_code = s.tracking_code AND t.shop_id IS s.shop_id
@@ -65,6 +68,8 @@ export function listOrders({
     SELECT r.*, COALESCE(f.is_done,0) AS is_done, f.done_at, COALESCE(f.is_seen,0) AS is_seen,
            COALESCE(f.is_flagged,0) AS is_flagged, COALESCE(f.supplier_ordered,0) AS supplier_ordered,
            f.supplier_order_ref, f.notes,
+           COALESCE(f.problem_state,'none') AS problem_state, f.problem_note,
+           al.airtable_pushed_at,
            s.tracking_code, s.carrier_name, s.pushed_to_etsy,
            t.status AS tracking_status, t.days_since_move, t.is_stale, t.alert_reason,
            t.last_event_text, t.last_event_at, COALESCE(t.alert_ack,0) AS alert_ack,
@@ -98,6 +103,16 @@ function orderSummary(r) {
     createdTs: r.created_ts,
     updatedTs: r.updated_ts,
     expectedShipTs: r.expected_ship_ts,
+    // What state the order is actually in - several at once when that is the
+    // truth, e.g. delivered but with a problem raised afterwards.
+    statuses: statusesFor(r),
+    problemState: r.problem_state ?? 'none',
+    problemNote: r.problem_note ?? '',
+    subtotal: asMoney(r.subtotal_amount, r.grandtotal_divisor, r.grandtotal_currency),
+    // Small contact line under the buyer, so you can reach them without opening the order.
+    email: r.buyer_email || r.payment_email || '',
+    addressLine: [r.first_line, r.city, r.state, r.zip].filter(Boolean).join(', '),
+    itemCount: r.item_count,
     // the tick column
     isDone: !!r.is_done,
     doneAt: r.done_at,
@@ -128,8 +143,17 @@ export function getOrder(receiptId) {
   const r = db.prepare(`
     SELECT r.*, COALESCE(f.is_done,0) AS is_done, f.done_at, COALESCE(f.is_seen,0) AS is_seen,
            COALESCE(f.is_flagged,0) AS is_flagged, COALESCE(f.supplier_ordered,0) AS supplier_ordered,
-           f.supplier_order_ref, f.notes, 0 AS item_count
-    FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
+           f.supplier_order_ref, f.notes, 0 AS item_count,
+           COALESCE(f.problem_state,'none') AS problem_state, f.problem_note,
+           al.airtable_pushed_at,
+           s.tracking_code, s.carrier_name, t.status AS tracking_status, t.days_since_move
+    FROM receipts r
+    LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
+    LEFT JOIN (SELECT receipt_id, MAX(last_pushed_at) AS airtable_pushed_at
+               FROM airtable_links GROUP BY receipt_id) al ON al.receipt_id = r.receipt_id
+    LEFT JOIN (SELECT receipt_id, MAX(id) AS sid FROM shipments GROUP BY receipt_id) ls ON ls.receipt_id = r.receipt_id
+    LEFT JOIN shipments s ON s.id = ls.sid
+    LEFT JOIN tracking t ON t.tracking_code = s.tracking_code AND t.shop_id IS r.shop_id
     WHERE r.receipt_id = ? AND r.shop_id IS ?`).get(receiptId, activeShopId());
   if (!r) throw notFound(`Order ${receiptId} is not in the active shop's local mirror. Sync orders first.`);
 
@@ -241,6 +265,31 @@ export function setFlags(receiptIds, patch = {}) {
 }
 
 export const markSeen = (receiptIds) => setFlags(receiptIds, { seen: true });
+
+/**
+ * Raise, clear or resolve a problem on orders. Deliberate rather than derived,
+ * because only you (or the AI, on your instruction) know whether something is
+ * actually wrong - and an order can be delivered and still have one.
+ */
+export function setProblem(receiptIds, { state = 'warning', note = '' } = {}) {
+  const allowed = ['none', 'warning', 'solved', 'out_of_stock'];
+  if (!allowed.includes(state)) throw badRequest(`Unknown problem state "${state}". Use one of ${allowed.join(', ')}.`);
+  const db = getDb();
+  const ids = (Array.isArray(receiptIds) ? receiptIds : [receiptIds]).map(Number).filter(Boolean);
+  if (!ids.length) throw badRequest('No orders selected.');
+
+  db.transaction(() => {
+    for (const id of ids) {
+      db.prepare('INSERT OR IGNORE INTO order_flags (receipt_id) VALUES (?)').run(id);
+      db.prepare(`UPDATE order_flags SET problem_state = ?, problem_note = ?, updated_at = datetime('now')
+                  WHERE receipt_id = ?`).run(state, String(note ?? '').slice(0, 500), id);
+    }
+  })();
+  audit('orders.problem', { entity: 'receipt', detail: { ids, state, note } });
+  return { updated: ids.length, ids, state };
+}
+
+
 
 export function orderCounters() {
   const db = getDb();

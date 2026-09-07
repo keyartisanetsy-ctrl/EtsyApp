@@ -417,3 +417,8 @@ table.data td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 
 /* generic push-apart helper, used by drawer and modal footers */
 .spacer { flex: 1; }
+
+/* An order with several products reads as one block, so its rows are tinted
+   and its subtotal is set apart from the order total next to it. */
+table.data tbody tr.multi-item { box-shadow: inset 3px 0 0 var(--accent, #f2643c); }
+table.data td.subtotal-cell { color: var(--text-dim); font-variant-numeric: tabular-nums; }

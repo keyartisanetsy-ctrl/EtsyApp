@@ -45,6 +45,12 @@ router.post('/:id/flags', asyncRoute(async (req, res) => {
   res.json(orders.setFlags([Number(req.params.id)], req.body ?? {}));
 }));
 
+/** Raise / clear / resolve a problem on one or many orders. */
+router.post('/problem', asyncRoute(async (req, res) => {
+  const { receiptIds = [], state = 'warning', note = '' } = req.body ?? {};
+  res.json(orders.setProblem(receiptIds, { state, note }));
+}));
+
 router.post('/seen', asyncRoute(async (req, res) => {
   required(req.body ?? {}, ['receiptIds']);
   res.json(orders.markSeen(ids(req.body.receiptIds)));

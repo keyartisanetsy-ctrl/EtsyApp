@@ -135,25 +135,25 @@ export default function Orders() {
             <thead>
               <tr>
                 <th className="col-tight"><Checkbox checked={allSelected} indeterminate={selected.size > 0 && !allSelected} onChange={toggleAll} /></th>
-                <th className="col-tight" title="Tick when the order is fully handled">Done</th>
+                <th title="Where this order has got to. Hover a chip to see what it means.">Status</th>
                 <th className="col-tight">New</th>
                 <SortTh label="Order" field="created" sort={sort} dir={dir} onSort={(f, d) => { setSort(f); setDir(d); }} />
                 <SortTh label="Buyer" field="name" sort={sort} dir={dir} onSort={(f, d) => { setSort(f); setDir(d); }} />
                 <th>Items</th>
+                <th className="right">Subtotal</th>
                 <SortTh label="Total" field="total" sort={sort} dir={dir} onSort={(f, d) => { setSort(f); setDir(d); }} className="right" />
                 <th>Tracking</th>
-                <th>Status</th>
+                <th>Parcel</th>
                 <th className="col-tight" />
               </tr>
             </thead>
             <tbody>
               {rows.map((o) => (
                 <tr key={o.receiptId}
-                    className={[selected.has(o.receiptId) ? 'selected' : '', o.isDone ? 'done' : '', o.alert ? 'alert-row' : ''].join(' ')}>
+                    className={[selected.has(o.receiptId) ? 'selected' : '', o.isDone ? 'done' : '',
+                      o.alert ? 'alert-row' : '', o.itemCount > 1 ? 'multi-item' : ''].join(' ')}>
                   <td><Checkbox checked={selected.has(o.receiptId)} onChange={() => toggle(o.receiptId)} /></td>
-                  <td>
-                    <Checkbox checked={o.isDone} onChange={(v) => setFlag([o.receiptId], { done: v })} />
-                  </td>
+                  <td><StatusChips order={o} /></td>
                   <td>{o.isNew ? <span className="badge orange">new</span> : <span className="muted small">·</span>}</td>
                   <td>
                     <div className="mono">#{o.receiptId}</div>
@@ -161,9 +161,14 @@ export default function Orders() {
                   </td>
                   <td>
                     <div>{o.name || '—'}{o.isFlagged && <span className="badge amber" style={{ marginLeft: 6 }}>⚑</span>}</div>
-                    <div className="small muted">{[o.city, o.country].filter(Boolean).join(', ')}</div>
+                    <div className="small muted">{o.addressLine || [o.city, o.country].filter(Boolean).join(', ')}</div>
+                    {o.email && <div className="small muted">{o.email}</div>}
                   </td>
-                  <td className="small">{o.itemCount}</td>
+                  <td className="small">
+                    {o.itemCount}
+                    {o.itemCount > 1 && <span className="badge blue" style={{ marginLeft: 4 }} title="More than one product in this order">multi</span>}
+                  </td>
+                  <td className="num subtotal-cell">{fmtMoney(o.subtotal?.value, o.subtotal?.currency)}</td>
                   <td className="num">{fmtMoney(o.total?.value, o.total?.currency)}</td>
                   <td>
                     {o.trackingCode ? (
@@ -175,8 +180,6 @@ export default function Orders() {
                   </td>
                   <td>
                     <div className="pill-row">
-                      {o.isCanceled && <span className="badge red">canceled</span>}
-                      {!o.isPaid && !o.isCanceled && <span className="badge amber">unpaid</span>}
                       {o.trackingStatus && <span className={`badge ${TRACK_BADGE[o.trackingStatus] ?? 'grey'}`}>{o.trackingStatusLabel}</span>}
                       {!o.trackingStatus && o.isShipped && <span className="badge blue">shipped</span>}
                       {o.alert && <span className="badge red" title={o.alertReason}>⚠ {o.daysSinceMove}d</span>}
@@ -199,6 +202,27 @@ export default function Orders() {
         />
       )}
     </TablePage>
+  );
+}
+
+const CHIP_KIND = { ok: 'green', info: 'blue', warn: 'amber', bad: 'red', muted: 'grey' };
+
+/**
+ * Where an order has got to, as chips rather than one tick.
+ *
+ * An order is often in more than one state at once - delivered and still a
+ * problem, for instance - so they all show, and each carries the sentence that
+ * explains it on hover.
+ */
+function StatusChips({ order }) {
+  const statuses = order.statuses ?? [];
+  if (!statuses.length) return <span className="muted small">—</span>;
+  return (
+    <div className="pill-row">
+      {statuses.map((s) => (
+        <span key={s.id} className={`badge ${CHIP_KIND[s.kind] ?? 'grey'}`} title={s.hint}>{s.label}</span>
+      ))}
+    </div>
   );
 }
 

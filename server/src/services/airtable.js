@@ -14,7 +14,7 @@ import { activeShopId, currentShop } from '../etsy/shop.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 import * as at from '../airtable/client.js';
-import { loadRows, resolveSource, SOURCE_FIELDS } from '../airtable/fields.js';
+import { loadRows, resolveSource, SOURCE_FIELDS, isOrderLevel } from '../airtable/fields.js';
 import { matchByName, matchByAi, suggestMergeFields } from '../airtable/mapping.js';
 import { ensureRates } from './fx.js';
 import { syncForReceipts } from './variantimages.js';
@@ -42,6 +42,7 @@ const shape = (row) => (row ? {
   createOptions: !!row.create_options,
   createLinks: !!row.create_links,
   sendEmpty: !!row.send_empty,
+  oncePerOrder: row.once_per_order === null || row.once_per_order === undefined ? true : !!row.once_per_order,
   isDefault: !!row.is_default,
   lastPushAt: row.last_push_at,
   createdAt: row.created_at,
@@ -75,7 +76,7 @@ export function saveDestination(input = {}) {
     id = null, label, baseId, baseName = null, tableId, tableName = null,
     viewId = null, viewName = null, channel = 'etsy', rowMode = 'item', matchMode = 'name',
     fieldMap = [], mergeFields = [], constants = {},
-    createOptions = true, createLinks = false, sendEmpty = false,
+    createOptions = true, createLinks = false, sendEmpty = false, oncePerOrder = true,
     isDefault = false, allShops = false,
   } = input;
 
@@ -104,6 +105,7 @@ export function saveDestination(input = {}) {
     create_options: createOptions ? 1 : 0,
     create_links: createLinks ? 1 : 0,
     send_empty: sendEmpty ? 1 : 0,
+    once_per_order: oncePerOrder ? 1 : 0,
     is_default: isDefault ? 1 : 0,
   };
 
@@ -116,15 +118,16 @@ export function saveDestination(input = {}) {
         view_id = @view_id, view_name = @view_name, channel = @channel, row_mode = @row_mode, match_mode = @match_mode,
         field_map = @field_map, merge_fields = @merge_fields, constants = @constants,
         create_options = @create_options, create_links = @create_links, send_empty = @send_empty,
+        once_per_order = @once_per_order,
         is_default = @is_default, updated_at = datetime('now')
       WHERE id = @id`).run({ ...args, id });
   } else {
     const res = db.prepare(`
       INSERT INTO airtable_destinations
         (shop_id, label, base_id, base_name, table_id, table_name, view_id, view_name, channel, row_mode, match_mode,
-         field_map, merge_fields, constants, create_options, create_links, send_empty, is_default)
+         field_map, merge_fields, constants, create_options, create_links, send_empty, once_per_order, is_default)
       VALUES (@shop_id, @label, @base_id, @base_name, @table_id, @table_name, @view_id, @view_name, @channel, @row_mode, @match_mode,
-              @field_map, @merge_fields, @constants, @create_options, @create_links, @send_empty, @is_default)`).run(args);
+              @field_map, @merge_fields, @constants, @create_options, @create_links, @send_empty, @once_per_order, @is_default)`).run(args);
     destId = Number(res.lastInsertRowid);
   }
 
@@ -230,14 +233,26 @@ export async function buildRecords(destination, receiptIds, { table: known = nul
   if (!rows.length) throw badRequest('None of those orders are in this shop. Sync orders first, or switch shop.');
 
   const issues = [];
+  // Which row is the first of its order, so order-level values are written
+  // once instead of on every line.
+  const seenReceipts = new Set();
   const records = rows.map((row) => {
     const fields = {};
     const skipped = [];
+    const isFirstRowOfOrder = !seenReceipts.has(row.receiptId);
+    seenReceipts.add(row.receiptId);
 
     for (const entry of destination.fieldMap) {
       const field = byName.get(entry.target);
       if (!field) { skipped.push(`${entry.target}: no longer exists in Airtable`); continue; }
       if (!field.writable) { skipped.push(`${entry.target}: Airtable computes this column`); continue; }
+
+      // The order total, the address, the parcel: writing them again on the
+      // second item of the same order would count them twice.
+      if (destination.oncePerOrder && !isFirstRowOfOrder
+          && isOrderLevel(entry.source) && !destination.mergeFields.includes(entry.target)) {
+        continue;
+      }
 
       const raw = resolveSource(entry.source, row);
       const out = coerce(raw, field, { createLinks: destination.createLinks });

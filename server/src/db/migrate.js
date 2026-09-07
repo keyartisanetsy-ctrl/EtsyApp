@@ -76,9 +76,18 @@ export function migrateSchema(db) {
   // Which Airtable sheet family a destination belongs to, so Etsy and Shopify
   // can each have their own default.
   addColumn(db, 'airtable_destinations', 'channel', "TEXT NOT NULL DEFAULT 'etsy'");
+  addColumn(db, 'airtable_destinations', 'once_per_order', 'INTEGER NOT NULL DEFAULT 1');
+  addColumn(db, 'order_flags', 'problem_state', "TEXT NOT NULL DEFAULT 'none'");
+  addColumn(db, 'order_flags', 'problem_note', "TEXT DEFAULT ''");
 
   // What each shop is called over in Airtable.
   addColumn(db, 'etsy_accounts', 'airtable_name', "TEXT DEFAULT ''");
+
+  // Refunds and the second email address Etsy sometimes supplies.
+  addColumn(db, 'receipts', 'refunded_amount', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'receipts', 'refund_count', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'receipts', 'refunds', 'TEXT');
+  addColumn(db, 'receipts', 'payment_email', 'TEXT');
 
   if (active) {
     for (const table of ['shop_sections', 'bulk_jobs', 'research_runs']) {

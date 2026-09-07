@@ -636,8 +636,10 @@ await check('order codes are per day, shared by every item of an order, and stab
   await initDb();
   const db = getDb();
 
-  assert(formatCode('2026-09-07', 1) === '26-0709-01', `template wrong: ${formatCode('2026-09-07', 1)}`);
-  assert(formatCode('2026-09-07', 12) === '26-0709-12', 'sequence not padded');
+  // Year-month-day, matching the codes already in these sheets (26-0316-25).
+  assert(formatCode('2026-09-07', 1) === '26-0907-01', `template wrong: ${formatCode('2026-09-07', 1)}`);
+  assert(formatCode('2026-09-07', 12) === '26-0907-12', 'sequence not padded');
+  assert(formatCode('2026-03-16', 25) === '26-0316-25', 'does not reproduce a real code from the sheet');
 
   db.prepare('DELETE FROM order_codes WHERE shop_id = 970001').run();
   db.prepare('DELETE FROM receipts WHERE receipt_id IN (970100,970101,970102)').run();
@@ -658,9 +660,9 @@ await check('order codes are per day, shared by every item of an order, and stab
   // Assign out of order on purpose: numbering must follow the clock, not the call order.
   const second = codeFor(970101);
   const first = codeFor(970100);
-  assert(first === '26-0709-01', `first order of the day should be 01, got ${first}`);
-  assert(second === '26-0709-02', `second order of the day should be 02, got ${second}`);
-  assert(codeFor(970102) === '26-0809-01', 'a new day restarts the numbering');
+  assert(first === '26-0907-01', `first order of the day should be 01, got ${first}`);
+  assert(second === '26-0907-02', `second order of the day should be 02, got ${second}`);
+  assert(codeFor(970102) === '26-0908-01', 'a new day restarts the numbering');
 
   // Stable: asking again never renumbers a row that is already in a sheet.
   assert(codeFor(970100) === first, 'the code changed on a second call');
@@ -809,6 +811,167 @@ await check('each shop writes its own name into the shop column', async () => {
   db.prepare('DELETE FROM receipts WHERE receipt_id IN (950100,950200)').run();
   client.removeAccount(950001);
   client.removeAccount(950002);
+});
+
+await check('revenue is converted per order date, not mislabelled', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const rep = await import('../server/src/services/reporting.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare("DELETE FROM fx_rates WHERE quote = 'TRY'").run();
+  db.prepare("INSERT INTO fx_rates (day, base, quote, rate, source) VALUES ('2026-09-04','USD','TRY',48.443,'test')").run();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 940001').run();
+  db.prepare('DELETE FROM receipts WHERE receipt_id BETWEEN 940100 AND 940199').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (940001,'Lira Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(940001);
+
+  const now = Math.floor(Date.now() / 1000);
+  // Three lira orders: one cancelled, one refunded in part.
+  const rows = [[940100, 0, 0], [940101, 1, 0], [940102, 0, 100000]];
+  for (const [id, canceled, refunded] of rows) {
+    db.prepare(`INSERT INTO receipts (receipt_id, shop_id, grandtotal_amount, grandtotal_divisor,
+                grandtotal_currency, was_canceled, refunded_amount, refund_count, created_ts)
+                VALUES (?,940001,260310,100,'TRY',?,?,?,?)`).run(id, canceled, refunded, refunded ? 1 : 0, now);
+  }
+
+  const usd = rep.sumReceipts({ sinceDays: 7, currency: 'USD' });
+  assert(usd.orders === 2, `cancelled order should be excluded, counted ${usd.orders}`);
+  assert(usd.canceledOrders === 0, 'cancelled orders should not be summed at all');
+  assert(usd.refundedOrders === 1, 'the refund was not noticed');
+
+  // Two orders of 2603.10 TRY at 48.443 = 107.48 USD, less a 1000 TRY refund.
+  const expectedGross = (2 * 2603.10) / 48.443;
+  assert(Math.abs(usd.gross - expectedGross) < 0.02, `gross ${usd.gross}, expected ~${expectedGross.toFixed(2)}`);
+  assert(Math.abs(usd.net - (expectedGross - 1000 / 48.443)) < 0.02, `net ${usd.net} did not subtract the refund`);
+  assert(usd.byCurrency.TRY, 'should say the money arrived in lira');
+  assert(usd.currency === 'USD', 'reported currency missing');
+
+  // The old bug: summing raw amounts and calling them dollars.
+  const raw = db.prepare('SELECT SUM(grandtotal_amount)/100.0 AS c FROM receipts WHERE shop_id IS 940001 AND was_canceled = 0').get().c;
+  assert(raw > usd.gross * 40, 'sanity: the raw lira sum should dwarf the dollar figure');
+
+  db.prepare('DELETE FROM receipts WHERE receipt_id BETWEEN 940100 AND 940199').run();
+  client.removeAccount(940001);
+});
+
+await check('writes to Etsy go one at a time, reads stay parallel', async () => {
+  const { initDb } = await import('../server/src/db/index.js');
+  const { writeSetting } = await import('../server/src/services/settings.js');
+  const client = await import('../server/src/etsy/client.js');
+  await initDb();
+  writeSetting('etsy.write_gap_ms', '20');
+  writeSetting('etsy.keystring', 'k:s');
+
+  const realFetch = globalThis.fetch;
+  const inFlight = { now: 0, max: 0 };
+  globalThis.fetch = async () => {
+    inFlight.now += 1;
+    inFlight.max = Math.max(inFlight.max, inFlight.now);
+    await new Promise((r) => setTimeout(r, 25));
+    inFlight.now -= 1;
+    return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    await Promise.all([1, 2, 3, 4].map(() => client
+      .request('/v3/application/x', { method: 'PUT', auth: false, body: { a: 1 } }).catch(() => {})));
+    assert(inFlight.max === 1, `writes overlapped: ${inFlight.max} at once`);
+
+    inFlight.max = 0;
+    await Promise.all([1, 2, 3, 4].map(() => client.request('/v3/application/x', { auth: false }).catch(() => {})));
+    assert(inFlight.max > 1, 'reads were serialised too, which would make syncing crawl');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+await check('an order total is written once, not on every item row', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const at = await import('../server/src/services/airtable.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 930001').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (930001,'Multi Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(930001);
+  db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, name, first_line, city, grandtotal_amount,
+              grandtotal_divisor, grandtotal_currency, created_ts)
+              VALUES (930100,930001,'Buyer','1 Road','Town',30000,100,'USD',?)`).run(Math.floor(Date.now() / 1000));
+  for (const [tid, sku] of [[9301, 'A-1'], [9302, 'A-2'], [9303, 'A-3']]) {
+    db.prepare(`INSERT OR REPLACE INTO receipt_transactions (transaction_id, receipt_id, sku, title, quantity, price_amount, price_divisor)
+                VALUES (?,930100,?,'Item',1,10000,100)`).run(tid, sku);
+  }
+
+  const table = { id: 't', name: 'T', fields: [
+    { name: 'Order ID', type: 'singleLineText', writable: true },
+    { name: 'SKU', type: 'singleLineText', writable: true },
+    { name: 'Order Total', type: 'currency', writable: true },
+    { name: 'Full Name', type: 'singleLineText', writable: true },
+  ] };
+  const fieldMap = [
+    { target: 'Order ID', source: 'order.id' }, { target: 'SKU', source: 'item.sku' },
+    { target: 'Order Total', source: 'total.grand' }, { target: 'Full Name', source: 'buyer.name' },
+  ];
+
+  const once = at.saveDestination({ label: 'once', baseId: 'app1', tableId: 't', rowMode: 'item', fieldMap, oncePerOrder: true });
+  const a = await at.buildRecords(once, [930100], { table });
+  assert(a.records.length === 3, `expected 3 item rows, got ${a.records.length}`);
+  const totals = a.records.filter((r) => r.fields['Order Total'] !== undefined);
+  assert(totals.length === 1, `order total should appear once, appeared ${totals.length} times`);
+  assert(totals[0].fields['Order Total'] === 300, 'the total itself changed');
+  assert(a.records.filter((r) => r.fields['Full Name'] !== undefined).length === 1, 'the buyer name repeated');
+  // The identifiers must still tie the rows together.
+  assert(a.records.every((r) => r.fields['Order ID'] === '930100'), 'every row needs the order number');
+  assert(new Set(a.records.map((r) => r.fields.SKU)).size === 3, 'each row should carry its own SKU');
+
+  const every = at.saveDestination({ label: 'every', baseId: 'app1', tableId: 't', rowMode: 'item', fieldMap, oncePerOrder: false });
+  const b = await at.buildRecords(every, [930100], { table });
+  assert(b.records.filter((r) => r.fields['Order Total'] !== undefined).length === 3,
+    'turning the option off should put the total back on every row');
+
+  at.deleteDestination(once.id);
+  at.deleteDestination(every.id);
+  db.prepare('DELETE FROM receipts WHERE receipt_id = 930100').run();
+  client.removeAccount(930001);
+});
+
+await check('an order can be delivered and still carry a warning', async () => {
+  const { statusesFor, idleTier } = await import('../server/src/services/orderstatus.js');
+  const ids = (row) => statusesFor(row).map((s) => s.id);
+
+  assert(ids({}).includes('new'), 'a fresh order should read as new');
+  assert(ids({ airtable_pushed_at: 'x' }).includes('airtable'), 'pushed orders should say Airtable');
+  assert(ids({ supplier_ordered: 1 }).includes('ordered'), 'supplier orders should say Ordered');
+  assert(ids({ tracking_code: 'YT1' }).includes('shipped'), 'a tracked order should say Shipped');
+
+  const both = ids({ tracking_code: 'YT1', tracking_status: 'delivered', problem_state: 'warning' });
+  assert(both.includes('delivered') && both.includes('warning'),
+    `delivered and warning should coexist, got ${both.join(',')}`);
+  assert(!ids({ tracking_code: 'YT1', tracking_status: 'delivered' }).includes('shipped'),
+    'a delivered parcel should not still say Shipped');
+
+  const oos = ids({ problem_state: 'out_of_stock' });
+  assert(oos.includes('out_of_stock') && oos.includes('warning'), 'out of stock should also warn');
+  assert(ids({ problem_state: 'solved' }).includes('solved'), 'a resolved problem should say Solved');
+
+  // Idle tiers: worse the longer nothing scans.
+  assert(idleTier(2) === null, 'two days is not yet a problem');
+  assert(idleTier(3).level === 'watch', 'three days should be flagged');
+  assert(idleTier(4).level === 'high', 'four days is worse');
+  assert(idleTier(9).level === 'severe', 'five or more is serious');
+
+  const delivered = statusesFor({ tracking_code: 'YT1', tracking_status: 'delivered' })
+    .find((s) => s.id === 'delivered');
+  assert(/review/i.test(delivered.hint), 'the delivered chip should mention asking for a review');
+
+  // A number that is not YunExpress cannot be followed automatically; say so.
+  const foreign = statusesFor({ tracking_code: 'AB12', days_since_move: 6 }).find((s) => s.id.startsWith('idle'));
+  assert(/not a YunExpress/i.test(foreign.hint), 'a non-YunExpress number should be called out');
 });
 
 await check('Airtable is disclosed as a destination and needs a token', async () => {

@@ -276,6 +276,24 @@ export const SOURCE_FIELDS = [
     get: ({ order }) => clean(order.notes) },
 ];
 
+/**
+ * When one order becomes several rows (one per item), most of what it carries
+ * belongs to the order, not to the line: the money, the address, the parcel.
+ * Repeating those on every row double-counts the order total in any sum.
+ *
+ * These sources stay on every row, because they are what ties the rows of an
+ * order together and what Airtable matches on. Everything else that is not an
+ * `item.*` field is written on the first row only.
+ */
+export const REPEATED_ON_EVERY_ROW = new Set([
+  'order.id', 'order.id_hash', 'order.code',
+  'order.date', 'order.datetime', 'order.month', 'order.month_en',
+  'shop.airtable_name', 'shop.name', 'shop.id',
+]);
+
+/** True when this source should only be filled on an order's first row. */
+export const isOrderLevel = (key) => !String(key).startsWith('item.') && !REPEATED_ON_EVERY_ROW.has(key);
+
 export const SOURCE_BY_KEY = new Map(SOURCE_FIELDS.map((f) => [f.key, f]));
 
 /** Resolve one source key against a row context. Unknown keys resolve to null. */

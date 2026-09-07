@@ -5,6 +5,7 @@
  * the 10 req/s ceiling, retry/backoff and call logging are handled once.
  */
 import config from '../config.js';
+import { readSetting } from '../services/settings.js';
 import { getDb, getSetting, setSetting, resolveSetting } from '../db/index.js';
 import { seal, open as unseal } from '../lib/crypto.js';
 import { createLogger } from '../lib/logger.js';
@@ -269,7 +270,61 @@ const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
  * Perform one Etsy request with backoff. `auth: false` uses only the app
  * keystring, which is all the public read endpoints need.
  */
-export async function request(pathname, {
+/**
+ * Writes to Etsy go one at a time, with a pause between them.
+ *
+ * Etsy does not cope well with several changes to a shop landing at once - two
+ * listing edits or two tracking uploads in flight together can collide, and it
+ * is also the fastest way to hit a rate limit. So however many actions get
+ * queued up here, they leave in single file. Reads are untouched, since they
+ * are harmless in parallel and that is where the speed matters.
+ */
+let writeChain = Promise.resolve();
+let lastWriteAt = 0;
+
+const writeGapMs = () => {
+  const configured = Number(readSetting('etsy.write_gap_ms'));
+  return Number.isFinite(configured) && configured >= 0 ? configured : 1200;
+};
+
+function queueWrite(task) {
+  const run = writeChain.then(async () => {
+    const gap = writeGapMs();
+    const since = Date.now() - lastWriteAt;
+    if (since < gap) await new Promise((r) => setTimeout(r, gap - since));
+    try {
+      return await task();
+    } finally {
+      lastWriteAt = Date.now();
+    }
+  });
+  // Keep the chain alive even when one write fails, or everything queued
+  // behind it would be dropped.
+  writeChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+/** How many writes are waiting, for the UI to show progress honestly. */
+let queuedWrites = 0;
+export const writeQueueDepth = () => queuedWrites;
+
+/**
+ * Every Etsy call goes through here. Reads run straight away; writes join the
+ * single-file queue above.
+ */
+export async function request(pathname, opts = {}) {
+  const method = (opts.method ?? 'GET').toUpperCase();
+  if (method === 'GET' || opts.skipQueue) return performRequest(pathname, opts);
+
+  queuedWrites += 1;
+  try {
+    return await queueWrite(() => performRequest(pathname, opts));
+  } finally {
+    queuedWrites -= 1;
+  }
+}
+
+async function performRequest(pathname, {
   method = 'GET', query, body, bodyKind = 'json', headers = {},
   auth = true, operationId, raw = false, accessToken = null,
 } = {}) {
