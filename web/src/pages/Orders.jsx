@@ -6,6 +6,7 @@ import {
   Spinner, Empty, Banner, Checkbox, Pager, SortTh, Drawer, Modal, CopyButton, Thumb, Tabs,
   useAsync, useDebounced, useToast, useErrorToast, fmtMoney, fmtDateTime, fmtDate, TRACK_BADGE,
 } from '../components/ui.jsx';
+import { SendToAirtable } from './Airtable.jsx';
 
 const LIMIT = 60;
 
@@ -23,6 +24,7 @@ export default function Orders() {
   const [offset, setOffset] = useState(0);
 
   const [selected, setSelected] = useState(new Set());
+  const [sendingToAirtable, setSendingToAirtable] = useState(null);
   const [detailId, setDetailId] = useState(null);
   const [trackingOpen, setTrackingOpen] = useState(false);
 
@@ -116,6 +118,7 @@ export default function Orders() {
           <button className="btn xs" onClick={() => setFlag([...selected], { seen: true })}>Mark seen</button>
           <button className="btn xs" onClick={() => setFlag([...selected], { flagged: true })}>⚑ Flag</button>
           <button className="btn xs" onClick={() => setFlag([...selected], { supplierOrdered: true })}>Supplier ordered</button>
+          <button className="btn xs primary" onClick={() => setSendingToAirtable([...selected])}>⇉ Send to Airtable</button>
           <div className="spacer" />
           <button className="btn xs ghost" onClick={() => setSelected(new Set())}>Clear</button>
         </div>
@@ -188,6 +191,13 @@ export default function Orders() {
 
       <OrderDetail id={detailId} onClose={() => setDetailId(null)} onChanged={refreshAll} />
       <BulkTrackingModal open={trackingOpen} onClose={() => setTrackingOpen(false)} onDone={refreshAll} />
+      {sendingToAirtable && (
+        <SendToAirtable
+          receiptIds={sendingToAirtable}
+          onClose={() => setSendingToAirtable(null)}
+          onDone={refreshAll}
+        />
+      )}
     </TablePage>
   );
 }

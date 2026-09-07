@@ -13,6 +13,7 @@ import Prompts from './pages/Prompts.jsx';
 import Research from './pages/Research.jsx';
 import BulkJobs from './pages/BulkJobs.jsx';
 import Exports from './pages/Exports.jsx';
+import Airtable from './pages/Airtable.jsx';
 import ShopSettings from './pages/ShopSettings.jsx';
 import Settings from './pages/Settings.jsx';
 import ApiExplorer from './pages/ApiExplorer.jsx';
@@ -38,6 +39,7 @@ const NAV = [
       { to: '/orders', icon: '▣', label: 'Orders', badge: 'newOrders' },
       { to: '/tracking', icon: '➤', label: 'Tracking', badge: 'alerts', badgeKind: 'alert' },
       { to: '/exports', icon: '⤓', label: 'Excel exports' },
+      { to: '/airtable', icon: '⇉', label: 'Airtable sync' },
     ],
   },
   {
@@ -189,6 +191,7 @@ export default function App() {
             <Route path="/research" element={<Research />} />
             <Route path="/jobs" element={<BulkJobs />} />
             <Route path="/exports" element={<Exports />} />
+            <Route path="/airtable" element={<Airtable />} />
             <Route path="/shop" element={<ShopSettings />} />
             <Route path="/api-explorer" element={<ApiExplorer />} />
             <Route path="/settings" element={<Settings />} />

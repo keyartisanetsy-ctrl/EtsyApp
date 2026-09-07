@@ -414,3 +414,6 @@ table.data td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .privacy-list { margin: 0 0 12px; padding-left: 20px; font-size: 13px; line-height: 1.7; }
 .privacy-list li { color: var(--text-dim); }
 .privacy-list.good li::marker { color: var(--good); content: '✓  '; }
+
+/* generic push-apart helper, used by drawer and modal footers */
+.spacer { flex: 1; }

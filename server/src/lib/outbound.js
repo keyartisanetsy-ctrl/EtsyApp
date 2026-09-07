@@ -108,6 +108,12 @@ export const DESTINATIONS = [
     optional: true,
   },
   {
+    host: 'api.airtable.com',
+    purpose: 'Sending your orders to your own Airtable bases, only when you press Send or enable auto-push.',
+    sends: 'Your Airtable token and the order fields you mapped (which include buyer name and address).',
+    optional: true,
+  },
+  {
     host: 'services.yuntrack.com / www.yuntrack.com',
     purpose: 'Parcel tracking lookups.',
     sends: 'Only the tracking numbers you ask about.',

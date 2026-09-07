@@ -239,6 +239,29 @@ which are carrier-assigned and can coincidentally repeat across two shops
 using the same courier) and covered by a test that connects two shops and
 asserts neither can see the other's rows.
 
+## Airtable
+
+Push the active shop's orders into your own Airtable tables — with one button on
+the Orders screen, or automatically after every sync. Full guide:
+[docs/AIRTABLE.md](docs/AIRTABLE.md).
+
+The two things worth knowing up front:
+
+- **Two ways to match columns.** *Match by name* is instant and offline, and knows
+  the usual English and Turkish column names (`Takip No`, `MAĞAZA`, `BAŞLIK İLK 40`,
+  `Ship Zipcode`…). *Match with AI* hands your schema to the configured AI provider
+  and asks it to choose. Either way you get the same plain, editable list, and an
+  AI answer is validated first — invented columns and computed columns are dropped
+  rather than saved.
+- **Sending twice does not duplicate.** Tick the column holding the order number as
+  the *key*, and a second send updates the same row. The app also remembers which
+  Airtable record each order became, so updates and deletes stay correct even if the
+  key column is edited inside Airtable.
+
+Computed columns are never written to, select options are created as needed, values
+are converted to the target column's type, and empty values are skipped so a blank
+here never wipes something you typed in Airtable.
+
 ## When the browser says the site cannot be reached
 
 `ERR_CONNECTION_REFUSED` on `127.0.0.1:4317` means no server is listening. It is

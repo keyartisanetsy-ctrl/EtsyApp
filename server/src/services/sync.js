@@ -7,6 +7,7 @@ import { requireShopId, activeShopId } from '../etsy/shop.js';
 import { getDb, json, audit } from '../db/index.js';
 import { money } from '../lib/money.js';
 import { createLogger } from '../lib/logger.js';
+import { readSetting } from './settings.js';
 
 const log = createLogger('sync');
 
@@ -402,7 +403,9 @@ export async function syncReceipts({ full = false, sinceDays = null, onProgress 
   const args = { shop_id: shopId, sort_on: 'updated', sort_order: 'desc' };
 
   if (!full) {
-    const last = db.prepare('SELECT MAX(updated_ts) AS t FROM receipts').get()?.t;
+    // Scoped to this shop: a freshly connected second shop must not inherit
+    // the first shop's watermark and skip everything older than it.
+    const last = db.prepare('SELECT MAX(updated_ts) AS t FROM receipts WHERE shop_id IS ?').get(shopId)?.t;
     // Overlap by a day so nothing slips through a clock skew.
     if (last) args.min_last_modified = Math.max(0, last - 86_400);
   }
@@ -430,7 +433,29 @@ export async function syncReceipts({ full = false, sinceDays = null, onProgress 
   const summary = { receipts: receipts.length, transactionFetches: fetched, full };
   audit('sync.receipts', { entity: 'receipt', detail: summary });
   log.info(`receipts synced: ${receipts.length}`);
+
+  summary.airtable = await autoPushToAirtable(receipts.map((r) => r.receipt_id));
   return summary;
+}
+
+/**
+ * Optional: after a sync, send the orders straight on to Airtable so the sheet
+ * fills itself. Off by default. A failure here is reported but never fails the
+ * Etsy sync - the orders are already saved locally either way.
+ */
+async function autoPushToAirtable(receiptIds) {
+  if (readSetting('airtable.auto_push') !== 'true' || !receiptIds.length) return null;
+  try {
+    const { defaultDestination, push } = await import('./airtable.js');
+    const destination = defaultDestination();
+    if (!destination) return { skipped: 'no default Airtable destination' };
+    const result = await push({ destinationId: destination.id, receiptIds, mode: 'upsert' });
+    log.info(`auto-pushed to Airtable: ${result.created} new, ${result.updated} updated`);
+    return { destination: destination.label, created: result.created, updated: result.updated };
+  } catch (err) {
+    log.warn(`auto-push to Airtable failed: ${err.message}`);
+    return { error: err.message };
+  }
 }
 
 export async function syncAll(opts = {}) {

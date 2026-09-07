@@ -475,6 +475,165 @@ await check('connecting a shop writes exactly one account row (no orphan)', asyn
   removeAccount(910001);
 });
 
+console.log('\nAirtable');
+await check('the source field catalogue is complete and resolvable', async () => {
+  const { status, body } = await req('/api/airtable/source-fields');
+  assert(status === 200 && Array.isArray(body), 'no catalogue returned');
+  assert(body.length >= 30, `catalogue looks thin: ${body.length} fields`);
+  for (const f of body) assert(f.key && f.label && f.group && f.hint, `incomplete field: ${JSON.stringify(f)}`);
+  const keys = body.map((f) => f.key);
+  assert(new Set(keys).size === keys.length, 'duplicate source keys');
+  for (const needed of ['order.id', 'order.date', 'buyer.name', 'address.zip', 'item.sku', 'total.grand', 'tracking.code', 'shop.name']) {
+    assert(keys.includes(needed), `catalogue is missing ${needed}`);
+  }
+});
+
+await check('name matching handles Turkish column names and skips computed ones', async () => {
+  const { matchByName } = await import('../server/src/airtable/mapping.js');
+  const fields = [
+    { name: 'Order ID', type: 'singleSelect', writable: true },
+    { name: 'Sale Date', type: 'date', writable: true },
+    { name: 'Takip No', type: 'singleLineText', writable: true },
+    { name: 'MAĞAZA', type: 'singleSelect', writable: true },
+    { name: 'Ship Zipcode', type: 'singleLineText', writable: true },
+    { name: 'BAŞLIK İLK 40', type: 'singleLineText', writable: true },
+    { name: 'NOT 1', type: 'singleLineText', writable: true },
+    { name: 'NOT 2', type: 'multilineText', writable: true },
+    { name: 'Profit', type: 'formula', writable: false },
+  ];
+  const { map, unmatched } = matchByName(fields);
+  const got = Object.fromEntries(map.map((m) => [m.target, m.source]));
+  assert(got['Order ID'] === 'order.id', `Order ID -> ${got['Order ID']}`);
+  assert(got['Sale Date'] === 'order.date', `Sale Date -> ${got['Sale Date']}`);
+  assert(got['Takip No'] === 'tracking.code', `Takip No -> ${got['Takip No']}`);
+  assert(got['MAĞAZA'] === 'shop.name', `MAĞAZA -> ${got['MAĞAZA']}`);
+  assert(got['Ship Zipcode'] === 'address.zip', `Ship Zipcode -> ${got['Ship Zipcode']}`);
+  assert(got['BAŞLIK İLK 40'] === 'item.title40', `BAŞLIK İLK 40 -> ${got['BAŞLIK İLK 40']}`);
+  assert(!('Profit' in got), 'a computed column was mapped');
+  assert(!map.some((m) => m.target === 'Profit'), 'formula column offered as a target');
+  // A guessed source may only be claimed once, so the two note columns cannot both take it.
+  assert(map.filter((m) => m.source === 'order.buyer_message').length === 1, 'two columns claimed the same guessed source');
+  assert(unmatched.includes('NOT 2'), 'the duplicate note column should be left for the user');
+});
+
+await check('values are bent to the target column type', async () => {
+  const { coerce } = await import('../server/src/services/airtable.js');
+  const t = (value, type, opts) => coerce(value, { name: 'x', type }, opts);
+  assert(t(2543.93, 'currency').value === 2543.93, 'currency lost its value');
+  assert(t('2543.93', 'number').value === 2543.93, 'numeric string not parsed');
+  assert(t('not a number', 'number').skip, 'garbage accepted into a number column');
+  assert(t('2025-09-05T10:00:00Z', 'date').value === '2025-09-05', 'date not trimmed to a day');
+  assert(t(true, 'checkbox').value === true, 'checkbox lost its value');
+  assert(Array.isArray(t('Paid', 'multipleSelects').value), 'multi-select needs an array');
+  assert(t('ftp://x', 'url').skip, 'a non-URL was written into a url column');
+  assert(t('', 'singleLineText').skip, 'empty value should be skipped, not written');
+  // Linked-record columns need explicit consent, since Airtable would create rows.
+  assert(t('SKU-1', 'multipleRecordLinks').skip, 'linked column written without consent');
+  assert(Array.isArray(t('SKU-1', 'multipleRecordLinks', { createLinks: true }).value), 'consented link not written');
+});
+
+await check('a destination maps an order into Airtable columns', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const at = await import('../server/src/services/airtable.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 980001').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (980001,'Verify Airtable Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(980001);
+
+  db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, name, city, zip, country_iso, status,
+              grandtotal_amount, grandtotal_divisor, grandtotal_currency, was_paid, created_ts)
+              VALUES (980100, 980001, 'Test Buyer', 'Pensacola', '32501', 'US', 'Paid', 254393, 100, 'USD', 1, 1757030400)`).run();
+  db.prepare(`INSERT OR REPLACE INTO receipt_transactions (transaction_id, receipt_id, listing_id, sku, title, quantity, price_amount, price_divisor)
+              VALUES (980200, 980100, 5551234, 'SKU-A', 'A very long product title that should be cut at forty characters', 2, 127196, 100)`).run();
+
+  const dest = at.saveDestination({
+    label: 'Verify destination', baseId: 'appVerify000000000', tableId: 'tblVerify000000000', rowMode: 'item',
+    fieldMap: [
+      { target: 'Order ID', source: 'order.id' },
+      { target: 'Sale Date', source: 'order.date' },
+      { target: 'Full Name', source: 'buyer.name' },
+      { target: 'Quantity', source: 'item.quantity' },
+      { target: 'Order Total', source: 'total.grand' },
+      { target: 'BAŞLIK İLK 40', source: 'item.title40' },
+      { target: 'Profit', source: 'total.grand' },
+    ],
+    mergeFields: ['Order ID'], constants: { 'MAĞAZA': 'Verify Airtable Shop' },
+  });
+
+  const table = { id: 'tblVerify000000000', name: 'Orders', fields: [
+    { name: 'Order ID', type: 'singleSelect', writable: true },
+    { name: 'Sale Date', type: 'date', writable: true },
+    { name: 'Full Name', type: 'singleLineText', writable: true },
+    { name: 'Quantity', type: 'number', writable: true },
+    { name: 'Order Total', type: 'currency', writable: true },
+    { name: 'BAŞLIK İLK 40', type: 'singleLineText', writable: true },
+    { name: 'MAĞAZA', type: 'singleSelect', writable: true },
+    { name: 'Profit', type: 'formula', writable: false },
+  ] };
+
+  const { records, issues } = await at.buildRecords(dest, [980100], { table });
+  assert(records.length === 1, `expected one row per item, got ${records.length}`);
+  const f = records[0].fields;
+  assert(f['Order ID'] === '980100', `order id: ${f['Order ID']}`);
+  assert(f['Sale Date'] === '2025-09-05', `date: ${f['Sale Date']}`);
+  assert(f['Quantity'] === 2 && typeof f['Quantity'] === 'number', 'quantity must be a number');
+  assert(f['Order Total'] === 2543.93, `total: ${f['Order Total']}`);
+  assert(f['BAŞLIK İLK 40'].length === 40, `title should be cut to 40, got ${f['BAŞLIK İLK 40'].length}`);
+  assert(f['MAĞAZA'] === 'Verify Airtable Shop', 'the fixed shop value was not applied');
+  assert(!('Profit' in f), 'wrote into a formula column');
+  assert(issues[0].skipped.some((m) => /Profit/.test(m)), 'the skipped formula column was not reported');
+
+  at.deleteDestination(dest.id);
+  db.prepare('DELETE FROM receipts WHERE receipt_id = 980100').run();
+  client.removeAccount(980001);
+});
+
+await check('an AI mapping cannot invent columns or sources', async () => {
+  const mapping = await import('../server/src/airtable/mapping.js');
+  // Stand in for the provider: answer with one good row and three bad ones.
+  const fake = {
+    map: [
+      { target: 'Full Name', source: 'buyer.name', why: 'ok' },
+      { target: 'Column That Does Not Exist', source: 'buyer.name', why: 'hallucinated column' },
+      { target: 'Quantity', source: 'made.up.key', why: 'hallucinated source' },
+      { target: 'Profit', source: 'total.grand', why: 'computed column' },
+    ],
+    mergeFields: ['Full Name', 'Profit'],
+    constants: { 'MAĞAZA': 'Shop A', 'Nope': 'x' },
+  };
+  const runner = async () => ({ text: JSON.stringify(fake), provider: 'stub', model: 'stub', runId: 0 });
+  {
+    const fields = [
+      { name: 'Full Name', type: 'singleLineText', writable: true },
+      { name: 'Quantity', type: 'number', writable: true },
+      { name: 'MAĞAZA', type: 'singleSelect', writable: true },
+      { name: 'Profit', type: 'formula', writable: false },
+    ];
+    const r = await mapping.matchByAi({ table: 'Orders', fields, shopName: 'Shop A', runner });
+    const targets = r.map.map((m) => m.target);
+    assert(targets.includes('Full Name'), 'the one good mapping was dropped');
+    assert(!targets.includes('Column That Does Not Exist'), 'a made-up column survived');
+    assert(!targets.includes('Quantity'), 'a made-up source key survived');
+    assert(!targets.includes('Profit'), 'a computed column survived');
+    assert(!r.mergeFields.includes('Profit'), 'a computed column was accepted as the key');
+    assert(r.constants['MAĞAZA'] === 'Shop A', 'a valid constant was dropped');
+    assert(!('Nope' in r.constants), 'a constant for a made-up column survived');
+    assert(r.dropped.length === 3, `expected 3 rejections, got ${r.dropped.length}`);
+  }
+});
+
+await check('Airtable is disclosed as a destination and needs a token', async () => {
+  const { body } = await req('/api/settings/privacy');
+  const hosts = (body.destinations ?? []).map((d) => d.host).join(' ');
+  assert(/airtable/i.test(hosts), 'Airtable missing from the privacy disclosure');
+  const { status, body: err } = await req('/api/airtable/bases', { allowError: true });
+  assert(status === 400 && /token/i.test(err.error), `expected a token complaint, got ${status} ${err.error}`);
+});
+
 console.log('\nGuards');
 await check('unauthenticated Etsy write is refused with guidance', async () => {
   const { status, body } = await req('/api/listings', {

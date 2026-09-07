@@ -1,0 +1,238 @@
+/**
+ * What this app can send to Airtable.
+ *
+ * Every field here is a stable key the mapping stores, a human label the UI
+ * shows, and a resolver that turns one order (and, in per-item mode, one line
+ * of that order) into a value. Adding a field here makes it available to both
+ * matching modes at once - the name matcher and the AI matcher both read this
+ * same list, so they can never drift apart.
+ */
+import { getDb } from '../db/index.js';
+import { activeShopId, currentShop } from '../etsy/shop.js';
+import { readSetting } from '../services/settings.js';
+
+const iso = (ts) => (ts ? new Date(ts * 1000).toISOString() : null);
+const isoDate = (ts) => (ts ? new Date(ts * 1000).toISOString().slice(0, 10) : null);
+const money = (amount, divisor) => (amount === null || amount === undefined ? null : amount / (divisor || 100));
+const clean = (s) => (s === null || s === undefined ? null : String(s));
+
+/** Distinct, non-empty values in order, joined for the per-order row mode. */
+const joinItems = (items, pick, sep = ', ') => {
+  const seen = [];
+  for (const it of items) {
+    const v = pick(it);
+    if (v !== null && v !== undefined && v !== '' && !seen.includes(v)) seen.push(v);
+  }
+  return seen.length ? seen.join(sep) : null;
+};
+
+const variationLabel = (item) => {
+  let list = [];
+  try { list = JSON.parse(item.variations || '[]') || []; } catch { list = []; }
+  return list
+    .map((v) => `${v.formatted_name ?? v.property_name ?? ''}: ${v.formatted_value ?? v.value ?? ''}`.trim())
+    .filter((s) => s && s !== ':')
+    .join(' / ') || null;
+};
+
+const trackingLink = (code) => (code
+  ? (readSetting('tracking.url_template') || 'https://www.yuntrack.com/parcelTracking?id={code}').replace('{code}', encodeURIComponent(code))
+  : null);
+
+/**
+ * The catalogue. `group` only drives how the UI clusters the dropdown;
+ * `hint` is what the AI matcher reads to understand a field it cannot infer
+ * from the key alone.
+ */
+export const SOURCE_FIELDS = [
+  // ---------------------------------------------------------------- order
+  { key: 'order.id', group: 'Order', label: 'Order ID (Etsy receipt id)', hint: 'The Etsy order/receipt number, digits only, e.g. 4166419738',
+    get: ({ order }) => String(order.receipt_id) },
+  { key: 'order.id_hash', group: 'Order', label: 'Order ID with #', hint: 'Same order number prefixed with #, e.g. #4166419738',
+    get: ({ order }) => `#${order.receipt_id}` },
+  { key: 'order.date', group: 'Order', label: 'Order date (YYYY-MM-DD)', hint: 'The date the order was placed, no time part',
+    get: ({ order }) => isoDate(order.created_ts) },
+  { key: 'order.datetime', group: 'Order', label: 'Order date and time (ISO)', hint: 'Full ISO timestamp of the order',
+    get: ({ order }) => iso(order.created_ts) },
+  { key: 'order.status', group: 'Order', label: 'Etsy status', hint: 'Etsy order status such as Paid, Completed, Open',
+    get: ({ order }) => clean(order.status) },
+  { key: 'order.is_paid', group: 'Order', label: 'Paid?', hint: 'true/false checkbox for payment received',
+    get: ({ order }) => !!order.was_paid },
+  { key: 'order.is_shipped', group: 'Order', label: 'Shipped?', hint: 'true/false checkbox for dispatched',
+    get: ({ order }) => !!order.was_shipped },
+  { key: 'order.is_gift', group: 'Order', label: 'Gift?', hint: 'true/false, buyer marked the order as a gift',
+    get: ({ order }) => !!order.is_gift },
+  { key: 'order.gift_message', group: 'Order', label: 'Gift message', hint: 'The gift note the buyer wrote',
+    get: ({ order }) => clean(order.gift_message) },
+  { key: 'order.buyer_message', group: 'Order', label: 'Buyer note / message', hint: 'Free-text note the buyer left with the order',
+    get: ({ order }) => clean(order.message_from_buyer) },
+  { key: 'order.item_count', group: 'Order', label: 'Number of lines in the order', hint: 'How many distinct items this order contains',
+    get: ({ items }) => items.length },
+  { key: 'order.etsy_url', group: 'Order', label: 'Etsy order link', hint: 'Deep link to this order in the Etsy seller dashboard',
+    get: ({ order }) => `https://www.etsy.com/your/orders/sold?order_id=${order.receipt_id}` },
+
+  // --------------------------------------------------------------- totals
+  { key: 'total.grand', group: 'Totals', label: 'Order total', hint: 'What the buyer paid in total, as a number',
+    get: ({ order }) => money(order.grandtotal_amount, order.grandtotal_divisor) },
+  { key: 'total.subtotal', group: 'Totals', label: 'Subtotal', hint: 'Items subtotal before shipping and tax',
+    get: ({ order }) => money(order.subtotal_amount, order.grandtotal_divisor) },
+  { key: 'total.shipping', group: 'Totals', label: 'Shipping charged', hint: 'Shipping the buyer paid',
+    get: ({ order }) => money(order.total_shipping_amount, order.grandtotal_divisor) },
+  { key: 'total.tax', group: 'Totals', label: 'Tax', hint: 'Tax collected on the order',
+    get: ({ order }) => money(order.total_tax_amount, order.grandtotal_divisor) },
+  { key: 'total.discount', group: 'Totals', label: 'Discount', hint: 'Discount applied to the order',
+    get: ({ order }) => money(order.discount_amount, order.grandtotal_divisor) },
+  { key: 'total.currency', group: 'Totals', label: 'Currency code', hint: 'Currency of the totals, e.g. USD, TRY',
+    get: ({ order }) => clean(order.grandtotal_currency) },
+
+  // ----------------------------------------------------------- buyer info
+  { key: 'buyer.name', group: 'Buyer', label: 'Buyer full name', hint: 'Name on the shipping label',
+    get: ({ order }) => clean(order.name) },
+  { key: 'buyer.email', group: 'Buyer', label: 'Buyer email', hint: 'Email address of the buyer',
+    get: ({ order }) => clean(order.buyer_email) },
+  { key: 'address.line1', group: 'Address', label: 'Street line 1', hint: 'First address line',
+    get: ({ order }) => clean(order.first_line) },
+  { key: 'address.line2', group: 'Address', label: 'Street line 2', hint: 'Second address line, often empty',
+    get: ({ order }) => clean(order.second_line) },
+  { key: 'address.street', group: 'Address', label: 'Street (both lines)', hint: 'Street lines 1 and 2 joined together',
+    get: ({ order }) => [order.first_line, order.second_line].filter(Boolean).join('\n') || null },
+  { key: 'address.city', group: 'Address', label: 'City', hint: 'Shipping city',
+    get: ({ order }) => clean(order.city) },
+  { key: 'address.state', group: 'Address', label: 'State / province', hint: 'Shipping state, province or region',
+    get: ({ order }) => clean(order.state) },
+  { key: 'address.zip', group: 'Address', label: 'Post code', hint: 'Shipping ZIP or postal code',
+    get: ({ order }) => clean(order.zip) },
+  { key: 'address.country', group: 'Address', label: 'Country code (US, DE)', hint: 'Two letter ISO country code of the destination',
+    get: ({ order }) => clean(order.country_iso) },
+  { key: 'address.formatted', group: 'Address', label: 'Full formatted address', hint: 'The whole address as one block of text',
+    get: ({ order }) => clean(order.formatted_address) },
+
+  // ------------------------------------------------------------ item info
+  { key: 'item.sku', group: 'Item', label: 'SKU', hint: 'Stock code of the product ordered',
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? clean(item?.sku) : joinItems(items, (i) => i.sku)) },
+  { key: 'item.title', group: 'Item', label: 'Product title', hint: 'Full listing title',
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? clean(item?.title) : joinItems(items, (i) => i.title, ' | ')) },
+  { key: 'item.title40', group: 'Item', label: 'Product title, first 40 characters', hint: 'Shortened listing title for narrow columns',
+    get: ({ item, items, rowMode }) => {
+      const t = rowMode === 'item' ? item?.title : joinItems(items, (i) => i.title, ' | ');
+      return t ? String(t).slice(0, 40) : null;
+    } },
+  { key: 'item.quantity', group: 'Item', label: 'Quantity', hint: 'How many units, a number',
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? (item?.quantity ?? null) : items.reduce((n, i) => n + (i.quantity || 0), 0)) },
+  { key: 'item.price', group: 'Item', label: 'Unit price', hint: 'Price of one unit as a number',
+    get: ({ item, rowMode }) => (rowMode === 'item' ? money(item?.price_amount, item?.price_divisor) : null) },
+  { key: 'item.variations', group: 'Item', label: 'Variations (colour, size...)', hint: 'The chosen options, e.g. "Colour: Red / Size: M"',
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? variationLabel(item ?? {}) : joinItems(items, variationLabel, ' | ')) },
+  { key: 'item.image_url', group: 'Item', label: 'Product image URL', hint: 'Direct link to the listing photo',
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? clean(item?.image_url) : joinItems(items, (i) => i.image_url, ' ')) },
+  { key: 'item.listing_id', group: 'Item', label: 'Etsy listing id', hint: 'Numeric id of the listing',
+    get: ({ item, rowMode }) => (rowMode === 'item' ? (item?.listing_id ?? null) : null) },
+  { key: 'item.etsy_link', group: 'Item', label: 'Etsy listing link', hint: 'Public etsy.com URL of the product',
+    get: ({ item, items, rowMode }) => {
+      const id = rowMode === 'item' ? item?.listing_id : items[0]?.listing_id;
+      return id ? `https://www.etsy.com/listing/${id}` : null;
+    } },
+  { key: 'item.supply_link', group: 'Item', label: 'Supplier link (from SKU manager)', hint: 'The buying/dropshipping URL saved against this SKU',
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? clean(item?.supply_link) : joinItems(items, (i) => i.supply_link, ' ')) },
+  { key: 'item.supplier_name', group: 'Item', label: 'Supplier name', hint: 'Supplier saved against this SKU',
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? clean(item?.supplier_name) : joinItems(items, (i) => i.supplier_name)) },
+  { key: 'item.supply_cost', group: 'Item', label: 'Supply cost', hint: 'What the item costs you, as a number',
+    get: ({ item, rowMode }) => (rowMode === 'item' ? (item?.supply_cost ?? null) : null) },
+
+  // -------------------------------------------------------------- parcels
+  { key: 'tracking.code', group: 'Tracking', label: 'Tracking number', hint: 'Parcel tracking number',
+    get: ({ order }) => clean(order.tracking_code) },
+  { key: 'tracking.url', group: 'Tracking', label: 'Tracking link', hint: 'Clickable tracking URL for the parcel',
+    get: ({ order }) => trackingLink(order.tracking_code) },
+  { key: 'tracking.carrier', group: 'Tracking', label: 'Carrier', hint: 'Shipping company name',
+    get: ({ order }) => clean(order.carrier_name) },
+  { key: 'tracking.status', group: 'Tracking', label: 'Tracking status', hint: 'Latest parcel status, e.g. in_transit, delivered',
+    get: ({ order }) => clean(order.tracking_status) },
+
+  // ----------------------------------------------------------------- shop
+  { key: 'shop.name', group: 'Shop', label: 'Shop name', hint: 'Which Etsy shop the order belongs to, e.g. KeyArtisanUS',
+    get: ({ shop }) => clean(shop?.shop_name) },
+  { key: 'shop.id', group: 'Shop', label: 'Shop id', hint: 'Numeric Etsy shop id',
+    get: ({ shop }) => (shop?.shop_id ?? null) },
+
+  // ------------------------------------------------------- your own flags
+  { key: 'flags.done', group: 'Your flags', label: 'Marked done?', hint: 'true/false, your own done tick in this app',
+    get: ({ order }) => !!order.is_done },
+  { key: 'flags.supplier_ordered', group: 'Your flags', label: 'Supplier ordered?', hint: 'true/false, you have placed the supplier order',
+    get: ({ order }) => !!order.supplier_ordered },
+  { key: 'flags.supplier_ref', group: 'Your flags', label: 'Supplier order reference', hint: 'Your reference/code at the supplier',
+    get: ({ order }) => clean(order.supplier_order_ref) },
+  { key: 'flags.notes', group: 'Your flags', label: 'Your note', hint: 'The private note you typed on the order',
+    get: ({ order }) => clean(order.notes) },
+];
+
+export const SOURCE_BY_KEY = new Map(SOURCE_FIELDS.map((f) => [f.key, f]));
+
+/** Resolve one source key against a row context. Unknown keys resolve to null. */
+export function resolveSource(key, ctx) {
+  const def = SOURCE_BY_KEY.get(key);
+  if (!def) return null;
+  try { return def.get(ctx); } catch { return null; }
+}
+
+/**
+ * Load the orders to push, shaped into the rows that will become Airtable
+ * records: one per order line in 'item' mode, one per order in 'order' mode.
+ */
+export function loadRows(receiptIds, { rowMode = 'item' } = {}) {
+  if (!receiptIds?.length) return [];
+  const db = getDb();
+  const shopId = activeShopId();
+  const shop = currentShop();
+  const holes = receiptIds.map(() => '?').join(',');
+
+  const orders = db.prepare(`
+    SELECT r.*,
+           COALESCE(f.is_done, 0) AS is_done, COALESCE(f.supplier_ordered, 0) AS supplier_ordered,
+           f.supplier_order_ref, f.notes,
+           s.tracking_code, s.carrier_name, t.status AS tracking_status
+    FROM receipts r
+    LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
+    LEFT JOIN (SELECT receipt_id, MAX(id) AS sid FROM shipments GROUP BY receipt_id) ls ON ls.receipt_id = r.receipt_id
+    LEFT JOIN shipments s ON s.id = ls.sid
+    LEFT JOIN tracking t ON t.tracking_code = s.tracking_code AND t.shop_id IS r.shop_id
+    WHERE r.shop_id IS ? AND r.receipt_id IN (${holes})
+    ORDER BY r.created_ts DESC`).all(shopId, ...receiptIds);
+
+  const items = db.prepare(`
+    SELECT x.*, m.supply_link, m.supplier_name, m.supply_cost
+    FROM receipt_transactions x
+    LEFT JOIN sku_meta m ON m.sku = x.sku AND m.shop_id IS ? AND x.sku <> ''
+    WHERE x.receipt_id IN (${holes})
+    ORDER BY x.transaction_id`).all(shopId, ...receiptIds);
+
+  const byReceipt = new Map();
+  for (const it of items) {
+    if (!byReceipt.has(it.receipt_id)) byReceipt.set(it.receipt_id, []);
+    byReceipt.get(it.receipt_id).push(it);
+  }
+
+  const rows = [];
+  for (const order of orders) {
+    const lines = byReceipt.get(order.receipt_id) ?? [];
+    if (rowMode === 'order' || lines.length === 0) {
+      rows.push({ receiptId: order.receipt_id, transactionId: null, order, item: lines[0] ?? null, items: lines, shop, rowMode: 'order' });
+    } else {
+      for (const item of lines) {
+        rows.push({ receiptId: order.receipt_id, transactionId: item.transaction_id, order, item, items: lines, shop, rowMode: 'item' });
+      }
+    }
+  }
+  return rows;
+}
+
+/** A single order's worth of sample values, for the mapping preview and the AI prompt. */
+export function sampleValues(rowMode = 'item') {
+  const db = getDb();
+  const latest = db.prepare('SELECT receipt_id FROM receipts WHERE shop_id IS ? ORDER BY created_ts DESC LIMIT 1')
+    .get(activeShopId());
+  if (!latest) return {};
+  const [row] = loadRows([latest.receipt_id], { rowMode });
+  if (!row) return {};
+  return Object.fromEntries(SOURCE_FIELDS.map((f) => [f.key, resolveSource(f.key, row)]));
+}

@@ -23,6 +23,7 @@ import shopRoutes from './routes/shop.js';
 import financeRoutes from './routes/finance.js';
 import exportRoutes from './routes/exports.js';
 import etsyRoutes from './routes/etsy.js';
+import airtableRoutes from './routes/airtable.js';
 
 import { startScheduler } from './scheduler.js';
 import { openBrowser, shouldOpenBrowser } from './lib/open-browser.js';
@@ -82,6 +83,7 @@ app.use('/api/shop', shopRoutes);
 app.use('/api/finance', financeRoutes);
 app.use('/api/exports', exportRoutes);
 app.use('/api/etsy', etsyRoutes);
+app.use('/api/airtable', airtableRoutes);
 
 // Serve the built frontend when it exists, so `npm start` runs the whole app.
 const webDist = path.join(ROOT, 'web', 'dist');

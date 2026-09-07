@@ -46,6 +46,10 @@ export const SETTING_DEFS = {
   'privacy.share_ai':      { env: '', def: 'true', label: 'Allow AI features to send your text to the AI provider',
     options: [ { value: 'true', label: 'Yes - AI features work' }, { value: 'false', label: 'No - block all AI calls' } ] },
 
+  'airtable.token':        { env: process.env.AIRTABLE_TOKEN || '', def: '', secret: true, label: 'Airtable personal access token' },
+  'airtable.auto_push':    { env: '', def: 'false', label: 'Send new orders to Airtable automatically after each sync',
+    options: [ { value: 'false', label: 'No - I press the button myself' }, { value: 'true', label: 'Yes - push new orders automatically' } ] },
+
   'pricing.discount_percent': { env: String(config.pricing.discountPercent), def: '30', label: 'Discount percentage' },
   'orders.default_carrier':   { env: '', def: '', label: 'Default carrier for bulk tracking' },
   'orders.notify_buyer':      { env: '', def: 'true', label: 'Email the buyer when tracking is added' },

@@ -416,3 +416,60 @@ CREATE TABLE IF NOT EXISTS api_calls (
   error        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_apicalls_ts ON api_calls(ts DESC);
+
+-- ---------------------------------------------------------------- Airtable
+-- A destination is one mapped table. shop_id NULL means "every shop", so a
+-- shared sheet does not have to be recreated per shop.
+CREATE TABLE IF NOT EXISTS airtable_destinations (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  shop_id       INTEGER,
+  label         TEXT NOT NULL,
+  base_id       TEXT NOT NULL,
+  base_name     TEXT,
+  table_id      TEXT NOT NULL,
+  table_name    TEXT,
+  view_id       TEXT,
+  view_name     TEXT,
+  row_mode      TEXT NOT NULL DEFAULT 'item',   -- 'item' = a row per order line, 'order' = a row per order
+  match_mode    TEXT NOT NULL DEFAULT 'name',   -- how the mapping was made: 'name' or 'ai'
+  field_map     TEXT NOT NULL DEFAULT '[]',     -- [{ target, source, confidence, why }]
+  merge_fields  TEXT NOT NULL DEFAULT '[]',     -- Airtable columns that identify a row (max 3)
+  constants     TEXT NOT NULL DEFAULT '{}',     -- { column: fixed value } e.g. the shop name
+  create_options INTEGER NOT NULL DEFAULT 1,    -- let Airtable add missing select options (typecast)
+  create_links  INTEGER NOT NULL DEFAULT 0,     -- allow writing to linked-record columns
+  send_empty    INTEGER NOT NULL DEFAULT 0,     -- write blanks instead of skipping empty values
+  is_default    INTEGER NOT NULL DEFAULT 0,
+  last_push_at  TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_atdest_shop ON airtable_destinations(shop_id);
+
+-- Which Airtable record each pushed row became, so a second push updates
+-- instead of duplicating, and a delete knows what to remove.
+CREATE TABLE IF NOT EXISTS airtable_links (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  destination_id INTEGER NOT NULL,
+  shop_id        INTEGER,
+  receipt_id     INTEGER NOT NULL,
+  transaction_id INTEGER NOT NULL DEFAULT 0,    -- 0 when the destination writes one row per order
+  record_id      TEXT NOT NULL,
+  last_pushed_at TEXT,
+  UNIQUE (destination_id, receipt_id, transaction_id)
+);
+CREATE INDEX IF NOT EXISTS idx_atlinks_receipt ON airtable_links(shop_id, receipt_id);
+
+CREATE TABLE IF NOT EXISTS airtable_runs (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  destination_id INTEGER,
+  shop_id        INTEGER,
+  mode           TEXT,
+  created        INTEGER DEFAULT 0,
+  updated        INTEGER DEFAULT 0,
+  deleted        INTEGER DEFAULT 0,
+  skipped        INTEGER DEFAULT 0,
+  failed         INTEGER DEFAULT 0,
+  detail         TEXT,
+  ran_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_atruns_shop ON airtable_runs(shop_id, id DESC);
