@@ -61,10 +61,18 @@ accents, punctuation, capitals) and knows the usual names in English and Turkish
 | `Ship Zipcode`, `Posta Kodu` | the post code |
 | `BAŞLIK İLK 40` | the product title cut to 40 characters |
 | `Ürün Tedarik Link`, `Buying URL` | the supplier link from your SKU manager |
+| `KOD`, `Sipariş Kodu` | the short order code |
+| `Month`, `Ay` | the month, as `2026 Eylül` |
+| `Yuan - USD Kur`, `Kur` | the yuan rate on the order date |
+| `Shipping Cost Yuan`, `Kargo Maliyeti` | what the parcel cost you |
+| `Varyant Görsel` | the variant photo URL |
+| `Image URL`, `Görsel` | the best available photo URL |
+| `NOT 1` | what the **buyer** wrote |
+| `NOT 2` | **your own** note |
 
 Each match shows *why* it matched underneath the column name. A guessed match
-claims a source only once, so two columns called `NOT 1` and `NOT 2` will not both
-silently grab the same value — the second is left for you.
+claims a source only once, so two columns that merely look alike will not both
+silently grab the same value — the second is left for you to decide.
 
 ### Match with AI
 
@@ -111,6 +119,70 @@ sent to the default destination. If Airtable is unreachable the Etsy sync still
 succeeds and the failure is logged — your orders are saved locally either way.
 
 ---
+
+## Fields worth knowing about
+
+Beyond the plain order fields, the catalogue carries a few that are computed for you.
+
+### Short order code (KOD)
+
+`26-0709-01` — two-digit year, day and month, then the order's position within that day.
+It is worked out from the order's **own** date, assigned once and stored, so:
+
+- every item of the same order carries the **same** code (matching its order number), and
+- a code already sitting in Airtable is never renumbered later.
+
+Change the shape in Settings with `orders.code_template` — `{YY} {YYYY} {DD} {MM}` and `{NN}`
+(the number of `N`s sets the padding).
+
+### Month
+
+`2026 Eylül` — the month the order arrived, in the same shape these sheets already use.
+`Month of the order (September 2026)` is there if you want English instead.
+
+### Exchange rates and USD totals
+
+The app keeps the last ~3 months of daily rates from the European Central Bank and values
+**every order at the rate of the day it arrived**, not today's rate. The ECB publishes on
+working days only, so an order that lands on a weekend uses the previous working day —
+the Airtable page shows which day each rate came from.
+
+| Field | Gives |
+|---|---|
+| `Yuan → USD rate on the order date` | e.g. `0.149011`, for a "Yuan - USD Kur" column |
+| `Lira → USD rate on the order date` | the same for TRY |
+| `Order total in USD`, `Subtotal in USD` | the totals converted at that day's rate |
+| `Unit price in USD` | one unit, converted |
+
+This is what to use for **KeyArtisann**, where Etsy bills in lira: map `Subtotal in USD`
+into the Order Total column and the sheet gets dollars, converted at the right day's rate.
+
+### Shipping cost
+
+Type what a parcel cost you straight into the **Shipping cost** column on the Tracking
+screen, next to its tracking number. It comes back as `Shipping cost you paid` and
+`Shipping cost in USD` (converted at the order-date rate).
+
+### Variant image
+
+`Variant image URL` is the photo Etsy has against the exact option the buyer chose, which
+is usually the right colour — unlike the first listing photo. `Best available image URL`
+uses that when it exists and falls back to the listing photo, so a row always has a picture.
+Both are plain URLs; point an Airtable automation at the column to turn it into an attachment.
+
+The app fetches these automatically before a push that needs them, reusing whatever the
+catalogue sync already downloaded so it usually costs no extra API call.
+
+### Variant text
+
+`Variant (what the buyer picked)` gives just the values — `Silver / 8 US`, no option titles.
+The long form is still available as `Variant with option titles`. HTML entities Etsy sends
+(`&#039;`) are turned back into real characters (`'`) everywhere, titles included.
+
+## Etsy and Shopify defaults
+
+Each destination belongs to a **sheet family** — Etsy or Shopify — and each family keeps its
+own default, so one click can go to either sheet without reconfiguring anything.
 
 ## Things that are handled for you
 

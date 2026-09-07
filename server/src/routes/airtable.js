@@ -6,6 +6,8 @@ import { SOURCE_FIELDS } from '../airtable/fields.js';
 import { readSetting, writeSetting } from '../services/settings.js';
 import { maskSecret } from '../lib/crypto.js';
 import { currentShop } from '../etsy/shop.js';
+import * as fx from '../services/fx.js';
+import * as variantImages from '../services/variantimages.js';
 
 const router = Router();
 
@@ -86,5 +88,32 @@ router.post('/synced', asyncRoute(async (req, res) => {
 }));
 
 router.get('/runs', asyncRoute(async (req, res) => res.json(service.listRuns(Number(req.query.limit) || 20))));
+
+// ----------------------------------------------------------- exchange rates
+
+/** The daily rate table, newest first, plus what is covered. */
+router.get('/rates', asyncRoute(async (req, res) => {
+  res.json({
+    coverage: fx.coverage(),
+    rates: fx.listRates({ quote: req.query.quote || 'CNY', limit: Number(req.query.limit) || 120 }),
+  });
+}));
+
+router.post('/rates/refresh', asyncRoute(async (req, res) => res.json(await fx.refreshRates())));
+
+/** What one currency was worth in another on a given day. */
+router.get('/rates/on/:day', asyncRoute(async (req, res) => {
+  const { from = 'CNY', to = 'USD' } = req.query;
+  res.json(fx.rateDetail(req.params.day, from, to) ?? { rate: null, note: 'No rate stored for that day yet.' });
+}));
+
+// ---------------------------------------------------------- variant images
+
+/** Pull the per-variation photos for the listings behind these orders. */
+router.post('/variant-images/sync', asyncRoute(async (req, res) => {
+  res.json(await variantImages.syncForReceipts(req.body?.receiptIds ?? []));
+}));
+
+router.get('/variant-images/stats', asyncRoute(async (req, res) => res.json(variantImages.stats())));
 
 export default router;

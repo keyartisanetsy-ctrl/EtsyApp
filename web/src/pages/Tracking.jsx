@@ -147,6 +147,7 @@ export default function Tracking() {
                 <th>Buyer</th>
                 <th>Status</th>
                 <th>Last scan</th>
+                <th className="right">Shipping cost</th>
                 <th className="right">Idle</th>
                 <th>Alert</th>
                 <th className="col-tight" />
@@ -175,6 +176,9 @@ export default function Tracking() {
                     {t.lastEventText || <span className="muted">no scan recorded</span>}
                     {t.lastEventAt && <div className="small muted">{fmtDateTime(t.lastEventAt)}</div>}
                   </td>
+                  <td className="right">
+                    <ShippingCostCell row={t} onSaved={reload} />
+                  </td>
                   <td className="num">
                     <span className={t.isStale ? 'badge red' : 'small dim'}>{t.daysSinceMove ?? '—'}d</span>
                   </td>
@@ -197,6 +201,64 @@ export default function Tracking() {
 
       <ParcelDetail code={detail} onClose={() => setDetail(null)} onChanged={refreshAll} statuses={statuses} />
     </TablePage>
+  );
+}
+
+/**
+ * The shipping cost of one parcel, typed straight into the row. It sits next
+ * to the tracking number because that is where the courier's charge belongs,
+ * and it is what the Airtable shipping-cost column is fed from.
+ */
+function ShippingCostCell({ row, onSaved }) {
+  const showError = useErrorToast();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(row.shippingCost ?? '');
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.post(`/tracking/${encodeURIComponent(row.trackingCode)}/cost`, {
+        cost: value === '' ? null : Number(value),
+        currency: row.shippingCostCurrency || undefined,
+      });
+      setEditing(false);
+      onSaved?.();
+    } catch (err) { showError(err, 'Could not save the shipping cost'); } finally { setBusy(false); }
+  };
+
+  if (!editing) {
+    return (
+      <button
+        className="btn xs ghost"
+        title="Click to set what this parcel cost you to send"
+        onClick={() => { setValue(row.shippingCost ?? ''); setEditing(true); }}
+      >
+        {row.shippingCost === null || row.shippingCost === undefined
+          ? <span className="muted">add</span>
+          : <>{row.shippingCost} <span className="muted">{row.shippingCostCurrency || ''}</span></>}
+      </button>
+    );
+  }
+
+  return (
+    <span className="flex gap4">
+      <input
+        className="input sm"
+        style={{ width: 78 }}
+        autoFocus
+        type="number"
+        step="0.01"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') save();
+          if (e.key === 'Escape') setEditing(false);
+        }}
+      />
+      <button className="btn xs primary" onClick={save} disabled={busy}>✓</button>
+      <button className="btn xs ghost" onClick={() => setEditing(false)}>✕</button>
+    </span>
   );
 }
 

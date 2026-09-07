@@ -16,6 +16,8 @@ import { createLogger } from '../lib/logger.js';
 import * as at from '../airtable/client.js';
 import { loadRows, resolveSource, SOURCE_FIELDS } from '../airtable/fields.js';
 import { matchByName, matchByAi, suggestMergeFields } from '../airtable/mapping.js';
+import { ensureRates } from './fx.js';
+import { syncForReceipts } from './variantimages.js';
 
 const log = createLogger('airtable');
 
@@ -31,6 +33,7 @@ const shape = (row) => (row ? {
   tableName: row.table_name,
   viewId: row.view_id,
   viewName: row.view_name,
+  channel: row.channel || 'etsy',
   rowMode: row.row_mode || 'item',
   matchMode: row.match_mode || 'name',
   fieldMap: parse(row.field_map, []),
@@ -60,16 +63,17 @@ export function getDestination(id) {
   return shape(row);
 }
 
-export function defaultDestination() {
-  const list = listDestinations();
-  return list.find((d) => d.isDefault) ?? list[0] ?? null;
+export function defaultDestination(channel = 'etsy') {
+  const list = listDestinations().filter((d) => d.channel === channel);
+  const fallback = listDestinations();
+  return list.find((d) => d.isDefault) ?? list[0] ?? fallback.find((d) => d.isDefault) ?? fallback[0] ?? null;
 }
 
 export function saveDestination(input = {}) {
   const db = getDb();
   const {
     id = null, label, baseId, baseName = null, tableId, tableName = null,
-    viewId = null, viewName = null, rowMode = 'item', matchMode = 'name',
+    viewId = null, viewName = null, channel = 'etsy', rowMode = 'item', matchMode = 'name',
     fieldMap = [], mergeFields = [], constants = {},
     createOptions = true, createLinks = false, sendEmpty = false,
     isDefault = false, allShops = false,
@@ -78,6 +82,7 @@ export function saveDestination(input = {}) {
   if (!label?.trim()) throw badRequest('Give the destination a name so you can tell them apart.');
   if (!baseId || !tableId) throw badRequest('Pick an Airtable base and table.');
   if (!['item', 'order'].includes(rowMode)) throw badRequest('rowMode must be "item" or "order".');
+  if (!['etsy', 'shopify'].includes(channel)) throw badRequest('channel must be "etsy" or "shopify".');
   if (mergeFields.length > 3) throw badRequest('Airtable can match on at most three columns.');
 
   const shopId = allShops ? null : activeShopId();
@@ -90,6 +95,7 @@ export function saveDestination(input = {}) {
     table_name: tableName,
     view_id: viewId,
     view_name: viewName,
+    channel,
     row_mode: rowMode,
     match_mode: matchMode,
     field_map: JSON.stringify(fieldMap),
@@ -107,7 +113,7 @@ export function saveDestination(input = {}) {
       UPDATE airtable_destinations SET
         shop_id = @shop_id,
         label = @label, base_id = @base_id, base_name = @base_name, table_id = @table_id, table_name = @table_name,
-        view_id = @view_id, view_name = @view_name, row_mode = @row_mode, match_mode = @match_mode,
+        view_id = @view_id, view_name = @view_name, channel = @channel, row_mode = @row_mode, match_mode = @match_mode,
         field_map = @field_map, merge_fields = @merge_fields, constants = @constants,
         create_options = @create_options, create_links = @create_links, send_empty = @send_empty,
         is_default = @is_default, updated_at = datetime('now')
@@ -115,16 +121,19 @@ export function saveDestination(input = {}) {
   } else {
     const res = db.prepare(`
       INSERT INTO airtable_destinations
-        (shop_id, label, base_id, base_name, table_id, table_name, view_id, view_name, row_mode, match_mode,
+        (shop_id, label, base_id, base_name, table_id, table_name, view_id, view_name, channel, row_mode, match_mode,
          field_map, merge_fields, constants, create_options, create_links, send_empty, is_default)
-      VALUES (@shop_id, @label, @base_id, @base_name, @table_id, @table_name, @view_id, @view_name, @row_mode, @match_mode,
+      VALUES (@shop_id, @label, @base_id, @base_name, @table_id, @table_name, @view_id, @view_name, @channel, @row_mode, @match_mode,
               @field_map, @merge_fields, @constants, @create_options, @create_links, @send_empty, @is_default)`).run(args);
     destId = Number(res.lastInsertRowid);
   }
 
   if (isDefault) {
-    db.prepare('UPDATE airtable_destinations SET is_default = 0 WHERE id <> ? AND (shop_id IS ? OR shop_id IS NULL)')
-      .run(destId, shopId);
+    // Etsy and Shopify each keep their own default, so one click can go to
+    // either sheet without reconfiguring anything.
+    db.prepare(`UPDATE airtable_destinations SET is_default = 0
+                WHERE id <> ? AND channel = ? AND (shop_id IS ? OR shop_id IS NULL)`)
+      .run(destId, channel, shopId);
   }
   return getDestination(destId);
 }
@@ -187,6 +196,25 @@ export function coerce(value, field, { createLinks = false } = {}) {
   if (TEXTUAL.has(type)) return { value: String(value) };
 
   return { value: typeof value === 'object' ? JSON.stringify(value) : value };
+}
+
+/**
+ * Fetch whatever the mapping needs but does not have yet, so the user never
+ * has to remember to press a "refresh" button first: exchange rates when a
+ * column is fed by a rate or a converted total, and Etsy's per-variation
+ * photos when a column wants the variant image.
+ */
+async function prepareSources(destination, receiptIds) {
+  const used = new Set((destination.fieldMap ?? []).map((e) => e.source));
+  const needsRates = [...used].some((k) => k.startsWith('rate.') || k.endsWith('_usd'));
+  const needsVariantImages = used.has('item.variant_image_url') || used.has('item.image_any');
+
+  if (needsRates) {
+    try { await ensureRates(); } catch (err) { log.warn(`rates unavailable: ${err.message}`); }
+  }
+  if (needsVariantImages) {
+    try { await syncForReceipts(receiptIds); } catch (err) { log.warn(`variant images unavailable: ${err.message}`); }
+  }
 }
 
 /**
@@ -295,9 +323,9 @@ export function listRuns(limit = 20) {
  *
  * `dryRun` returns the exact payload without contacting Airtable.
  */
-export async function push({ destinationId, receiptIds = [], mode = 'upsert', dryRun = false }) {
+export async function push({ destinationId, receiptIds = [], mode = 'upsert', dryRun = false, channel = 'etsy' }) {
   if (!receiptIds.length) throw badRequest('Select at least one order.');
-  const destination = destinationId ? getDestination(destinationId) : defaultDestination();
+  const destination = destinationId ? getDestination(destinationId) : defaultDestination(channel);
   if (!destination) throw badRequest('No Airtable destination is set up yet. Add one in Settings > Airtable.');
 
   if (mode === 'delete') return remove(destination, receiptIds, dryRun);
@@ -306,6 +334,7 @@ export async function push({ destinationId, receiptIds = [], mode = 'upsert', dr
     throw badRequest(`"${destination.label}" has no field mapping yet. Open it in Settings > Airtable and match the fields.`);
   }
 
+  await prepareSources(destination, receiptIds);
   const { records, issues, table } = await buildRecords(destination, receiptIds);
   const known = linksFor(destination.id, receiptIds);
   const knownByRow = new Map(known.map((l) => [`${l.receipt_id}:${l.transaction_id}`, l.record_id]));

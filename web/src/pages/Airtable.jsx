@@ -132,6 +132,7 @@ export default function Airtable() {
               <div className="flex">
                 <strong>{d.label}</strong>
                 <span className="flex">
+                  <span className="badge muted">{d.channel === 'shopify' ? 'Shopify' : 'Etsy'}</span>
                   {d.isDefault && <span className="badge">default</span>}
                   {d.shopId === null && <span className="badge muted">all shops</span>}
                 </span>
@@ -154,6 +155,8 @@ export default function Airtable() {
           ))}
         </div>
       </section>
+
+      <RatesPanel />
 
       <RunHistory />
 
@@ -179,6 +182,7 @@ function DestinationEditor({ destination, sources, onClose, onSaved }) {
   const [baseId, setBaseId] = useState(destination?.baseId ?? '');
   const [tableId, setTableId] = useState(destination?.tableId ?? '');
   const [viewId, setViewId] = useState(destination?.viewId ?? '');
+  const [channel, setChannel] = useState(destination?.channel ?? 'etsy');
   const [rowMode, setRowMode] = useState(destination?.rowMode ?? 'item');
   const [fieldMap, setFieldMap] = useState(destination?.fieldMap ?? []);
   const [constants, setConstants] = useState(destination?.constants ?? {});
@@ -248,7 +252,7 @@ function DestinationEditor({ destination, sources, onClose, onSaved }) {
     setSaving(true);
     try {
       const body = {
-        label, baseId, tableId, viewId: viewId || null, rowMode, matchMode,
+        label, baseId, tableId, viewId: viewId || null, channel, rowMode, matchMode,
         baseName: bases.data?.find((b) => b.id === baseId)?.name ?? null,
         tableName: table?.name ?? null,
         viewName: table?.views?.find((v) => v.id === viewId)?.name ?? null,
@@ -276,7 +280,7 @@ function DestinationEditor({ destination, sources, onClose, onSaved }) {
         <div className="flex" style={{ width: '100%' }}>
           <label className="flex small muted">
             <input type="checkbox" checked={isDefault} onChange={(e) => setIsDefault(e.target.checked)} />
-            Use this one by default
+            Use this one by default for {channel === 'shopify' ? 'Shopify' : 'Etsy'}
           </label>
           <div className="spacer" />
           <span className="flex">
@@ -319,6 +323,17 @@ function DestinationEditor({ destination, sources, onClose, onSaved }) {
           <div className="hint">
             Rows always go into the table. A view only filters what you see in Airtable, so if each shop has its
             own view, fill the column that view filters on (usually the shop name) below.
+          </div>
+        </div>
+
+        <div className="field">
+          <label>Which sheet family</label>
+          <select className="select" value={channel} onChange={(e) => setChannel(e.target.value)}>
+            <option value="etsy">Etsy</option>
+            <option value="shopify">Shopify / website</option>
+          </select>
+          <div className="hint">
+            Etsy and Shopify keep separate defaults, so one click can go to either sheet.
           </div>
         </div>
 
@@ -438,6 +453,67 @@ function DestinationEditor({ destination, sources, onClose, onSaved }) {
         </>
       )}
     </Drawer>
+  );
+}
+
+/* ---------------------------------------------------------------- rates */
+
+/**
+ * The daily rates the app values orders at. Every order is converted at the
+ * rate published for its own day, so what a sheet shows never drifts when the
+ * currency moves later.
+ */
+function RatesPanel() {
+  const showError = useErrorToast();
+  const toast = useToast();
+  const [quote, setQuote] = useState('CNY');
+  const [busy, setBusy] = useState(false);
+  const rates = useAsync(() => api.get(`/airtable/rates?quote=${quote}&limit=10`), [quote]);
+
+  const refresh = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post('/airtable/rates/refresh', {});
+      toast({ kind: r.ok ? 'ok' : 'warn', title: r.ok ? `Rates updated to ${r.newest}` : (r.error ?? 'Could not update') });
+      rates.reload();
+    } catch (err) { showError(err, 'Could not refresh the rates'); } finally { setBusy(false); }
+  };
+
+  const cov = rates.data?.coverage;
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h3>Exchange rates</h3>
+        <div className="spacer" />
+        <select className="select sm" style={{ width: 110 }} value={quote} onChange={(e) => setQuote(e.target.value)}>
+          {['CNY', 'TRY', 'EUR', 'GBP', 'CAD', 'AUD'].map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <button className="btn sm" onClick={refresh} disabled={busy}>{busy ? <Spinner /> : 'Refresh'}</button>
+      </div>
+
+      <p className="small muted">
+        Each order is valued at the rate of the day it arrived. Rates come from the European Central Bank,
+        which publishes on working days only — an order that lands on a weekend uses the previous working day.
+        {cov?.days ? ` Holding ${cov.days} days, ${cov.from} to ${cov.to}.` : ' No rates stored yet — press Refresh.'}
+      </p>
+
+      {rates.data?.rates?.length > 0 && (
+        <table className="data">
+          <thead>
+            <tr><th>Day</th><th className="right">1 USD =</th><th className="right">1 {quote} = USD</th></tr>
+          </thead>
+          <tbody>
+            {rates.data.rates.map((r) => (
+              <tr key={r.day}>
+                <td className="small mono">{r.day}</td>
+                <td className="num">{r.perUsd} {quote}</td>
+                <td className="num">{r.inUsd}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 

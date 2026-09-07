@@ -46,6 +46,12 @@ export const SETTING_DEFS = {
   'privacy.share_ai':      { env: '', def: 'true', label: 'Allow AI features to send your text to the AI provider',
     options: [ { value: 'true', label: 'Yes - AI features work' }, { value: 'false', label: 'No - block all AI calls' } ] },
 
+  'fx.history_days':       { env: '', def: '95', label: 'How many days of exchange rates to keep' },
+  'fx.auto_refresh':       { env: '', def: 'true', label: 'Refresh exchange rates automatically',
+    options: [ { value: 'true', label: 'Yes - keep the daily rates current' }, { value: 'false', label: 'No - only when I press refresh' } ] },
+  'orders.code_template':  { env: '', def: '{YY}-{DD}{MM}-{NN}', label: 'Short order code shape (e.g. 26-0709-01)' },
+  'orders.shipping_cost_currency': { env: '', def: 'CNY', label: 'Currency you normally pay shipping in' },
+
   'airtable.token':        { env: process.env.AIRTABLE_TOKEN || '', def: '', secret: true, label: 'Airtable personal access token' },
   'airtable.auto_push':    { env: '', def: 'false', label: 'Send new orders to Airtable automatically after each sync',
     options: [ { value: 'false', label: 'No - I press the button myself' }, { value: 'true', label: 'Yes - push new orders automatically' } ] },

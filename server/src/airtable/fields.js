@@ -10,11 +10,32 @@
 import { getDb } from '../db/index.js';
 import { activeShopId, currentShop } from '../etsy/shop.js';
 import { readSetting } from '../services/settings.js';
+import { rateOn, convert } from '../services/fx.js';
+import { codeFor, monthLabelTr, monthLabelEn } from '../services/ordercode.js';
+import { imageForTransaction } from '../services/variantimages.js';
 
 const iso = (ts) => (ts ? new Date(ts * 1000).toISOString() : null);
 const isoDate = (ts) => (ts ? new Date(ts * 1000).toISOString().slice(0, 10) : null);
 const money = (amount, divisor) => (amount === null || amount === undefined ? null : amount / (divisor || 100));
-const clean = (s) => (s === null || s === undefined ? null : String(s));
+const round2 = (n) => (n === null || n === undefined ? null : Math.round(n * 100) / 100);
+const round6 = (n) => (n === null || n === undefined ? null : Math.round(n * 1e6) / 1e6);
+/**
+ * Etsy hands back HTML entities in titles and option values ("Sarah&#039;s"),
+ * which look wrong in a spreadsheet. Decode the named and numeric ones.
+ */
+const NAMED = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  hellip: '…', mdash: '—', ndash: '–', rsquo: '’', lsquo: '‘', ldquo: '“', rdquo: '”',
+};
+export function decodeEntities(text) {
+  if (text === null || text === undefined) return null;
+  return String(text)
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/&([a-z]+);/gi, (m, name) => NAMED[name.toLowerCase()] ?? m);
+}
+
+const clean = (s) => (s === null || s === undefined ? null : decodeEntities(String(s)));
 
 /** Distinct, non-empty values in order, joined for the per-order row mode. */
 const joinItems = (items, pick, sep = ', ') => {
@@ -26,14 +47,23 @@ const joinItems = (items, pick, sep = ', ') => {
   return seen.length ? seen.join(sep) : null;
 };
 
-const variationLabel = (item) => {
+const variationList = (item) => {
   let list = [];
-  try { list = JSON.parse(item.variations || '[]') || []; } catch { list = []; }
-  return list
-    .map((v) => `${v.formatted_name ?? v.property_name ?? ''}: ${v.formatted_value ?? v.value ?? ''}`.trim())
-    .filter((s) => s && s !== ':')
-    .join(' / ') || null;
+  try { list = JSON.parse(item?.variations || '[]') || []; } catch { list = []; }
+  return list;
 };
+
+/** Just what the buyer picked - "Silver / 8 US", no property titles. */
+const variationValues = (item) => variationList(item)
+  .map((v) => clean(v.formatted_value ?? v.value ?? ''))
+  .filter(Boolean)
+  .join(' / ') || null;
+
+/** The long form, kept for anyone who does want "Colour: Silver". */
+const variationPairs = (item) => variationList(item)
+  .map((v) => `${clean(v.formatted_name ?? v.property_name ?? '') ?? ''}: ${clean(v.formatted_value ?? v.value ?? '') ?? ''}`.trim())
+  .filter((t) => t && t !== ':')
+  .join(' / ') || null;
 
 const trackingLink = (code) => (code
   ? (readSetting('tracking.url_template') || 'https://www.yuntrack.com/parcelTracking?id={code}').replace('{code}', encodeURIComponent(code))
@@ -48,8 +78,18 @@ export const SOURCE_FIELDS = [
   // ---------------------------------------------------------------- order
   { key: 'order.id', group: 'Order', label: 'Order ID (Etsy receipt id)', hint: 'The Etsy order/receipt number, digits only, e.g. 4166419738',
     get: ({ order }) => String(order.receipt_id) },
-  { key: 'order.id_hash', group: 'Order', label: 'Order ID with #', hint: 'Same order number prefixed with #, e.g. #4166419738',
+  { key: 'order.id_hash', group: 'Order', label: 'Order ID with a # in front (rarely wanted)',
+    hint: 'Only use if the sheet really wants #4166419738. The plain order.id is the normal choice.',
     get: ({ order }) => `#${order.receipt_id}` },
+  { key: 'order.code', group: 'Order', label: 'Short order code (26-0709-01)',
+    hint: 'A short code built from the order date and its position that day. Every item of the same order shares it.',
+    get: ({ order }) => codeFor(order.receipt_id, { shopId: order.shop_id, createdTs: order.created_ts }) },
+  { key: 'order.month', group: 'Order', label: 'Month of the order (2026 Eylül)',
+    hint: 'The month the order arrived, Turkish, e.g. "2026 Eylül"',
+    get: ({ order }) => monthLabelTr(order.created_ts) },
+  { key: 'order.month_en', group: 'Order', label: 'Month of the order (September 2026)',
+    hint: 'The month the order arrived, English',
+    get: ({ order }) => monthLabelEn(order.created_ts) },
   { key: 'order.date', group: 'Order', label: 'Order date (YYYY-MM-DD)', hint: 'The date the order was placed, no time part',
     get: ({ order }) => isoDate(order.created_ts) },
   { key: 'order.datetime', group: 'Order', label: 'Order date and time (ISO)', hint: 'Full ISO timestamp of the order',
@@ -121,10 +161,25 @@ export const SOURCE_FIELDS = [
     get: ({ item, items, rowMode }) => (rowMode === 'item' ? (item?.quantity ?? null) : items.reduce((n, i) => n + (i.quantity || 0), 0)) },
   { key: 'item.price', group: 'Item', label: 'Unit price', hint: 'Price of one unit as a number',
     get: ({ item, rowMode }) => (rowMode === 'item' ? money(item?.price_amount, item?.price_divisor) : null) },
-  { key: 'item.variations', group: 'Item', label: 'Variations (colour, size...)', hint: 'The chosen options, e.g. "Colour: Red / Size: M"',
-    get: ({ item, items, rowMode }) => (rowMode === 'item' ? variationLabel(item ?? {}) : joinItems(items, variationLabel, ' | ')) },
+  { key: 'item.variations', group: 'Item', label: 'Variant (what the buyer picked)',
+    hint: 'Only the chosen values, no option titles, e.g. "Silver / 8 US"',
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? variationValues(item ?? {}) : joinItems(items, variationValues, ' | ')) },
+  { key: 'item.variations_full', group: 'Item', label: 'Variant with option titles',
+    hint: 'The long form including the property names, e.g. "Colour: Silver / Ring size: 8 US"',
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? variationPairs(item ?? {}) : joinItems(items, variationPairs, ' | ')) },
   { key: 'item.image_url', group: 'Item', label: 'Product image URL', hint: 'Direct link to the listing photo',
-    get: ({ item, items, rowMode }) => (rowMode === 'item' ? clean(item?.image_url) : joinItems(items, (i) => i.image_url, ' ')) },
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? item?.image_url ?? null : joinItems(items, (i) => i.image_url, ' ')) },
+  { key: 'item.variant_image_url', group: 'Item', label: 'Variant image URL (the chosen option)',
+    hint: 'Photo Etsy has attached to the exact option the buyer chose. Empty when the listing has no per-variation photos.',
+    get: ({ item, items, rowMode }) => (rowMode === 'item'
+      ? imageForTransaction(item)
+      : joinItems(items, (i) => imageForTransaction(i), ' ')) },
+  { key: 'item.image_any', group: 'Item', label: 'Best available image URL',
+    hint: 'The variant photo when there is one, otherwise the listing photo. Use this if you just want a picture.',
+    get: ({ item, items, rowMode }) => {
+      const best = (i) => imageForTransaction(i) ?? i?.image_url ?? null;
+      return rowMode === 'item' ? best(item) : joinItems(items, best, ' ');
+    } },
   { key: 'item.listing_id', group: 'Item', label: 'Etsy listing id', hint: 'Numeric id of the listing',
     get: ({ item, rowMode }) => (rowMode === 'item' ? (item?.listing_id ?? null) : null) },
   { key: 'item.etsy_link', group: 'Item', label: 'Etsy listing link', hint: 'Public etsy.com URL of the product',
@@ -148,6 +203,56 @@ export const SOURCE_FIELDS = [
     get: ({ order }) => clean(order.carrier_name) },
   { key: 'tracking.status', group: 'Tracking', label: 'Tracking status', hint: 'Latest parcel status, e.g. in_transit, delivered',
     get: ({ order }) => clean(order.tracking_status) },
+  { key: 'tracking.shipping_cost', group: 'Tracking', label: 'Shipping cost you paid',
+    hint: 'What sending this parcel cost you, typed in next to the tracking number, as a number',
+    get: ({ order }) => (order.shipping_cost ?? null) },
+  { key: 'tracking.shipping_cost_currency', group: 'Tracking', label: 'Shipping cost currency',
+    hint: 'Currency of the shipping cost you typed in, e.g. CNY, USD',
+    get: ({ order }) => clean(order.shipping_cost_currency) },
+  { key: 'tracking.shipping_cost_usd', group: 'Tracking', label: 'Shipping cost in USD',
+    hint: 'The shipping cost converted to USD at the rate of the order date',
+    get: ({ order }) => round2(convert(order.shipping_cost, order.shipping_cost_currency || 'CNY', 'USD', isoDate(order.created_ts))) },
+
+  // ------------------------------------------------- rates and conversions
+  // Everything here uses the rate published for the order's own day (the last
+  // business day before it, when the order landed on a weekend).
+  { key: 'rate.cny_usd', group: 'Rates', label: 'Yuan → USD rate on the order date',
+    hint: 'What 1 CNY was worth in USD the day the order came in, e.g. 0.1489',
+    get: ({ order }) => round6(rateOn(isoDate(order.created_ts), 'CNY', 'USD')) },
+  { key: 'rate.usd_cny', group: 'Rates', label: 'USD → Yuan rate on the order date',
+    hint: 'How many CNY one USD bought that day, e.g. 6.71',
+    get: ({ order }) => round6(rateOn(isoDate(order.created_ts), 'USD', 'CNY')) },
+  { key: 'rate.try_usd', group: 'Rates', label: 'Lira → USD rate on the order date',
+    hint: 'What 1 TRY was worth in USD that day',
+    get: ({ order }) => round6(rateOn(isoDate(order.created_ts), 'TRY', 'USD')) },
+  { key: 'rate.usd_try', group: 'Rates', label: 'USD → Lira rate on the order date',
+    hint: 'How many TRY one USD bought that day',
+    get: ({ order }) => round6(rateOn(isoDate(order.created_ts), 'USD', 'TRY')) },
+  { key: 'rate.eur_usd', group: 'Rates', label: 'Euro → USD rate on the order date',
+    hint: 'What 1 EUR was worth in USD that day',
+    get: ({ order }) => round6(rateOn(isoDate(order.created_ts), 'EUR', 'USD')) },
+  { key: 'rate.order_currency_usd', group: 'Rates', label: "This order's currency → USD rate",
+    hint: 'The rate used to turn this order\'s own currency into USD on its date',
+    get: ({ order }) => round6(rateOn(isoDate(order.created_ts), order.grandtotal_currency || 'USD', 'USD')) },
+
+  { key: 'total.grand_usd', group: 'Totals in USD', label: 'Order total in USD',
+    hint: 'The order total converted to USD at the rate of the order date, whatever currency the shop bills in',
+    get: ({ order }) => round2(convert(money(order.grandtotal_amount, order.grandtotal_divisor),
+      order.grandtotal_currency || 'USD', 'USD', isoDate(order.created_ts))) },
+  { key: 'total.subtotal_usd', group: 'Totals in USD', label: 'Subtotal in USD',
+    hint: 'The items subtotal converted to USD at the rate of the order date. Use this when the shop bills in lira.',
+    get: ({ order }) => round2(convert(money(order.subtotal_amount, order.grandtotal_divisor),
+      order.grandtotal_currency || 'USD', 'USD', isoDate(order.created_ts))) },
+  { key: 'total.shipping_usd', group: 'Totals in USD', label: 'Shipping charged, in USD',
+    hint: 'Shipping the buyer paid, converted to USD at the rate of the order date',
+    get: ({ order }) => round2(convert(money(order.total_shipping_amount, order.grandtotal_divisor),
+      order.grandtotal_currency || 'USD', 'USD', isoDate(order.created_ts))) },
+  { key: 'item.price_usd', group: 'Totals in USD', label: 'Unit price in USD',
+    hint: 'Price of one unit converted to USD at the rate of the order date',
+    get: ({ item, order, rowMode }) => (rowMode === 'item'
+      ? round2(convert(money(item?.price_amount, item?.price_divisor),
+        item?.price_currency || order.grandtotal_currency || 'USD', 'USD', isoDate(order.created_ts)))
+      : null) },
 
   // ----------------------------------------------------------------- shop
   { key: 'shop.name', group: 'Shop', label: 'Shop name', hint: 'Which Etsy shop the order belongs to, e.g. KeyArtisanUS',
@@ -190,7 +295,8 @@ export function loadRows(receiptIds, { rowMode = 'item' } = {}) {
     SELECT r.*,
            COALESCE(f.is_done, 0) AS is_done, COALESCE(f.supplier_ordered, 0) AS supplier_ordered,
            f.supplier_order_ref, f.notes,
-           s.tracking_code, s.carrier_name, t.status AS tracking_status
+           s.tracking_code, s.carrier_name, t.status AS tracking_status,
+           t.shipping_cost, t.shipping_cost_currency
     FROM receipts r
     LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
     LEFT JOIN (SELECT receipt_id, MAX(id) AS sid FROM shipments GROUP BY receipt_id) ls ON ls.receipt_id = r.receipt_id

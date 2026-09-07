@@ -276,6 +276,47 @@ export function refreshStaleFlags(staleDays = getStaleDays()) {
 }
 
 /** Manual override for when the carrier feed is unusable. */
+/**
+ * What this parcel cost you to send. Kept next to the tracking number because
+ * that is where the number arrives from the courier, and pushed on to Airtable
+ * from there. Pass cost = null to clear it.
+ */
+export function setShippingCost(code, { cost, currency } = {}) {
+  const db = getDb();
+  const shopId = activeShopId();
+  const amount = cost === null || cost === undefined || cost === '' ? null : Number(cost);
+  if (amount !== null && !Number.isFinite(amount)) throw badRequest(`"${cost}" is not a number.`);
+  const ccy = (currency || readSetting('orders.shipping_cost_currency') || 'CNY').toUpperCase();
+
+  const done = db.prepare(`UPDATE tracking SET shipping_cost = ?, shipping_cost_currency = ?
+                           WHERE shop_id IS ? AND tracking_code = ?`)
+    .run(amount, amount === null ? null : ccy, shopId, code);
+  if (!done.changes) {
+    // The number may not be on the board yet; keep the cost rather than lose it.
+    db.prepare(`INSERT INTO tracking (shop_id, tracking_code, provider, status, shipping_cost, shipping_cost_currency)
+                VALUES (?,?, 'manual', 'pre_shipped', ?, ?)
+                ON CONFLICT(shop_id, tracking_code) DO UPDATE SET
+                  shipping_cost = excluded.shipping_cost, shipping_cost_currency = excluded.shipping_cost_currency`)
+      .run(shopId, code, amount, amount === null ? null : ccy);
+  }
+  audit('tracking.cost', { entity: 'tracking', entityId: code, detail: { cost: amount, currency: ccy } });
+  return board({ codes: [code] }).rows[0] ?? null;
+}
+
+/** Set the cost on many parcels at once, e.g. after a courier invoice. */
+export function setShippingCosts(entries = []) {
+  const out = [];
+  for (const e of entries) {
+    try {
+      setShippingCost(e.trackingCode ?? e.code, { cost: e.cost, currency: e.currency });
+      out.push({ code: e.trackingCode ?? e.code, ok: true });
+    } catch (err) {
+      out.push({ code: e.trackingCode ?? e.code, ok: false, error: err.message });
+    }
+  }
+  return { updated: out.filter((r) => r.ok).length, failed: out.filter((r) => !r.ok).length, results: out };
+}
+
 export function setManualStatus(code, { status, note = '' }) {
   if (!Object.values(STATUS).includes(status)) throw badRequest(`Unknown status "${status}"`);
   const db = getDb();
@@ -339,6 +380,8 @@ export function board({ status = '', alertsOnly = false, search = '', codes = nu
       country: r.country_iso,
       carrier: r.carrier_name,
       provider: r.provider,
+      shippingCost: r.shipping_cost ?? null,
+      shippingCostCurrency: r.shipping_cost_currency ?? null,
       status: r.status,
       statusLabel: STATUS_LABELS[r.status] ?? r.status,
       statusDetail: r.status_detail,

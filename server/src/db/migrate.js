@@ -69,6 +69,14 @@ export function migrateSchema(db) {
   addColumn(db, 'bulk_jobs', 'shop_id', 'INTEGER');
   addColumn(db, 'research_runs', 'shop_id', 'INTEGER');
 
+  // What a parcel cost to send, typed in next to its tracking number.
+  addColumn(db, 'tracking', 'shipping_cost', 'REAL');
+  addColumn(db, 'tracking', 'shipping_cost_currency', 'TEXT');
+
+  // Which Airtable sheet family a destination belongs to, so Etsy and Shopify
+  // can each have their own default.
+  addColumn(db, 'airtable_destinations', 'channel', "TEXT NOT NULL DEFAULT 'etsy'");
+
   if (active) {
     for (const table of ['shop_sections', 'bulk_jobs', 'research_runs']) {
       if (!hasTable(db, table) || !columns(db, table).includes('shop_id')) continue;

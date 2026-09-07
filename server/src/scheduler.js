@@ -9,6 +9,7 @@ import { readSetting } from './services/settings.js';
 import { getStoredToken } from './etsy/client.js';
 import { syncTracking, refreshStaleFlags } from './services/tracking/index.js';
 import { syncReceipts } from './services/sync.js';
+import { ensureRates } from './services/fx.js';
 
 const log = createLogger('scheduler');
 const timers = [];
@@ -38,6 +39,15 @@ export function startScheduler() {
 
   if (config.features.autoSyncOnStart && getStoredToken()) {
     setTimeout(() => syncReceipts({}).catch((e) => log.warn(`startup sync: ${e.message}`)), 5000).unref();
+  }
+
+  // Exchange rates: once at startup and once a day. Cheap, and every order
+  // pushed afterwards can be valued at the rate of its own day.
+  if (readSetting('fx.auto_refresh') !== 'false') {
+    setTimeout(() => ensureRates().catch((e) => log.warn(`rate refresh: ${e.message}`)), 3000).unref();
+    timers.push(setInterval(() => {
+      ensureRates().catch((e) => log.warn(`rate refresh: ${e.message}`));
+    }, 24 * 60 * 60_000).unref());
   }
 
   log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every 30m)`);

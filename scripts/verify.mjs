@@ -511,9 +511,11 @@ await check('name matching handles Turkish column names and skips computed ones'
   assert(got['BAŞLIK İLK 40'] === 'item.title40', `BAŞLIK İLK 40 -> ${got['BAŞLIK İLK 40']}`);
   assert(!('Profit' in got), 'a computed column was mapped');
   assert(!map.some((m) => m.target === 'Profit'), 'formula column offered as a target');
-  // A guessed source may only be claimed once, so the two note columns cannot both take it.
-  assert(map.filter((m) => m.source === 'order.buyer_message').length === 1, 'two columns claimed the same guessed source');
-  assert(unmatched.includes('NOT 2'), 'the duplicate note column should be left for the user');
+  // The two note columns mean different things: NOT 1 is what the buyer wrote,
+  // NOT 2 is your own note, so each takes its own source rather than doubling up.
+  assert(got['NOT 1'] === 'order.buyer_message', `NOT 1 -> ${got['NOT 1']}`);
+  assert(got['NOT 2'] === 'flags.notes', `NOT 2 -> ${got['NOT 2']}`);
+  assert(unmatched.length >= 0, 'unmatched list missing');
 });
 
 await check('values are bent to the target column type', async () => {
@@ -624,6 +626,139 @@ await check('an AI mapping cannot invent columns or sources', async () => {
     assert(!('Nope' in r.constants), 'a constant for a made-up column survived');
     assert(r.dropped.length === 3, `expected 3 rejections, got ${r.dropped.length}`);
   }
+});
+
+await check('order codes are per day, shared by every item of an order, and stable', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const { codeFor, formatCode } = await import('../server/src/services/ordercode.js');
+  await initDb();
+  const db = getDb();
+
+  assert(formatCode('2026-09-07', 1) === '26-0709-01', `template wrong: ${formatCode('2026-09-07', 1)}`);
+  assert(formatCode('2026-09-07', 12) === '26-0709-12', 'sequence not padded');
+
+  db.prepare('DELETE FROM order_codes WHERE shop_id = 970001').run();
+  db.prepare('DELETE FROM receipts WHERE receipt_id IN (970100,970101,970102)').run();
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 970001').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (970001,'Code Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(970001);
+
+  // three orders: two on the same day, one the day after
+  const day1 = Math.floor(Date.parse('2026-09-07T09:00:00Z') / 1000);
+  const day1b = Math.floor(Date.parse('2026-09-07T18:00:00Z') / 1000);
+  const day2 = Math.floor(Date.parse('2026-09-08T09:00:00Z') / 1000);
+  for (const [id, ts] of [[970100, day1], [970101, day1b], [970102, day2]]) {
+    db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, created_ts, grandtotal_amount, grandtotal_divisor, grandtotal_currency)
+                VALUES (?,970001,?,1000,100,'USD')`).run(id, ts);
+  }
+
+  // Assign out of order on purpose: numbering must follow the clock, not the call order.
+  const second = codeFor(970101);
+  const first = codeFor(970100);
+  assert(first === '26-0709-01', `first order of the day should be 01, got ${first}`);
+  assert(second === '26-0709-02', `second order of the day should be 02, got ${second}`);
+  assert(codeFor(970102) === '26-0809-01', 'a new day restarts the numbering');
+
+  // Stable: asking again never renumbers a row that is already in a sheet.
+  assert(codeFor(970100) === first, 'the code changed on a second call');
+
+  db.prepare('DELETE FROM order_codes WHERE shop_id = 970001').run();
+  db.prepare('DELETE FROM receipts WHERE receipt_id IN (970100,970101,970102)').run();
+  client.removeAccount(970001);
+});
+
+await check('a rate is found for a weekend order by carrying the last one forward', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const fx = await import('../server/src/services/fx.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare("DELETE FROM fx_rates WHERE quote IN ('CNY','TRY')").run();
+  const ins = db.prepare("INSERT INTO fx_rates (day, base, quote, rate, source) VALUES (?,'USD',?,?,'test')");
+  ins.run('2026-09-04', 'CNY', 6.7109);   // Friday
+  ins.run('2026-09-04', 'TRY', 48.443);
+  ins.run('2026-09-07', 'CNY', 6.7000);   // Monday
+
+  // Friday, exact
+  assert(Math.abs(fx.rateOn('2026-09-04', 'CNY', 'USD') - 1 / 6.7109) < 1e-9, 'Friday rate wrong');
+  // Saturday has no publication: it must use Friday's, and say so
+  const sat = fx.rateDetail('2026-09-05', 'CNY', 'USD');
+  assert(sat.asOf === '2026-09-04', `weekend should fall back to Friday, used ${sat.asOf}`);
+  assert(Math.abs(sat.rate - 1 / 6.7109) < 1e-9, 'weekend rate wrong');
+  // Monday has its own
+  assert(fx.rateDetail('2026-09-07', 'CNY', 'USD').asOf === '2026-09-07', 'Monday should use its own rate');
+
+  // Cross rates go through USD, and a round trip returns the original amount.
+  const usd = fx.convert(2543.93, 'TRY', 'USD', '2026-09-04');
+  assert(Math.abs(usd - 2543.93 / 48.443) < 0.01, `TRY->USD wrong: ${usd}`);
+  assert(Math.abs(fx.convert(usd, 'USD', 'TRY', '2026-09-04') - 2543.93) < 0.01, 'round trip lost money');
+  assert(fx.rateOn('2026-09-04', 'USD', 'USD') === 1, 'same currency should be 1');
+});
+
+await check('variant text is decoded and carries no option titles', async () => {
+  const { decodeEntities } = await import('../server/src/airtable/fields.js');
+  assert(decodeEntities('Sarah&#039;s Pick') === "Sarah's Pick", `apostrophe not decoded: ${decodeEntities('Sarah&#039;s Pick')}`);
+  assert(decodeEntities('A &amp; B') === 'A & B', 'ampersand not decoded');
+  assert(decodeEntities('&quot;q&quot;') === '"q"', 'quote not decoded');
+  assert(decodeEntities('caf&#233;') === 'café', 'numeric entity not decoded');
+  assert(decodeEntities(null) === null, 'null should stay null');
+});
+
+await check('an order in lira is valued in USD at its own day rate', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const { loadRows, resolveSource } = await import('../server/src/airtable/fields.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare("DELETE FROM fx_rates WHERE quote = 'TRY'").run();
+  db.prepare("INSERT INTO fx_rates (day, base, quote, rate, source) VALUES ('2026-09-04','USD','TRY',48.443,'test')").run();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960001').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960001,'KeyArtisann','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960001);
+
+  const ts = Math.floor(Date.parse('2026-09-05T10:00:00Z') / 1000); // a Saturday
+  db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, name, subtotal_amount, grandtotal_amount,
+              grandtotal_divisor, grandtotal_currency, created_ts)
+              VALUES (960100, 960001, 'Buyer&#039;s Name', 254393, 289900, 100, 'TRY', ?)`).run(ts);
+  db.prepare(`INSERT OR REPLACE INTO receipt_transactions (transaction_id, receipt_id, sku, title, quantity, price_amount, price_divisor, variations)
+              VALUES (960200, 960100, 'S1', 'Ring', 1, 127196, 100,
+              '[{"property_id":1,"value_id":2,"formatted_name":"Colour","formatted_value":"Silver"}]')`).run();
+
+  const [row] = loadRows([960100], { rowMode: 'item' });
+  assert(row, 'no row built');
+  assert(resolveSource('total.subtotal', row) === 2543.93, 'lira subtotal changed');
+  const usd = resolveSource('total.subtotal_usd', row);
+  assert(Math.abs(usd - 2543.93 / 48.443) < 0.01, `subtotal in USD wrong: ${usd}`);
+  assert(resolveSource('buyer.name', row) === "Buyer's Name", 'buyer name not decoded');
+  assert(resolveSource('item.variations', row) === 'Silver', `variant should be values only, got ${resolveSource('item.variations', row)}`);
+  assert(resolveSource('item.variations_full', row) === 'Colour: Silver', 'long form lost the title');
+  assert(resolveSource('order.month', row) === '2026 Eylül', `month wrong: ${resolveSource('order.month', row)}`);
+  assert(/^\d{2}-\d{4}-\d{2}$/.test(resolveSource('order.code', row)), 'order code has the wrong shape');
+
+  db.prepare('DELETE FROM receipts WHERE receipt_id = 960100').run();
+  client.removeAccount(960001);
+});
+
+await check('the matcher sends the order number without a #, and knows the new columns', async () => {
+  const { matchByName } = await import('../server/src/airtable/mapping.js');
+  const columns = ['Order ID', 'KOD', 'Month', 'NOT 1', 'NOT 2', 'Yuan - USD Kur (Ürün)',
+    'Shipping Cost Yuan', 'Varyant Görsel', 'Image URL'];
+  const { map } = matchByName(columns.map((name) => ({ name, type: 'singleLineText', writable: true })));
+  const got = Object.fromEntries(map.map((m) => [m.target, m.source]));
+  assert(got['Order ID'] === 'order.id', `order id should be the plain one, got ${got['Order ID']}`);
+  assert(got['KOD'] === 'order.code', `KOD -> ${got['KOD']}`);
+  assert(got['Month'] === 'order.month', `Month -> ${got['Month']}`);
+  assert(got['NOT 1'] === 'order.buyer_message', 'NOT 1 should be the buyer message');
+  assert(got['NOT 2'] === 'flags.notes', 'NOT 2 should be your own note');
+  assert(got['Yuan - USD Kur (Ürün)'] === 'rate.cny_usd', 'the yuan rate column was not recognised');
+  assert(got['Shipping Cost Yuan'] === 'tracking.shipping_cost', 'the shipping cost column was not recognised');
+  assert(got['Varyant Görsel'] === 'item.variant_image_url', 'the variant image column was not recognised');
+  assert(got['Image URL'] === 'item.image_any', 'Image URL should take the best available photo');
 });
 
 await check('Airtable is disclosed as a destination and needs a token', async () => {

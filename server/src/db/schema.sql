@@ -264,6 +264,10 @@ CREATE TABLE IF NOT EXISTS tracking (
   last_checked_at  TEXT,
   check_error      TEXT,
   raw              TEXT,
+  -- What this parcel cost you to send. Typed in the app next to the tracking
+  -- number; the currency is stored with it so it can be converted later.
+  shipping_cost    REAL,
+  shipping_cost_currency TEXT,
   PRIMARY KEY (shop_id, tracking_code)
 );
 CREATE INDEX IF NOT EXISTS idx_tracking_status ON tracking(status);
@@ -430,6 +434,7 @@ CREATE TABLE IF NOT EXISTS airtable_destinations (
   table_name    TEXT,
   view_id       TEXT,
   view_name     TEXT,
+  channel       TEXT NOT NULL DEFAULT 'etsy',   -- which sheet family: 'etsy' or 'shopify'
   row_mode      TEXT NOT NULL DEFAULT 'item',   -- 'item' = a row per order line, 'order' = a row per order
   match_mode    TEXT NOT NULL DEFAULT 'name',   -- how the mapping was made: 'name' or 'ai'
   field_map     TEXT NOT NULL DEFAULT '[]',     -- [{ target, source, confidence, why }]
@@ -473,3 +478,32 @@ CREATE TABLE IF NOT EXISTS airtable_runs (
   ran_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_atruns_shop ON airtable_runs(shop_id, id DESC);
+
+-- ------------------------------------------------------------ exchange rates
+-- Stored as "1 USD = rate quote" for one published day. The ECB publishes on
+-- business days only, so lookups carry the last published rate forward.
+CREATE TABLE IF NOT EXISTS fx_rates (
+  day        TEXT NOT NULL,        -- YYYY-MM-DD
+  base       TEXT NOT NULL,        -- always USD
+  quote      TEXT NOT NULL,
+  rate       REAL NOT NULL,
+  source     TEXT,
+  fetched_at TEXT,
+  PRIMARY KEY (day, base, quote)
+);
+CREATE INDEX IF NOT EXISTS idx_fx_lookup ON fx_rates(base, quote, day DESC);
+
+-- Short human code for an order, e.g. 26-0709-01. Assigned once, per shop, in
+-- the order the app first sees the orders of that day, and never reshuffled -
+-- every item of the same order carries the same code.
+CREATE TABLE IF NOT EXISTS order_codes (
+  shop_id    INTEGER,
+  receipt_id INTEGER NOT NULL,
+  code       TEXT NOT NULL,
+  day        TEXT NOT NULL,        -- the order's own day, YYYY-MM-DD
+  seq        INTEGER NOT NULL,     -- position within that day
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (shop_id, receipt_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ordercodes_day ON order_codes(shop_id, day, seq);
+

@@ -110,6 +110,16 @@ router.post('/:code/status', asyncRoute(async (req, res) => {
   res.json(tracking.setManualStatus(req.params.code, { status: req.body.status, note: req.body.note ?? '' }));
 }));
 
+/** What the parcel cost you to send, typed in next to its tracking number. */
+router.post('/:code/cost', asyncRoute(async (req, res) => {
+  res.json(tracking.setShippingCost(req.params.code, { cost: req.body?.cost, currency: req.body?.currency }));
+}));
+
+/** The same for many parcels, e.g. straight off a courier invoice. */
+router.post('/costs', asyncRoute(async (req, res) => {
+  res.json(tracking.setShippingCosts(req.body?.entries ?? []));
+}));
+
 router.post('/:code/acknowledge', asyncRoute(async (req, res) => {
   tracking.acknowledgeAlert(req.params.code, req.body?.ack !== false);
   res.json({ code: req.params.code, acknowledged: req.body?.ack !== false });
