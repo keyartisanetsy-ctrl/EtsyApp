@@ -169,7 +169,7 @@ a:hover { text-decoration: underline; }
 
 .field { margin-bottom: 12px; }
 .field label { display: block; font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 5px; }
-.field .hint { font-size: 11px; color: var(--text-faint); margin-top: 4px; }
+.field .hint, .hint { font-size: 11px; color: var(--text-faint); margin-top: 4px; }
 
 .toolbar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -360,6 +360,8 @@ table.data td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .timeline-item .where { font-size: 11.5px; color: var(--text-dim); }
 
 .split { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.split3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+@media (max-width: 1000px) { .split3 { grid-template-columns: 1fr; } }
 @media (max-width: 1000px) { .split { grid-template-columns: 1fr; } }
 
 .muted { color: var(--text-faint); }
@@ -372,6 +374,7 @@ table.data td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .flex.wrap { flex-wrap: wrap; }
 .flex.col { flex-direction: column; align-items: stretch; }
 .gap4 { gap: 4px; } .gap12 { gap: 12px; }
+.mt4 { margin-top: 4px; }
 .mt8 { margin-top: 8px; } .mt16 { margin-top: 16px; } .mb8 { margin-bottom: 8px; } .mb16 { margin-bottom: 16px; }
 
 /* ------------------------------------------------------------ shop switcher */
@@ -422,3 +425,6 @@ table.data td.mono, .mono { font-family: var(--mono); font-size: 12px; }
    and its subtotal is set apart from the order total next to it. */
 table.data tbody tr.multi-item { box-shadow: inset 3px 0 0 var(--accent, #f2643c); }
 table.data td.subtotal-cell { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* The subtotal is a different figure from the grand total and is read a lot,
+   so it gets its own colour rather than blending into the column. */
+.money-subtotal { color: var(--accent, #f2643c); font-variant-numeric: tabular-nums; }

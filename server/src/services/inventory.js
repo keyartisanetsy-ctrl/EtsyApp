@@ -147,7 +147,8 @@ const GRID_SQL = `
     l.price_amount AS listing_price_amount, l.price_divisor AS listing_price_divisor,
     l.price_currency AS listing_price_currency, l.shop_section_id, l.quantity AS listing_quantity,
     l.updated_ts,
-    m.supply_link, m.supplier_name, m.supply_cost, m.supply_currency, m.lead_time_days, m.notes
+    m.supply_link, m.variant_supply_link, m.supplier_name, m.variant_image_url,
+    m.supply_cost, m.supply_currency, m.lead_time_days, m.notes
   FROM listing_products p
   JOIN listings l ON l.listing_id = p.listing_id
   LEFT JOIN sku_meta m ON m.sku = p.sku AND m.shop_id IS l.shop_id AND p.sku <> ''
@@ -233,7 +234,11 @@ export function skuGrid({
           ? Math.round(((sale - cost) / sale) * 1000) / 10
           : null,
         supplyLink: r.supply_link || '',
+        variantSupplyLink: r.variant_supply_link || '',
         supplierName: r.supplier_name || '',
+        // The photo you saved for this variant, else the one Etsy has for it.
+        variantImageUrl: r.variant_image_url || r.variation_image_url || '',
+        savedVariantImageUrl: r.variant_image_url || '',
         supplyCost: cost,
         supplyCurrency: r.supply_currency || null,
         leadTimeDays: r.lead_time_days ?? null,
@@ -262,19 +267,27 @@ export function setSkuMeta(sku, meta = {}) {
   const existing = db.prepare('SELECT * FROM sku_meta WHERE shop_id IS ? AND sku = ?').get(shopId, sku) || {};
   const merged = {
     supply_link: meta.supplyLink ?? existing.supply_link ?? '',
+    variant_supply_link: meta.variantSupplyLink ?? existing.variant_supply_link ?? '',
     supplier_name: meta.supplierName ?? existing.supplier_name ?? '',
+    variant_image_url: meta.variantImageUrl ?? existing.variant_image_url ?? '',
     supply_cost: meta.supplyCost === '' ? null : meta.supplyCost ?? existing.supply_cost ?? null,
-    supply_currency: meta.supplyCurrency ?? existing.supply_currency ?? 'USD',
+    // Costs here are what you pay the supplier, which is in yuan far more often
+    // than not, so that is the default rather than dollars.
+    supply_currency: meta.supplyCurrency ?? existing.supply_currency ?? 'CNY',
     lead_time_days: meta.leadTimeDays === '' ? null : meta.leadTimeDays ?? existing.lead_time_days ?? null,
     notes: meta.notes ?? existing.notes ?? '',
   };
   db.prepare(`
-    INSERT INTO sku_meta (shop_id, sku, supply_link, supplier_name, supply_cost, supply_currency, lead_time_days, notes, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,datetime('now'))
-    ON CONFLICT(shop_id, sku) DO UPDATE SET supply_link=excluded.supply_link, supplier_name=excluded.supplier_name,
+    INSERT INTO sku_meta (shop_id, sku, supply_link, variant_supply_link, supplier_name, variant_image_url,
+      supply_cost, supply_currency, lead_time_days, notes, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))
+    ON CONFLICT(shop_id, sku) DO UPDATE SET supply_link=excluded.supply_link,
+      variant_supply_link=excluded.variant_supply_link, supplier_name=excluded.supplier_name,
+      variant_image_url=excluded.variant_image_url,
       supply_cost=excluded.supply_cost, supply_currency=excluded.supply_currency,
       lead_time_days=excluded.lead_time_days, notes=excluded.notes, updated_at=datetime('now')`)
-    .run(shopId, sku, merged.supply_link, merged.supplier_name, merged.supply_cost,
+    .run(shopId, sku, merged.supply_link, merged.variant_supply_link, merged.supplier_name,
+         merged.variant_image_url, merged.supply_cost,
          merged.supply_currency, merged.lead_time_days, merged.notes);
   return { sku, ...merged };
 }

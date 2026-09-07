@@ -399,69 +399,212 @@ function ListingWriter({ status }) {
 
 // ------------------------------------------------------------ image studio
 
+/**
+ * Sizes OpenAI's image model actually produces. Anything else is reached by
+ * asking for the closest shape and scaling here, in the browser, which costs
+ * nothing and keeps a native image library out of the install.
+ */
+const PRESET_SIZES = [
+  { value: '1024x1024', label: 'Square 1024 × 1024' },
+  { value: '1536x1024', label: 'Landscape 1536 × 1024' },
+  { value: '1024x1536', label: 'Portrait 1024 × 1536' },
+  { value: '2000x2000', label: 'Etsy large square 2000 × 2000' },
+  { value: '3000x2250', label: 'Etsy listing 3000 × 2250 (4:3)' },
+  { value: 'custom', label: 'Custom size…' },
+];
+
+/** Scale a PNG to exact pixels on a canvas and hand back a blob URL. */
+function resizeImage(url, width, height) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        if (!blob) { reject(new Error('The browser could not scale that image.')); return; }
+        resolve({ url: URL.createObjectURL(blob), bytes: blob.size, blob });
+      }, 'image/png');
+    };
+    img.onerror = () => reject(new Error('Could not load the generated image to scale it.'));
+    img.src = url;
+  });
+}
+
 function ImageStudio({ status }) {
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [prompt, setPrompt] = useState('');
-  const [size, setSize] = useState('1024x1024');
+  const [sizeChoice, setSizeChoice] = useState('2000x2000');
+  const [customW, setCustomW] = useState(2000);
+  const [customH, setCustomH] = useState(2000);
+  const [variants, setVariants] = useState(1);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(null);
   const [out, setOut] = useState(null);
+  const [scaled, setScaled] = useState({});
+  const toast = useToast();
   const showError = useErrorToast();
+
+  const size = sizeChoice === 'custom'
+    ? `${Math.max(64, Number(customW) || 1024)}x${Math.max(64, Number(customH) || 1024)}`
+    : sizeChoice;
+  const [wantW, wantH] = size.split('x').map(Number);
+
+  const pick = (fileList) => {
+    const chosen = [...(fileList ?? [])].slice(0, 20);
+    if ((fileList?.length ?? 0) > 20) {
+      toast({ kind: 'warn', title: 'Twenty at a time', body: `Took the first 20 of ${fileList.length}.` });
+    }
+    setFiles(chosen);
+  };
 
   const run = async () => {
     setBusy(true);
     setOut(null);
+    setScaled({});
+    setProgress(files.length ? `Working through ${files.length} photo(s)…` : 'Generating…');
     try {
       const fd = new FormData();
-      if (file) fd.append('image', file);
+      for (const f of files) fd.append('images', f);
       if (prompt) fd.append('prompt', prompt);
       fd.append('size', size);
-      setOut(await api.upload('/ai/image', fd));
-    } catch (err) { showError(err, 'Image generation failed'); } finally { setBusy(false); }
+      fd.append('variants', String(variants));
+      const r = await api.upload('/ai/image/batch', fd);
+      setOut(r);
+      toast({
+        kind: r.failed ? 'warn' : 'ok',
+        title: `${r.done} of ${r.requested} done`,
+        body: r.failed ? `${r.failed} could not be processed — see the notes below.` : undefined,
+      });
+
+      // Anything the model could not produce at the exact size gets scaled here.
+      if (r.results.some((x) => x.needsResize)) {
+        setProgress('Scaling to the exact size…');
+        const next = {};
+        for (const item of r.results) {
+          if (!item.needsResize) continue;
+          for (const att of item.attachments) {
+            try { next[att.id] = await resizeImage(att.url, wantW, wantH); }
+            catch { /* the original stays available */ }
+          }
+        }
+        setScaled(next);
+      }
+    } catch (err) { showError(err, 'Image work failed'); }
+    finally { setBusy(false); setProgress(null); }
   };
+
+  const allAttachments = (out?.results ?? []).flatMap((r) =>
+    r.attachments.map((a) => ({ ...a, from: r.filename, needsResize: r.needsResize })));
 
   return (
     <div className="split">
       <div className="card">
-        <div className="card-head"><h3>Edit or generate a product image</h3></div>
+        <div className="card-head"><h3>Edit or generate product images</h3></div>
         {!status?.openai?.configured && (
           <Banner kind="warn">Image work needs an OpenAI key (Settings → AI). Manus and Anthropic do not expose image generation here.</Banner>
         )}
+
         <div className="field">
-          <label>Source image (leave empty to generate from scratch)</label>
-          <input className="input" type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+          <label>Source photos — up to 20 at once</label>
+          <input className="input" type="file" accept="image/*" multiple
+                 onChange={(e) => pick(e.target.files)} />
+          <div className="hint">
+            Leave empty to generate from scratch. Every photo gets the same instruction, and they are
+            processed one at a time so a single failure does not take the batch down with it.
+          </div>
+          {files.length > 0 && (
+            <div className="pill-row mt8">
+              <span className="badge blue">{files.length} photo{files.length === 1 ? '' : 's'} ready</span>
+              <button className="btn xs ghost" onClick={() => setFiles([])}>Clear</button>
+            </div>
+          )}
         </div>
+
         <div className="field">
           <label>Instruction</label>
           <textarea className="textarea" rows={5} value={prompt} onChange={(e) => setPrompt(e.target.value)}
                     placeholder="Clean white background, even lighting, keep the product exactly as photographed" />
-          <div className="hint">Leave blank to use the default "image" prompt from the library.</div>
+          <div className="hint">Leave blank to use the default &ldquo;image&rdquo; prompt from the library.</div>
         </div>
-        <div className="field">
-          <label>Size</label>
-          <select className="select" value={size} onChange={(e) => setSize(e.target.value)}>
-            <option value="1024x1024">Square 1024</option>
-            <option value="1536x1024">Landscape 1536×1024</option>
-            <option value="1024x1536">Portrait 1024×1536</option>
-          </select>
+
+        <div className="split">
+          <div className="field">
+            <label>Output size</label>
+            <select className="select" value={sizeChoice} onChange={(e) => setSizeChoice(e.target.value)}>
+              {PRESET_SIZES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <label>{files.length ? 'Versions per photo' : 'How many to generate'}</label>
+            <input className="input" type="number" min="1" max="20" value={variants}
+                   onChange={(e) => setVariants(Math.min(20, Math.max(1, Number(e.target.value) || 1)))} />
+          </div>
         </div>
+
+        {sizeChoice === 'custom' && (
+          <div className="split">
+            <div className="field">
+              <label>Width (px)</label>
+              <input className="input" type="number" min="64" max="8000" value={customW}
+                     onChange={(e) => setCustomW(e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Height (px)</label>
+              <input className="input" type="number" min="64" max="8000" value={customH}
+                     onChange={(e) => setCustomH(e.target.value)} />
+            </div>
+          </div>
+        )}
+
+        <div className="hint mb8">
+          The model itself only makes 1024×1024, 1536×1024 and 1024×1536. Any other size is produced at the
+          closest shape and then scaled here to exactly {wantW}×{wantH}, so the picture is never stretched.
+        </div>
+
         <button className="btn primary" disabled={busy || !status?.openai?.configured} onClick={run}>
-          {busy ? <Spinner /> : '✦'} {file ? 'Edit image' : 'Generate image'}
+          {busy ? <Spinner /> : '✦'} {files.length ? `Edit ${files.length} photo${files.length === 1 ? '' : 's'}` : 'Generate'}
         </button>
+        {progress && <div className="small dim mt8">{progress}</div>}
       </div>
 
       <div className="card">
-        <div className="card-head"><h3>Result</h3></div>
+        <div className="card-head">
+          <h3>Results</h3>
+          {allAttachments.length > 0 && <span className="badge grey">{allAttachments.length}</span>}
+        </div>
         {busy && <div className="empty"><Spinner /></div>}
-        {!busy && !out && <Empty icon="🖼" title="No image yet" />}
-        {out?.attachment && (
-          <>
-            <img src={out.attachment.url} alt="result" style={{ width: '100%', borderRadius: 8, border: '1px solid var(--border)' }} />
-            <div className="flex mt8">
-              <a className="btn sm" href={out.attachment.url} download>Download</a>
-              <span className="small muted">{Math.round(out.attachment.bytes / 1024)} KB</span>
-            </div>
-          </>
-        )}
+        {!busy && !out && <Empty icon="🖼" title="No images yet" />}
+
+        {(out?.results ?? []).filter((r) => r.error).map((r) => (
+          <Banner kind="err" key={`err-${r.index}`}>{r.filename}: {r.error}</Banner>
+        ))}
+
+        <div className="grid c2">
+          {allAttachments.map((a) => {
+            const fit = scaled[a.id];
+            const shown = fit?.url ?? a.url;
+            return (
+              <div key={a.id} className="mb16">
+                <img src={shown} alt={a.from}
+                     style={{ width: '100%', borderRadius: 8, border: '1px solid var(--border)' }} />
+                <div className="small dim cell-wrap">{a.from}</div>
+                <div className="flex gap4 mt4">
+                  <a className="btn xs" href={shown} download={`${a.id}.png`}>Download</a>
+                  <span className="small muted">
+                    {Math.round((fit?.bytes ?? a.bytes) / 1024)} KB
+                    {fit ? ` · ${wantW}×${wantH}` : ''}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

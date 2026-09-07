@@ -135,6 +135,13 @@ router.get('/rates', asyncRoute(async (req, res) => {
 router.post('/rates/refresh', asyncRoute(async (req, res) => res.json(await fx.refreshRates())));
 
 /** What one currency was worth in another on a given day. */
+// Today's rates, for the "≈ $12.40" hints next to prices entered in another
+// currency. Cheap enough for any screen to ask for on load.
+router.get('/rates/latest', asyncRoute(async (req, res) => {
+  try { await fx.ensureRates(); } catch { /* stored rates still answer */ }
+  res.json(fx.latest());
+}));
+
 router.get('/rates/on/:day', asyncRoute(async (req, res) => {
   const { from = 'CNY', to = 'USD' } = req.query;
   res.json(fx.rateDetail(req.params.day, from, to) ?? { rate: null, note: 'No rate stored for that day yet.' });

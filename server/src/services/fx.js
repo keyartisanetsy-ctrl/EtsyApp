@@ -170,3 +170,22 @@ export function listRates({ quote = 'CNY', limit = 120 } = {}) {
       inUsd: r.rate ? Math.round((1 / r.rate) * 1e6) / 1e6 : null, // 1 quote = this many USD
     }));
 }
+
+/**
+ * Today's rates in one small object, for screens that show "and that is $X"
+ * next to a price. Carried forward from the last published day, so a Sunday
+ * still answers.
+ */
+export function latest({ symbols = TRACKED, day = null } = {}) {
+  const d = dayString(day || new Date());
+  const rates = {};
+  const asOf = {};
+  for (const quote of symbols) {
+    const hit = usdRateOn(d, String(quote).toUpperCase());
+    if (!hit) continue;
+    rates[String(quote).toUpperCase()] = hit.rate;       // 1 USD = rate quote
+    asOf[String(quote).toUpperCase()] = hit.day;
+  }
+  rates.USD = 1;
+  return { base: BASE, day: d, rates, asOf, newest: latestDay() };
+}

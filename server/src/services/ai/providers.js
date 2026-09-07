@@ -171,35 +171,92 @@ async function openaiComplete({ prompt, system, images = [], maxTokens = 4096, s
   return { text: body.choices?.[0]?.message?.content?.trim() ?? '', model: body.model, usage: body.usage, raw: body };
 }
 
-/** Image editing / generation. Only OpenAI exposes this today. */
-export async function editImage({ prompt, image, size = '1024x1024', signal }) {
+/**
+ * The only output sizes OpenAI's image model will produce.
+ *
+ * Any other size has to be reached by asking for the nearest shape and then
+ * scaling, which is done in the browser where a canvas is free - rather than by
+ * pulling a native image library into a project that has to install cleanly on
+ * a Windows machine with no build tools.
+ */
+export const SUPPORTED_IMAGE_SIZES = ['1024x1024', '1536x1024', '1024x1536'];
+
+/**
+ * Pick the supported size whose shape is closest to what was asked for, so the
+ * scale afterwards is a resize and not a distortion.
+ */
+export function nearestSupportedSize(size) {
+  const m = /^(\d{2,5})\s*[x\u00d7*]\s*(\d{2,5})$/i.exec(String(size || '').trim());
+  if (!m) return { request: '1024x1024', exact: true, width: 1024, height: 1024 };
+
+  const width = Number(m[1]);
+  const height = Number(m[2]);
+  const wanted = width / height;
+
+  let best = SUPPORTED_IMAGE_SIZES[0];
+  let bestGap = Infinity;
+  for (const candidate of SUPPORTED_IMAGE_SIZES) {
+    const [cw, ch] = candidate.split('x').map(Number);
+    const gap = Math.abs(Math.log(cw / ch) - Math.log(wanted));
+    if (gap < bestGap) { bestGap = gap; best = candidate; }
+  }
+  return {
+    request: best,
+    exact: SUPPORTED_IMAGE_SIZES.includes(`${width}x${height}`),
+    width,
+    height,
+  };
+}
+
+/**
+ * Image editing / generation. Only OpenAI exposes this today.
+ *
+ * `n` asks for several results from one prompt. Sizes outside the three the
+ * model supports are honoured by asking for the closest shape and reporting
+ * what was actually produced, so the caller can scale it.
+ */
+export async function editImage({ prompt, image, size = '1024x1024', n = 1, signal }) {
   const apiKey = readSetting('ai.openai.api_key');
   if (!apiKey) throw badRequest('Image editing needs an OpenAI API key (Settings > AI).');
   const model = readSetting('ai.openai.image_model');
+  const count = Math.min(Math.max(1, Number(n) || 1), 10);
+  const target = nearestSupportedSize(size);
+
+  const shape = (body) => ({
+    images: (body.data ?? []).map((d) => ({ b64: d.b64_json ?? null, url: d.url ?? null })),
+    // Kept so existing callers that read .b64 still work.
+    b64: body.data?.[0]?.b64_json ?? null,
+    url: body.data?.[0]?.url ?? null,
+    producedSize: target.request,
+    requestedSize: `${target.width}x${target.height}`,
+    needsResize: !target.exact,
+    raw: body,
+  });
 
   if (image) {
     const form = new FormData();
     form.append('model', model);
     form.append('prompt', prompt);
-    form.append('size', size);
+    form.append('size', target.request);
+    if (count > 1) form.append('n', String(count));
     form.append('image', new Blob([image.buffer], { type: image.mime || 'image/png' }), image.filename || 'image.png');
     const res = await outboundFetch(`${config.ai.openai.base}/v1/images/edits`, {
       method: 'POST', headers: { Authorization: `Bearer ${apiKey}` }, body: form, signal,
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new AppError(res.status, `OpenAI image edit failed: ${body?.error?.message || res.statusText}`);
-    return { b64: body.data?.[0]?.b64_json ?? null, url: body.data?.[0]?.url ?? null, raw: body };
+    return shape(body);
   }
 
   const res = await outboundFetch(`${config.ai.openai.base}/v1/images/generations`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, prompt, size, n: 1 }),
+    body: JSON.stringify({ model, prompt, size: target.request, n: count }),
     signal,
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new AppError(res.status, `OpenAI image generation failed: ${body?.error?.message || res.statusText}`);
-  return { b64: body.data?.[0]?.b64_json ?? null, url: body.data?.[0]?.url ?? null, raw: body };
+  return shape(body);
 }
 
 const IMPLS = { manus: manusComplete, anthropic: anthropicComplete, openai: openaiComplete };

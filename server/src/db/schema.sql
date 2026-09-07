@@ -134,10 +134,16 @@ CREATE TABLE IF NOT EXISTS variation_images (
 CREATE TABLE IF NOT EXISTS sku_meta (
   shop_id        INTEGER,
   sku            TEXT NOT NULL,
-  supply_link    TEXT DEFAULT '',   -- informational supplier URL
+  -- Two links, because the page you buy the product on and the page for the
+  -- exact colour/size you need are usually different.
+  supply_link    TEXT DEFAULT '',   -- the main product page at the supplier
+  variant_supply_link TEXT DEFAULT '',  -- the page for this exact variant
   supplier_name  TEXT DEFAULT '',
+  -- A picture of this exact variant, and the link it came from.
+  variant_image_url   TEXT DEFAULT '',
+  -- Estimates you type in. The real cost is always supplied by you later.
   supply_cost    REAL,
-  supply_currency TEXT DEFAULT 'USD',
+  supply_currency TEXT DEFAULT 'CNY',
   lead_time_days INTEGER,
   notes          TEXT DEFAULT '',
   updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
@@ -529,3 +535,18 @@ CREATE TABLE IF NOT EXISTS order_codes (
 );
 CREATE INDEX IF NOT EXISTS idx_ordercodes_day ON order_codes(shop_id, day, seq);
 
+
+-- Advertising spend you enter by hand. Etsy's API exposes no advertising or
+-- traffic data at all, so Etsy Ads figures can only come off the seller
+-- dashboard. One row per shop, month and kind; re-entering a month replaces it.
+CREATE TABLE IF NOT EXISTS ad_costs (
+  shop_id    INTEGER,
+  month      TEXT NOT NULL,          -- YYYY-MM
+  kind       TEXT NOT NULL,          -- etsy_ads | google_ads | meta_ads | other
+  amount     REAL NOT NULL,
+  currency   TEXT NOT NULL DEFAULT 'USD',
+  note       TEXT DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (shop_id, month, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_adcosts_month ON ad_costs(shop_id, month DESC);

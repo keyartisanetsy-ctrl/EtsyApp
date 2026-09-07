@@ -1,6 +1,7 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../lib/api.js';
+import { useRates } from '../lib/rates.js';
 import { TablePage } from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Checkbox, Thumb, Pager, SortTh, Drawer, Modal, CopyButton,
@@ -32,6 +33,7 @@ export default function Skus() {
   const [saving, setSaving] = useState(false);
   const [detail, setDetail] = useState(null);
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [genOpen, setGenOpen] = useState(false);
   const [dupOpen, setDupOpen] = useState(false);
 
   const toast = useToast();
@@ -196,6 +198,7 @@ export default function Skus() {
         <div className="selection-bar">
           <span className="count">{selected.size} selected</span>
           <button className="btn xs" onClick={() => setBulkOpen(true)}>Bulk actions</button>
+          <button className="btn xs" onClick={() => setGenOpen(true)}>Generate SKUs</button>
           <button className="btn xs" onClick={clearSelectedSkus}>Clear SKUs</button>
           <button className="btn xs danger" onClick={deleteSelectedVariations}>Delete variations</button>
           <div className="spacer" />
@@ -237,6 +240,7 @@ export default function Skus() {
               const sku = edit.sku ?? r.sku;
               const price = edit.price ?? r.priceFull;
               const link = supply.supplyLink ?? r.supplyLink;
+              const variantLink = supply.variantSupplyLink ?? r.variantSupplyLink ?? '';
               const discounted = price != null && price !== '' ? (Number(price) * (1 - pct / 100)).toFixed(2) : null;
               const isDirty = edits[r.productId] || supplyEdits[r.sku];
 
@@ -245,7 +249,9 @@ export default function Skus() {
                     style={isDirty ? { boxShadow: 'inset 3px 0 0 var(--brand)' } : undefined}>
                   <td><Checkbox checked={selected.has(r.productId)} onChange={() => toggle(r.productId)} /></td>
                   <td><Thumb src={r.firstImageUrl} alt="listing" /></td>
-                  <td><Thumb src={r.variationImageUrl} alt="variation" fallback="–" /></td>
+                  <td title={r.savedVariantImageUrl ? 'Your own variant photo' : 'Etsy\u2019s photo for this variation'}>
+                    <Thumb src={r.variantImageUrl} alt="variation" fallback="–" />
+                  </td>
                   <td>
                     <input className="input sm mono" style={{ width: 132 }} value={sku}
                            placeholder="— none —"
@@ -268,11 +274,18 @@ export default function Skus() {
                   </td>
                   <td>
                     <div className="flex gap4">
-                      <input className="input sm" style={{ width: 190 }} placeholder="supplier URL (private)"
+                      <input className="input sm" style={{ width: 176 }} placeholder="main supplier URL (private)"
                              value={link} disabled={!sku}
                              title={!sku ? 'Give the variation a SKU first — supply links are stored per SKU' : link}
                              onChange={(e) => stageSupply(sku, 'supplyLink', e.target.value)} />
-                      {link && <a href={link} target="_blank" rel="noreferrer" className="btn xs">↗</a>}
+                      {link && <a href={link} target="_blank" rel="noreferrer" className="btn xs" title="Open the main supply page">↗</a>}
+                    </div>
+                    <div className="flex gap4 mt4">
+                      <input className="input sm" style={{ width: 176 }} placeholder="this variant's URL"
+                             value={variantLink} disabled={!sku}
+                             title={!sku ? 'Give the variation a SKU first' : variantLink}
+                             onChange={(e) => stageSupply(sku, 'variantSupplyLink', e.target.value)} />
+                      {variantLink && <a href={variantLink} target="_blank" rel="noreferrer" className="btn xs" title="Open this variant's supply page">↗</a>}
                     </div>
                   </td>
                   <td><span className={`badge ${STATE_BADGE[r.state] ?? 'grey'}`}>{r.state}</span></td>
@@ -285,6 +298,12 @@ export default function Skus() {
       )}
 
       <SkuDetail row={detail} pct={pct} onClose={() => setDetail(null)} onSaved={reload} />
+      <SkuGenerator
+        open={genOpen}
+        onClose={() => setGenOpen(false)}
+        rows={rows.filter((r) => selected.has(r.productId))}
+        onDone={() => { setGenOpen(false); setSelected(new Set()); reload(); }}
+      />
       <BulkSkuModal
         open={bulkOpen}
         onClose={() => setBulkOpen(false)}
@@ -320,19 +339,33 @@ function SkuDetail({ row, pct, onClose, onSaved }) {
   const [busy, setBusy] = useState(false);
   const toast = useToast();
   const showError = useErrorToast();
+  const { convert, day: rateDay } = useRates();
 
   React.useEffect(() => {
     setMeta(row ? {
-      supplyLink: row.supplyLink, supplierName: row.supplierName,
-      supplyCost: row.supplyCost ?? '', supplyCurrency: row.supplyCurrency ?? 'USD',
-      leadTimeDays: row.leadTimeDays ?? '', notes: row.notes,
+      supplyLink: row.supplyLink ?? '',
+      variantSupplyLink: row.variantSupplyLink ?? '',
+      variantImageUrl: row.savedVariantImageUrl ?? '',
+      // Chinese suppliers are the usual case, so that is the default rather
+      // than dollars.
+      supplyCost: row.supplyCost ?? '', supplyCurrency: row.supplyCurrency ?? 'CNY',
+      leadTimeDays: row.leadTimeDays ?? '', notes: row.notes ?? '',
     } : {});
   }, [row]);
 
-  if (!row) return null;
-  const sale = row.priceFull != null ? row.priceFull * (1 - pct / 100) : null;
+  const sale = row && row.priceFull != null ? row.priceFull * (1 - pct / 100) : null;
   const cost = Number(meta.supplyCost);
-  const margin = Number.isFinite(cost) && sale != null ? sale - cost : null;
+  const costCurrency = (meta.supplyCurrency || 'CNY').toUpperCase();
+  // The cost is usually in yuan and the price in dollars, so the two have to be
+  // brought together before they are subtracted - otherwise the margin reads
+  // like a loss on every product.
+  const costHere = Number.isFinite(cost) && row
+    ? (costCurrency === (row.currency || 'USD').toUpperCase()
+        ? cost
+        : convert(cost, costCurrency, row.currency || 'USD'))
+    : null;
+  const margin = costHere != null && sale != null ? sale - costHere : null;
+  if (!row) return null;
 
   const save = async () => {
     if (!row.sku) { toast({ kind: 'err', title: 'This variation has no SKU', body: 'Supply data is keyed by SKU. Set one first.' }); return; }
@@ -375,6 +408,11 @@ function SkuDetail({ row, pct, onClose, onSaved }) {
             <dd className={margin < 0 ? 'badge red' : ''}>
               {fmtMoney(margin, row.currency)}
               {sale > 0 && <span className="dim"> ({Math.round((margin / sale) * 100)}%)</span>}
+              {costCurrency !== (row.currency || 'USD').toUpperCase() && (
+                <div className="small dim">
+                  cost {fmtMoney(cost, costCurrency)} converted at today's rate{rateDay ? ` (${rateDay})` : ''}
+                </div>
+              )}
             </dd>
           </>
         )}
@@ -382,27 +420,52 @@ function SkuDetail({ row, pct, onClose, onSaved }) {
 
       <div className="section-title">Supply (private — never sent to Etsy)</div>
       <div className="field">
-        <label>Supply link</label>
+        <label>Main supply link</label>
         <input className="input" value={meta.supplyLink ?? ''} placeholder="https://supplier.example/product/123"
                onChange={(e) => setMeta({ ...meta, supplyLink: e.target.value })} />
-        <div className="hint">Informational only. Shown next to the SKU and included in Excel exports.</div>
+        <div className="hint">The supplier's page for the product as a whole.</div>
       </div>
-      <div className="split">
-        <div className="field">
-          <label>Supplier</label>
-          <input className="input" value={meta.supplierName ?? ''} onChange={(e) => setMeta({ ...meta, supplierName: e.target.value })} />
+      <div className="field">
+        <label>Variant supply link</label>
+        <input className="input" value={meta.variantSupplyLink ?? ''} placeholder="https://supplier.example/product/123?colour=silver"
+               onChange={(e) => setMeta({ ...meta, variantSupplyLink: e.target.value })} />
+        <div className="hint">The page for this exact colour/size, when the supplier has one.</div>
+      </div>
+
+      <div className="field">
+        <label>Variant image link</label>
+        <input className="input" value={meta.variantImageUrl ?? ''} placeholder="https://…/silver.jpg"
+               onChange={(e) => setMeta({ ...meta, variantImageUrl: e.target.value })} />
+        <div className="hint">
+          A picture of this exact variant. Left empty, the photo Etsy has for the variation is used instead.
         </div>
+        {(meta.variantImageUrl || row.variantImageUrl) && (
+          <div className="mt8">
+            <Thumb src={meta.variantImageUrl || row.variantImageUrl} alt={row.sku} size="lg" />
+          </div>
+        )}
+      </div>
+
+      <div className="split3">
         <div className="field">
-          <label>Lead time (days)</label>
+          <label>Estimated lead time (days)</label>
           <input className="input" type="number" value={meta.leadTimeDays ?? ''} onChange={(e) => setMeta({ ...meta, leadTimeDays: e.target.value })} />
+          <div className="hint">An estimate. The real figure comes from you later.</div>
         </div>
         <div className="field">
-          <label>Unit cost</label>
+          <label>Estimated unit cost</label>
           <input className="input" type="number" step="0.01" value={meta.supplyCost ?? ''} onChange={(e) => setMeta({ ...meta, supplyCost: e.target.value })} />
+          <div className="hint">An estimate, used for the margin figure until you enter the real cost.</div>
         </div>
         <div className="field">
           <label>Cost currency</label>
-          <input className="input" value={meta.supplyCurrency ?? ''} onChange={(e) => setMeta({ ...meta, supplyCurrency: e.target.value })} />
+          <select className="select" value={meta.supplyCurrency ?? 'CNY'}
+                  onChange={(e) => setMeta({ ...meta, supplyCurrency: e.target.value })}>
+            {['CNY', 'USD', 'TRY', 'EUR', 'GBP'].map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+          {meta.supplyCost !== '' && costCurrency !== 'USD' && convert(meta.supplyCost, costCurrency, 'USD') !== null && (
+            <div className="hint">≈ {fmtMoney(convert(meta.supplyCost, costCurrency, 'USD'), 'USD')} at today's rate</div>
+          )}
         </div>
       </div>
       <div className="field">
@@ -420,6 +483,154 @@ function SkuDetail({ row, pct, onClose, onSaved }) {
           ))
         : <div className="dim small">No variation attributes on this product.</div>}
     </Drawer>
+  );
+}
+
+/**
+ * Making up SKUs for whole listings.
+ *
+ * Two ways round it: a plain rule (KC001-01, KC001-02, then KC002-01) or the
+ * AI, which reads the titles and picks a prefix that means something - KC for
+ * keycaps, DM for a deskmat. Either way nothing is written until the proposal
+ * below has been looked at, because a code that has already gone onto a label
+ * or into a supplier's sheet is expensive to change.
+ */
+function SkuGenerator({ open, onClose, rows, onDone }) {
+  const [mode, setMode] = useState('rule');
+  const [prefix, setPrefix] = useState('KC');
+  const [overwrite, setOverwrite] = useState(false);
+  const [startAt, setStartAt] = useState('');
+  const [plan, setPlan] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const showError = useErrorToast();
+
+  const listingIds = useMemo(() => [...new Set(rows.map((r) => r.listingId))], [rows]);
+
+  React.useEffect(() => { if (!open) { setPlan(null); setMode('rule'); } }, [open]);
+
+  const propose = async () => {
+    setBusy(true);
+    try {
+      const body = { listingIds, mode, overwrite };
+      if (mode === 'rule') {
+        body.prefix = prefix.trim().toUpperCase() || 'KC';
+        if (startAt) body.startAt = Number(startAt);
+      }
+      setPlan(await api.post('/skus/generate/plan', body));
+    } catch (err) { showError(err, 'Could not work out the codes'); }
+    finally { setBusy(false); }
+  };
+
+  const apply = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post('/skus/generate/apply', { plan });
+      toast({
+        kind: 'ok',
+        title: `${r.updated} SKU(s) written`,
+        body: 'Stored here. Use Save to push them to Etsy — one listing at a time, so Etsy never sees two writes at once.',
+      });
+      onDone();
+    } catch (err) { showError(err, 'Could not save the codes'); }
+    finally { setBusy(false); }
+  };
+
+  if (!open) return null;
+
+  return (
+    <Modal open={open} onClose={onClose} lg
+           title={`Generate SKUs for ${listingIds.length} listing${listingIds.length === 1 ? '' : 's'}`}
+           footer={plan
+             ? (<>
+                 <button className="btn" onClick={() => setPlan(null)}>Back</button>
+                 <div className="spacer" />
+                 <button className="btn primary" onClick={apply} disabled={busy || !plan.total}>
+                   {busy ? <Spinner /> : `Write ${plan.total} SKU${plan.total === 1 ? '' : 's'}`}
+                 </button>
+               </>)
+             : (<>
+                 <div className="spacer" />
+                 <button className="btn primary" onClick={propose} disabled={busy || !listingIds.length}>
+                   {busy ? <Spinner /> : 'Show me the codes'}
+                 </button>
+               </>)}>
+      {!plan ? (
+        <>
+          <div className="field">
+            <label>How should the codes be chosen?</label>
+            <select className="select" value={mode} onChange={(e) => setMode(e.target.value)}>
+              <option value="rule">By rule — one prefix, numbered in order</option>
+              <option value="ai">By AI — a prefix that suits each product</option>
+            </select>
+            <div className="hint">
+              {mode === 'rule'
+                ? 'Every selected listing gets the same prefix and the next free number: KC001-01, KC001-02, then KC002-01.'
+                : 'The AI reads each title and picks a short prefix for it, so keycaps and deskmats do not share a series. Codes already in use are never handed out again.'}
+            </div>
+          </div>
+
+          {mode === 'rule' && (
+            <div className="split">
+              <div className="field">
+                <label>Prefix</label>
+                <input className="input mono" value={prefix} maxLength={4}
+                       onChange={(e) => setPrefix(e.target.value.toUpperCase())} />
+              </div>
+              <div className="field">
+                <label>Start numbering at</label>
+                <input className="input" type="number" min="1" placeholder="next free" value={startAt}
+                       onChange={(e) => setStartAt(e.target.value)} />
+                <div className="hint">Left empty, it carries on from the highest number already used.</div>
+              </div>
+            </div>
+          )}
+
+          <Checkbox checked={overwrite} onChange={setOverwrite}
+                    label="Replace SKUs that already exist" />
+          <div className="hint">
+            Off by default. A code already printed on a label or sitting in a supplier's sheet is left alone.
+          </div>
+        </>
+      ) : (
+        <>
+          <Banner kind={plan.total ? 'info' : 'warn'}>
+            {plan.total
+              ? `${plan.total} new code${plan.total === 1 ? '' : 's'}${plan.kept ? `, ${plan.kept} variation(s) keep the SKU they already have` : ''}.`
+              : 'Nothing to change — every selected variation already has a SKU. Tick "Replace SKUs that already exist" if you meant to redo them.'}
+            {plan.mode === 'ai' && plan.model ? ` Suggested by ${plan.model}.` : ''}
+          </Banner>
+
+          {plan.dropped?.length > 0 && (
+            <Banner kind="warn">
+              Dropped as unusable: {plan.dropped.join('; ')}.
+            </Banner>
+          )}
+
+          {(plan.listings ?? []).map((l) => (
+            <div key={l.listingId} className="mb16">
+              <div className="section-title">{l.title}</div>
+              <table className="data">
+                <thead><tr><th>Variation</th><th>Now</th><th>Becomes</th></tr></thead>
+                <tbody>
+                  {l.rows.map((r) => (
+                    <tr key={r.productId}>
+                      <td className="small dim">{r.variation || '—'}</td>
+                      <td className="mono small">{r.current || '—'}</td>
+                      <td className="mono">
+                        {r.kept
+                          ? <span className="dim" title={r.reason}>{r.sku} (kept)</span>
+                          : <strong>{r.sku}</strong>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </>
+      )}
+    </Modal>
   );
 }
 

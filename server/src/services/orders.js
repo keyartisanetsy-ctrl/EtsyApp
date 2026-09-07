@@ -5,14 +5,47 @@
 import { call } from '../etsy/client.js';
 import { requireShopId, activeShopId } from '../etsy/shop.js';
 import { getDb, parse, audit } from '../db/index.js';
-import { trackingUrl } from './settings.js';
+import { trackingUrl, readSetting } from './settings.js';
 import { STATUS_LABELS } from './tracking/status.js';
 import { notFound, badRequest } from '../lib/errors.js';
 import { statusesFor } from './orderstatus.js';
 import { feeFor } from './offsiteads.js';
+import { reportingCurrency } from './reporting.js';
 
 const asMoney = (amount, divisor, currency) =>
   amount == null ? null : { value: amount / (divisor || 100), currency };
+
+/**
+ * "Ships in 2-5 business days" - the promise made on the listing.
+ *
+ * Counted in business days, because that is how the promise is worded and
+ * because a Friday order that says "2 days" means Tuesday, not Sunday. Etsy's
+ * own expected-ship date, when it sends one, is the authority; this is what to
+ * show when it does not.
+ */
+export function shipWindow(fromTs) {
+  const min = Math.max(0, Number(readSetting('orders.ship_days_min')) || 2);
+  const max = Math.max(min, Number(readSetting('orders.ship_days_max')) || 5);
+  if (!fromTs) return { minDays: min, maxDays: max, from: null, to: null };
+
+  const addBusinessDays = (ts, days) => {
+    const d = new Date(ts * 1000);
+    let left = days;
+    while (left > 0) {
+      d.setUTCDate(d.getUTCDate() + 1);
+      const dow = d.getUTCDay();
+      if (dow !== 0 && dow !== 6) left -= 1;
+    }
+    return Math.floor(d.getTime() / 1000);
+  };
+
+  return {
+    minDays: min,
+    maxDays: max,
+    from: addBusinessDays(fromTs, min),
+    to: addBusinessDays(fromTs, max),
+  };
+}
 
 /**
  * The order list.
@@ -82,6 +115,9 @@ export function listOrders({
 
   return {
     total, limit, offset,
+    // The currency the shop reports in, so the list can put a converted figure
+    // under a lira total without every row asking the server what it is.
+    reportingCurrency: reportingCurrency(),
     rows: rows.map(orderSummary),
   };
 }
@@ -163,7 +199,8 @@ export function getOrder(receiptId) {
   if (!r) throw notFound(`Order ${receiptId} is not in the active shop's local mirror. Sync orders first.`);
 
   const items = db.prepare(`
-    SELECT x.*, m.supply_link, m.supplier_name, m.supply_cost
+    SELECT x.*, m.supply_link, m.variant_supply_link, m.supplier_name,
+           m.supply_cost, m.supply_currency, m.variant_image_url, m.lead_time_days
     FROM receipt_transactions x LEFT JOIN sku_meta m ON m.sku = x.sku AND x.sku <> ''
     WHERE x.receipt_id = ? ORDER BY x.transaction_id`).all(receiptId);
 
@@ -197,7 +234,15 @@ export function getOrder(receiptId) {
       shipping: asMoney(r.total_shipping_amount, r.grandtotal_divisor, r.grandtotal_currency),
       tax: asMoney(r.total_tax_amount, r.grandtotal_divisor, r.grandtotal_currency),
       discount: asMoney(r.discount_amount, r.grandtotal_divisor, r.grandtotal_currency),
+      // What the order came to before any discount came off, which is the
+      // figure the listing prices add up to and the one worth seeing next to
+      // what was actually paid.
+      beforeDiscount: r.discount_amount
+        ? asMoney((r.grandtotal_amount ?? 0) + (r.discount_amount ?? 0),
+          r.grandtotal_divisor, r.grandtotal_currency)
+        : null,
     },
+    shipWindow: shipWindow(r.created_ts),
     paymentMethod: r.payment_method,
     items: items.map((i) => ({
       transactionId: i.transaction_id,
@@ -213,9 +258,15 @@ export function getOrder(receiptId) {
         .filter((s) => s !== ':').join(' / '),
       imageUrl: i.image_url,
       isDigital: !!i.is_digital,
+      // The supply record follows the product everywhere it appears, so the
+      // order desk can reorder from the same links the SKU page holds.
       supplyLink: i.supply_link || '',
+      variantSupplyLink: i.variant_supply_link || '',
       supplierName: i.supplier_name || '',
       supplyCost: i.supply_cost ?? null,
+      supplyCurrency: i.supply_currency || null,
+      leadTimeDays: i.lead_time_days ?? null,
+      variantImageUrl: i.variant_image_url || i.image_url || null,
     })),
     shipments: shipments.map((s) => ({
       trackingCode: s.tracking_code,

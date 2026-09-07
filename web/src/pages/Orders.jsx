@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../lib/api.js';
+import { useRates } from '../lib/rates.js';
 import { TablePage } from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Checkbox, Pager, SortTh, Drawer, Modal, CopyButton, Thumb, Tabs,
@@ -40,6 +41,7 @@ export default function Orders() {
   const { data: counters, reload: reloadCounters } = useAsync(() => api.get('/orders/counters'), []);
 
   const rows = data?.rows ?? [];
+  const reportCurrency = data?.reportingCurrency ?? 'USD';
   const refreshAll = () => { reload(); reloadCounters(); };
 
   const toggle = (id) => setSelected((s) => {
@@ -182,9 +184,13 @@ export default function Orders() {
                     {o.itemCount}
                     {o.itemCount > 1 && <span className="badge blue" style={{ marginLeft: 4 }} title="More than one product in this order">multi</span>}
                   </td>
-                  <td className="num subtotal-cell">{fmtMoney(o.subtotal?.value, o.subtotal?.currency)}</td>
+                  <td className="num">
+                    <span className="money-subtotal">{fmtMoney(o.subtotal?.value, o.subtotal?.currency)}</span>
+                    <InCurrency amount={o.subtotal?.value} from={o.subtotal?.currency} to={reportCurrency} />
+                  </td>
                   <td className="num">
                     {fmtMoney(o.total?.value, o.total?.currency)}
+                    <InCurrency amount={o.total?.value} from={o.total?.currency} to={reportCurrency} />
                     {o.offsiteAdsFee && (
                       <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}
                            title={o.offsiteAdsFee.explanation}>
@@ -323,6 +329,47 @@ function StatusChips({ order }) {
 }
 
 /** Order detail: everything about the order, with copy buttons on each block. */
+/**
+ * The small converted figure under a price.
+ *
+ * Silent when the order is already in the reporting currency, or when we have
+ * no rate - a blank is better than a wrong number.
+ */
+function InCurrency({ amount, from, to }) {
+  const { convert } = useRates();
+  if (amount == null || !from || !to) return null;
+  if (String(from).toUpperCase() === String(to).toUpperCase()) return null;
+  const value = convert(amount, from, to);
+  if (value === null) return null;
+  return <div className="small muted" title={`Converted at today's rate`}>≈ {fmtMoney(value, to)}</div>;
+}
+
+/**
+ * The same totals in dollars, for the shops that bill in another currency.
+ *
+ * KeyArtisann takes lira, so "23,427.90" on its own reads like a fortune next
+ * to a dollar shop. Converted at today's rate, and said to be today's rate,
+ * because the money actually landed at the rate on the order's own day.
+ */
+function OrderTotalsInUsd({ totals }) {
+  const { convert, day } = useRates();
+  const currency = (totals?.grand?.currency || 'USD').toUpperCase();
+  if (currency === 'USD') return null;
+  const grand = convert(totals?.grand?.value, currency, 'USD');
+  if (grand === null) return null;
+  const sub = convert(totals?.subtotal?.value, currency, 'USD');
+  return (
+    <>
+      <dt className="small dim">In USD</dt>
+      <dd className="small dim">
+        {fmtMoney(grand, 'USD')} total
+        {sub !== null && <> · {fmtMoney(sub, 'USD')} subtotal</>}
+        <div>at today&rsquo;s rate{day ? ` (${day})` : ''}</div>
+      </dd>
+    </>
+  );
+}
+
 function OrderDetail({ id, onClose, onChanged }) {
   const [tab, setTab] = useState('summary');
   const { data: order, loading, reload } = useAsync(() => (id ? api.get(`/orders/${id}`) : null), [id], { immediate: !!id });
@@ -379,7 +426,16 @@ function OrderDetail({ id, onClose, onChanged }) {
                 <dt>Name</dt><dd>{order.name || '—'}</dd>
                 <dt>Email</dt><dd>{order.buyerEmail || <span className="muted">not shared by Etsy</span>}</dd>
                 <dt>Placed</dt><dd>{fmtDateTime(order.createdTs)}</dd>
-                <dt>Expected ship</dt><dd>{order.expectedShipTs ? fmtDate(order.expectedShipTs) : '—'}</dd>
+                <dt>Expected ship</dt>
+                <dd>
+                  {order.expectedShipTs ? fmtDate(order.expectedShipTs) : '—'}
+                  {order.shipWindow?.from && (
+                    <div className="small dim">
+                      Your promise is {order.shipWindow.minDays}–{order.shipWindow.maxDays} business days:{' '}
+                      {fmtDate(order.shipWindow.from)} – {fmtDate(order.shipWindow.to)}
+                    </div>
+                  )}
+                </dd>
                 <dt>Payment</dt><dd>{order.paymentMethod || '—'}</dd>
               </dl>
 
@@ -390,11 +446,21 @@ function OrderDetail({ id, onClose, onChanged }) {
 
               <div className="section-title">Totals</div>
               <dl className="kv mb16">
-                <dt>Subtotal</dt><dd>{fmtMoney(order.totals.subtotal?.value, order.totals.subtotal?.currency)}</dd>
+                {order.totals.beforeDiscount && (
+                  <>
+                    <dt>Total before discount</dt>
+                    <dd className="dim" style={{ textDecoration: 'line-through' }}>
+                      {fmtMoney(order.totals.beforeDiscount.value, order.totals.beforeDiscount.currency)}
+                    </dd>
+                  </>
+                )}
+                <dt>Subtotal</dt>
+                <dd className="money-subtotal">{fmtMoney(order.totals.subtotal?.value, order.totals.subtotal?.currency)}</dd>
                 <dt>Shipping</dt><dd>{fmtMoney(order.totals.shipping?.value, order.totals.shipping?.currency)}</dd>
                 <dt>Tax</dt><dd>{fmtMoney(order.totals.tax?.value, order.totals.tax?.currency)}</dd>
                 <dt>Discount</dt><dd>{fmtMoney(order.totals.discount?.value, order.totals.discount?.currency)}</dd>
                 <dt><strong>Grand total</strong></dt><dd><strong>{fmtMoney(order.totals.grand?.value, order.totals.grand?.currency)}</strong></dd>
+                <OrderTotalsInUsd totals={order.totals} />
               </dl>
 
               {(order.messages.fromBuyer || order.messages.giftMessage) && (
@@ -424,11 +490,13 @@ function OrderDetail({ id, onClose, onChanged }) {
 
           {tab === 'items' && (
             <table className="data">
-              <thead><tr><th /><th>Item</th><th>SKU</th><th className="right">Qty</th><th className="right">Price</th><th>Supply</th></tr></thead>
+              <thead><tr><th /><th>Item</th><th>SKU</th><th className="right">Qty</th><th className="right">Price</th><th>Supply</th><th className="right">Est. cost</th></tr></thead>
               <tbody>
                 {order.items.map((i) => (
                   <tr key={i.transactionId}>
-                    <td><Thumb src={i.imageUrl} /></td>
+                    <td title={i.variantImageUrl !== i.imageUrl ? 'Your own variant photo' : undefined}>
+                      <Thumb src={i.variantImageUrl || i.imageUrl} />
+                    </td>
                     <td className="cell-wrap">
                       <div>{i.title}</div>
                       {i.variationLabel && <div className="small dim">{i.variationLabel}</div>}
@@ -440,9 +508,21 @@ function OrderDetail({ id, onClose, onChanged }) {
                     <td className="num">{i.quantity}</td>
                     <td className="num">{fmtMoney(i.price?.value, i.price?.currency)}</td>
                     <td>
-                      {i.supplyLink
-                        ? <a href={i.supplyLink} target="_blank" rel="noreferrer" className="btn xs">Open ↗</a>
-                        : <span className="muted small">—</span>}
+                      <div className="flex gap4">
+                        {i.variantSupplyLink && (
+                          <a href={i.variantSupplyLink} target="_blank" rel="noreferrer" className="btn xs primary"
+                             title="The supplier's page for this exact variant">Variant ↗</a>
+                        )}
+                        {i.supplyLink && (
+                          <a href={i.supplyLink} target="_blank" rel="noreferrer" className="btn xs"
+                             title="The supplier's page for the product">Main ↗</a>
+                        )}
+                        {!i.supplyLink && !i.variantSupplyLink && <span className="muted small">—</span>}
+                      </div>
+                    </td>
+                    <td className="num small dim">
+                      {i.supplyCost != null ? fmtMoney(i.supplyCost, i.supplyCurrency || 'CNY') : '—'}
+                      {i.leadTimeDays != null && <div className="small dim">~{i.leadTimeDays}d</div>}
                     </td>
                   </tr>
                 ))}

@@ -35,6 +35,7 @@ export const SETTING_DEFS = {
       { value: 'manual', label: 'Manual only (no automatic lookups)' },
     ] },
   'tracking.url_template': { env: config.tracking.publicUrlTemplate, def: 'https://www.yuntrack.com/parcelTracking?id={code}', label: 'Tracking link template' },
+  'tracking.in_transit_prefixes': { env: '', def: 'YT', label: 'Tracking prefixes that start as In transit (comma separated)' },
   'tracking.stale_days':   { env: String(config.tracking.staleAfterDays), def: '4', label: 'Alert after N days without movement' },
   'tracking.sync_minutes': { env: String(config.tracking.autoSyncMinutes), def: '180', label: 'Auto-sync interval (minutes)' },
   'tracking.seventeentrack_key': { env: config.tracking.seventeentrackKey, def: '', secret: true, label: '17TRACK API key' },
@@ -68,6 +69,9 @@ export const SETTING_DEFS = {
   'airtable.token':        { env: process.env.AIRTABLE_TOKEN || '', def: '', secret: true, label: 'Airtable personal access token' },
   'airtable.auto_push':    { env: '', def: 'false', label: 'Send new orders to Airtable automatically after each sync',
     options: [ { value: 'false', label: 'No - I press the button myself' }, { value: 'true', label: 'Yes - push new orders automatically' } ] },
+
+  'sku.prefix':            { env: '', def: 'KC', label: 'SKU prefix for generated codes' },
+  'sku.pattern':           { env: '', def: '{PREFIX}{PRODUCT}-{VARIANT}', label: 'SKU shape, e.g. KC001-01' },
 
   'pricing.discount_percent': { env: String(config.pricing.discountPercent), def: '30', label: 'Discount percentage' },
   'orders.ship_days_min':  { env: '', def: '2', label: 'Expected dispatch: minimum business days' },

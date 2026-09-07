@@ -1056,6 +1056,357 @@ await check('Airtable is disclosed as a destination and needs a token', async ()
   assert(status === 400 && /token/i.test(err.error), `expected a token complaint, got ${status} ${err.error}`);
 });
 
+console.log('\nSKU generation');
+await check('rule-based SKUs number products and variants in order', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const skugen = await import('../server/src/services/skugen.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 970001').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (970001,'SKU Gen Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(970001);
+
+  try {
+    for (const [id, title] of [[9701, 'Cherry Keycap Set'], [9702, 'Artisan Deskmat']]) {
+      db.prepare('INSERT OR REPLACE INTO listings (listing_id, shop_id, title, state) VALUES (?,?,?,?)')
+        .run(id, 970001, title, 'active');
+    }
+    let productId = 970100;
+    for (const [listingId, count] of [[9701, 3], [9702, 2]]) {
+      for (let i = 0; i < count; i += 1) {
+        db.prepare(`INSERT OR REPLACE INTO listing_products (product_id, listing_id, sku, variation_label, is_deleted)
+                    VALUES (?,?,?,?,0)`).run(productId, listingId, '', `Variant ${i + 1}`);
+        productId += 1;
+      }
+    }
+
+    const plan = skugen.planByRule({ listingIds: [9701, 9702], prefix: 'KC' });
+    const codes = plan.listings.flatMap((l) => l.rows.map((r) => r.sku));
+    assert(codes.join(',') === 'KC001-01,KC001-02,KC001-03,KC002-01,KC002-02',
+      `unexpected codes: ${codes.join(',')}`);
+    assert(plan.total === 5, `expected 5 new codes, got ${plan.total}`);
+
+    const applied = skugen.applyPlan(plan);
+    assert(applied.updated === 5, `expected 5 written, got ${applied.updated}`);
+
+    // Running it again must not churn codes that are already printed on labels.
+    const again = skugen.planByRule({ listingIds: [9701, 9702], prefix: 'KC' });
+    assert(again.total === 0 && again.kept === 5,
+      `re-run should keep everything: ${again.total} new / ${again.kept} kept`);
+
+    // A new product carries on from the highest number rather than colliding.
+    assert(skugen.highestProductNumber('KC') === 2, 'highest product number not read back');
+  } finally {
+    db.prepare('DELETE FROM listing_products WHERE listing_id IN (9701, 9702)').run();
+    db.prepare('DELETE FROM listings WHERE listing_id IN (9701, 9702)').run();
+    client.removeAccount(970001);
+  }
+});
+
+await check('an AI SKU plan cannot invent products or reuse a code', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const skugen = await import('../server/src/services/skugen.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 970002').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (970002,'SKU AI Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(970002);
+
+  try {
+    db.prepare('INSERT OR REPLACE INTO listings (listing_id, shop_id, title, state) VALUES (?,?,?,?)')
+      .run(9711, 970002, 'Keycap Set', 'active');
+    db.prepare(`INSERT OR REPLACE INTO listing_products (product_id, listing_id, sku, variation_label, is_deleted)
+                VALUES (970200, 9711, '', 'Silver', 0)`).run();
+    db.prepare(`INSERT OR REPLACE INTO listing_products (product_id, listing_id, sku, variation_label, is_deleted)
+                VALUES (970201, 9711, 'TAKEN-01', 'Gold', 0)`).run();
+
+    const runner = async () => ({
+      text: JSON.stringify({ listings: [{ listingId: 9711, rows: [
+        { productId: 970200, sku: 'KC001-01' },   // fine
+        { productId: 999999, sku: 'KC001-02' },   // no such variation
+        { productId: 970201, sku: 'TAKEN-01' },   // already in use elsewhere... but its own
+        { productId: 970200, sku: 'KC001-01' },   // proposed twice
+      ] }] }),
+      provider: 'test', model: 'test-model',
+    });
+
+    const plan = await skugen.planByAi({ listingIds: [9711], runner });
+    const kept = plan.listings.flatMap((l) => l.rows.map((r) => r.sku));
+    assert(kept.includes('KC001-01'), 'the valid code was dropped');
+    assert(!kept.includes('KC001-02'), 'a code for a made-up variation was kept');
+    assert(plan.dropped.some((d) => /999999/.test(d)), 'the invented variation was not reported');
+    assert(plan.dropped.some((d) => /proposed twice/.test(d)), 'the duplicate was not reported');
+  } finally {
+    db.prepare('DELETE FROM listing_products WHERE listing_id = 9711').run();
+    db.prepare('DELETE FROM listings WHERE listing_id = 9711').run();
+    client.removeAccount(970002);
+  }
+});
+
+console.log('\nShop data and ad costs');
+await check('ad spend is stored per month and converted', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const adcosts = await import('../server/src/services/adcosts.js');
+  const fx = await import('../server/src/services/fx.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 970003').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (970003,'Ad Cost Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(970003);
+
+  try {
+    const month = new Date().toISOString().slice(0, 7);
+    adcosts.setCost({ month, kind: 'etsy_ads', amount: 100, currency: 'USD' });
+    adcosts.setCost({ month, kind: 'etsy_ads', amount: 120, currency: 'USD' }); // a correction, not a second row
+
+    const list = adcosts.listCosts({ months: 2, currency: 'USD' });
+    const rows = list.filter((r) => r.month === month && r.kind === 'etsy_ads');
+    assert(rows.length === 1, `re-entering a month should replace it, got ${rows.length} rows`);
+    assert(rows[0].amount === 120, `expected the corrected 120, got ${rows[0].amount}`);
+
+    const total = adcosts.forMonth({ month, currency: 'USD' });
+    assert(total.total === 120, `month total: ${total.total}`);
+
+    // A figure in another currency is converted, not passed through as-is.
+    if (fx.latestDay()) {
+      adcosts.setCost({ month, kind: 'google_ads', amount: 1000, currency: 'TRY' });
+      const both = adcosts.forMonth({ month, currency: 'USD' });
+      const tr = both.entries.find((e) => e.kind === 'google_ads');
+      assert(tr.converted !== null && tr.converted < 1000,
+        `1000 TRY should convert to well under 1000 USD, got ${tr.converted}`);
+    }
+
+    adcosts.removeCost({ month, kind: 'etsy_ads' });
+    assert(!adcosts.listCosts({ months: 2 }).some((r) => r.month === month && r.kind === 'etsy_ads'),
+      'the removed month is still listed');
+  } finally {
+    db.prepare('DELETE FROM ad_costs WHERE shop_id = 970003').run();
+    client.removeAccount(970003);
+  }
+});
+
+await check('analytics counts real orders and drops cancelled ones', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const analytics = await import('../server/src/services/analytics.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 970004').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (970004,'Analytics Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(970004);
+
+  const recent = Math.floor(Date.now() / 1000) - 3 * 86_400;
+  try {
+    // Two live orders, one cancelled, one refunded in part.
+    db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, name, country_iso, status,
+                grandtotal_amount, grandtotal_divisor, grandtotal_currency, refunded_amount,
+                was_canceled, created_ts)
+                VALUES (970100, 970004, 'A', 'US', 'Paid', 10000, 100, 'USD', 0, NULL, ?)`).run(recent);
+    db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, name, country_iso, status,
+                grandtotal_amount, grandtotal_divisor, grandtotal_currency, refunded_amount,
+                was_canceled, created_ts)
+                VALUES (970101, 970004, 'B', 'GB', 'Paid', 5000, 100, 'USD', 2000, 0, ?)`).run(recent);
+    db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, name, country_iso, status,
+                grandtotal_amount, grandtotal_divisor, grandtotal_currency, refunded_amount,
+                was_canceled, created_ts)
+                VALUES (970102, 970004, 'C', 'US', 'Canceled', 99900, 100, 'USD', 0, 1, ?)`).run(recent);
+    db.prepare(`INSERT OR REPLACE INTO receipt_transactions (transaction_id, receipt_id, listing_id, sku,
+                title, quantity, price_amount, price_divisor, price_currency)
+                VALUES (970300, 970100, 5551, 'GEN-01', 'Keycap Set', 2, 5000, 100, 'USD')`).run();
+
+    const o = analytics.overview({ sinceDays: 30, currency: 'USD' });
+    // A NULL was_canceled must count as "not cancelled" - `= 0` would drop it.
+    assert(o.orders === 2, `expected 2 live orders, got ${o.orders}`);
+    assert(o.gross === 150, `gross: ${o.gross}`);
+    assert(o.refunded === 20, `refunded: ${o.refunded}`);
+    assert(o.net === 130, `net: ${o.net}`);
+
+    const products = analytics.topProducts({ sinceDays: 30, currency: 'USD' });
+    const gen = products.find((p) => p.sku === 'GEN-01');
+    assert(gen && gen.units === 2 && gen.revenue === 100, `product line: ${JSON.stringify(gen)}`);
+
+    const countries = analytics.byCountry({ sinceDays: 30 });
+    assert(countries.some((c) => c.country === 'GB'), 'country breakdown missing GB');
+    assert(!countries.some((c) => c.orders > 1 && c.country === 'US'),
+      'the cancelled US order was counted');
+
+    // A product filter counts whole orders, not fragments.
+    const filtered = analytics.overview({ sinceDays: 30, sku: 'GEN-01', currency: 'USD' });
+    assert(filtered.orders === 1 && filtered.gross === 100, `sku filter: ${JSON.stringify(filtered)}`);
+  } finally {
+    db.prepare('DELETE FROM receipt_transactions WHERE receipt_id IN (970100,970101,970102)').run();
+    db.prepare('DELETE FROM receipts WHERE receipt_id IN (970100,970101,970102)').run();
+    client.removeAccount(970004);
+  }
+});
+
+console.log('\nTracking additions');
+await check('YunExpress numbers start in transit, others pre-shipped', async () => {
+  const tracking = await import('../server/src/services/tracking/index.js');
+  assert(tracking.startsAsInTransit('YT2607600700845852'), 'a YT number should count as moving');
+  assert(tracking.startsAsInTransit('yt123'), 'the prefix check must ignore case');
+  assert(!tracking.startsAsInTransit('AB99887766'), 'a non-YunExpress number should not');
+  assert(!tracking.startsAsInTransit(''), 'an empty code should not');
+});
+
+await check('the paste parser reads every shape a courier list comes in', async () => {
+  const tracking = await import('../server/src/services/tracking/index.js');
+  const { rows, errors } = tracking.parseTrackingInput([
+    '3799463891  YT2607600700845852',
+    '#3799463891, YT2607600700845853',
+    'YT2607600700845854 3799463892',
+    '3799463893\tYT2607600700845855\tYun Express',
+    'Order id, Tracking',
+    'nonsense-on-its-own',
+    '3799463895 short',
+    '3799463896 YT2607600700845852',
+  ].join('\n'));
+
+  assert(rows.length === 4, `expected 4 usable rows, got ${rows.length}`);
+  assert(rows[1].receiptId === 3799463891, 'the # prefix broke the order id');
+  assert(rows[2].receiptId === 3799463892 && rows[2].trackingCode === 'YT2607600700845854',
+    'the reversed columns were not sorted out');
+  assert(rows[3].carrierName === 'Yun Express', `carrier name lost its space: ${rows[3].carrierName}`);
+  assert(errors.length === 3, `expected 3 refusals, got ${errors.length}`);
+  assert(errors.some((e) => /already on line/.test(e.reason)), 'the duplicate was not caught');
+});
+
+await check('the AI status reader refuses invented parcels and low confidence', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const tracking = await import('../server/src/services/tracking/index.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 970005').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (970005,'AI Tracking Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(970005);
+
+  try {
+    for (const code of ['VERIFYAI001', 'VERIFYAI002']) {
+      db.prepare(`INSERT OR REPLACE INTO tracking (shop_id, tracking_code, status, provider)
+                  VALUES (970005, ?, 'in_transit', 'manual')`).run(code);
+    }
+
+    const runner = async () => ({
+      text: JSON.stringify({ parcels: [
+        { code: 'VERIFYAI001', status: 'delivered', confidence: 0.95, note: 'signed for' },
+        { code: 'VERIFYAI002', status: 'delivered', confidence: 0.3, note: 'guessing' },
+        { code: 'NOT-A-PARCEL', status: 'delivered', confidence: 1, note: 'invented' },
+        { code: 'VERIFYAI001', status: 'teleported', confidence: 1, note: 'not a status' },
+      ] }),
+      provider: 'test', model: 'test-model',
+    });
+
+    const out = await tracking.readStatusesWithAi({
+      codes: ['VERIFYAI001', 'VERIFYAI002'], apply: true, runner,
+    });
+
+    assert(out.applied === 1, `only the confident one should be written, applied ${out.applied}`);
+    assert(!out.parcels.some((p) => p.code === 'NOT-A-PARCEL'), 'an invented parcel was accepted');
+    assert(!out.parcels.some((p) => p.status === 'teleported'), 'an unknown status was accepted');
+    const held = out.parcels.find((p) => p.code === 'VERIFYAI002');
+    assert(held && held.heldBack, 'the low-confidence answer was not held back with a reason');
+
+    const after = db.prepare('SELECT status FROM tracking WHERE shop_id = 970005 AND tracking_code = ?');
+    assert(after.get('VERIFYAI001').status === 'delivered', 'the confident answer was not written');
+    assert(after.get('VERIFYAI002').status === 'in_transit', 'a low-confidence answer was written anyway');
+  } finally {
+    db.prepare('DELETE FROM tracking_events WHERE shop_id = 970005').run();
+    db.prepare('DELETE FROM tracking WHERE shop_id = 970005').run();
+    client.removeAccount(970005);
+  }
+});
+
+console.log('\nListing depth');
+await check('category search finds the neighbourhood, in either language', async () => {
+  const { initDb, getDb, json } = await import('../server/src/db/index.js');
+  const research = await import('../server/src/services/research.js');
+  await initDb();
+  const db = getDb();
+
+  const previous = db.prepare("SELECT payload FROM reference_cache WHERE key = 'seller_taxonomy'").get();
+  const tree = [
+    { id: 1, name: 'Electronics & Accessories', level: 1, parent_id: null, children: [
+      { id: 10, name: 'Computers & Peripherals', level: 2, parent_id: 1, children: [
+        { id: 100, name: 'Keyboards & Mice', level: 3, parent_id: 10, children: [
+          { id: 1000, name: 'Keycaps', level: 4, parent_id: 100, children: [] },
+          { id: 1001, name: 'Keyboards', level: 4, parent_id: 100, children: [] },
+          { id: 1002, name: 'Mouse Pads', level: 4, parent_id: 100, children: [] },
+        ] },
+      ] },
+    ] },
+  ];
+  db.prepare(`INSERT INTO reference_cache (key, payload, fetched_at) VALUES ('seller_taxonomy', ?, datetime('now'))
+              ON CONFLICT(key) DO UPDATE SET payload = excluded.payload`).run(json(tree));
+
+  try {
+    const hit = await research.searchTaxonomy('keycap set', { limit: 3 });
+    assert(hit.results[0]?.name === 'Keycaps', `expected Keycaps first, got ${hit.results[0]?.name}`);
+    // The point of this: you see the keyboard branch you would be listing beside.
+    const related = hit.results[0].related.map((r) => r.name);
+    assert(related.includes('Keyboards'), `related categories missing the keyboard branch: ${related.join(', ')}`);
+    assert(hit.results[0].parent.name === 'Keyboards & Mice', 'the branch above was not reported');
+
+    // Etsy's taxonomy is English only, so a Turkish search has to be translated.
+    const tr = await research.searchTaxonomy('klavye', { limit: 2 });
+    assert(tr.results.some((r) => r.name === 'Keyboards'), 'a Turkish search found nothing');
+  } finally {
+    if (previous) {
+      db.prepare("UPDATE reference_cache SET payload = ? WHERE key = 'seller_taxonomy'").run(previous.payload);
+    } else {
+      db.prepare("DELETE FROM reference_cache WHERE key = 'seller_taxonomy'").run();
+    }
+  }
+});
+
+await check('image sizes outside the model fall back to the nearest shape', async () => {
+  const providers = await import('../server/src/services/ai/providers.js');
+  assert(providers.nearestSupportedSize('1024x1024').exact, 'a supported size was marked inexact');
+  // 2000x2000 is square, so the square size is the one to scale from.
+  assert(providers.nearestSupportedSize('2000x2000').request === '1024x1024', 'square went to the wrong shape');
+  assert(providers.nearestSupportedSize('1920x1080').request === '1536x1024', 'landscape went to the wrong shape');
+  assert(providers.nearestSupportedSize('800x1200').request === '1024x1536', 'portrait went to the wrong shape');
+  assert(!providers.nearestSupportedSize('3000x2250').exact, 'a custom size was marked exact');
+});
+
+await check('the expected dispatch window counts business days', async () => {
+  const orders = await import('../server/src/services/orders.js');
+  // 2026-09-04 is a Friday. Two business days later is Tuesday the 8th.
+  const friday = Math.floor(Date.parse('2026-09-04T12:00:00Z') / 1000);
+  const w = orders.shipWindow(friday);
+  assert(w.minDays === 2 && w.maxDays === 5, `window should default to 2-5, got ${w.minDays}-${w.maxDays}`);
+  const from = new Date(w.from * 1000).toISOString().slice(0, 10);
+  const to = new Date(w.to * 1000).toISOString().slice(0, 10);
+  assert(from === '2026-09-08', `two business days from Friday should be Tuesday, got ${from}`);
+  assert(to === '2026-09-11', `five business days from Friday should be the next Friday, got ${to}`);
+});
+
+await check('todays rates answer even on a day the ECB does not publish', async () => {
+  const fx = await import('../server/src/services/fx.js');
+  const latest = fx.latest();
+  assert(latest.base === 'USD', 'rates should be quoted against the dollar');
+  assert(latest.rates.USD === 1, 'the dollar should be worth a dollar');
+  if (fx.latestDay()) {
+    assert(latest.rates.TRY > 1, `1 USD should be more than 1 TRY, got ${latest.rates.TRY}`);
+    assert(latest.rates.CNY > 1, `1 USD should be more than 1 CNY, got ${latest.rates.CNY}`);
+    // Carried forward from the last published day, so a Sunday still answers.
+    assert(latest.asOf.TRY <= latest.day, 'the rate is dated after the day asked for');
+  }
+});
+
 console.log('\nGuards');
 await check('unauthenticated Etsy write is refused with guidance', async () => {
   const { status, body } = await req('/api/listings', {

@@ -39,7 +39,7 @@ router.delete('/prompts/:id', asyncRoute(async (req, res) => res.json(ai.deleteP
 // ------------------------------------------------------------- attachments
 
 /** Screenshots of buyer messages, or source photos for listing generation. */
-router.post('/attachments', upload.array('files', 10), asyncRoute(async (req, res) => {
+router.post('/attachments', upload.array('files', 20), asyncRoute(async (req, res) => {
   if (!req.files?.length) throw new Error('Attach at least one file as "files".');
   fs.mkdirSync(config.uploadDir, { recursive: true });
   const db = getDb();
@@ -162,7 +162,79 @@ router.post('/image', upload.single('image'), asyncRoute(async (req, res) => {
       .run(id, `${id}.png`, 'image/png', buf.length, dest, sha256(buf), 'ai-output');
     attachment = { id, url: `/api/ai/attachments/${id}`, bytes: buf.length };
   }
-  res.json({ attachment, url: result.url ?? null });
+  res.json({
+    attachment,
+    url: result.url ?? null,
+    producedSize: result.producedSize,
+    requestedSize: result.requestedSize,
+    needsResize: !!result.needsResize,
+  });
+}));
+
+/**
+ * The same thing for a batch: up to 20 photos edited with one instruction.
+ *
+ * Run one at a time on purpose. Twenty image requests fired together get
+ * rate-limited, and one failure in the middle of a parallel burst leaves you
+ * guessing which photo it was. Sequentially, every source keeps its own result
+ * or its own error, and a failure part-way through still returns everything
+ * finished before it.
+ */
+router.post('/image/batch', upload.array('images', 20), asyncRoute(async (req, res) => {
+  const prompt = req.body.prompt || ai.getDefaultPrompt('image')?.body;
+  if (!prompt) throw new Error('Give an editing instruction, or create a default "image" prompt.');
+
+  const files = req.files ?? [];
+  const variants = Math.min(Math.max(1, Number(req.body.variants) || 1), 20);
+  const size = req.body.size || '1024x1024';
+
+  // Nothing attached means "generate from scratch", and then `variants` is how
+  // many pictures to make rather than how many per photo.
+  const jobs = files.length
+    ? files.map((f, i) => ({ index: i, filename: f.originalname, image: { buffer: f.buffer, mime: f.mimetype, filename: f.originalname } }))
+    : Array.from({ length: variants }, (unused, i) => ({ index: i, filename: `generated ${i + 1}`, image: null }));
+
+  fs.mkdirSync(config.uploadDir, { recursive: true });
+  const db = getDb();
+  const results = [];
+
+  const store = (b64) => {
+    const id = `att_${crypto.randomBytes(8).toString('hex')}`;
+    const dest = path.join(config.uploadDir, `${id}.png`);
+    const buf = Buffer.from(b64, 'base64');
+    fs.writeFileSync(dest, buf);
+    db.prepare('INSERT INTO attachments (id, filename, mime, size_bytes, path, sha256, purpose) VALUES (?,?,?,?,?,?,?)')
+      .run(id, `${id}.png`, 'image/png', buf.length, dest, sha256(buf), 'ai-output');
+    return { id, url: `/api/ai/attachments/${id}`, bytes: buf.length };
+  };
+
+  for (const job of jobs) {
+    try {
+      const out = await ai.editImage({
+        prompt,
+        size,
+        image: job.image,
+        n: files.length ? variants : 1,
+      });
+      results.push({
+        index: job.index,
+        filename: job.filename,
+        attachments: (out.images ?? []).filter((i) => i.b64).map((i) => store(i.b64)),
+        producedSize: out.producedSize,
+        requestedSize: out.requestedSize,
+        needsResize: !!out.needsResize,
+      });
+    } catch (err) {
+      results.push({ index: job.index, filename: job.filename, attachments: [], error: err.message });
+    }
+  }
+
+  res.json({
+    requested: jobs.length,
+    done: results.filter((r) => r.attachments.length).length,
+    failed: results.filter((r) => r.error).length,
+    results,
+  });
 }));
 
 export default router;

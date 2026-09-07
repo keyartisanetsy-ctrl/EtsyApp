@@ -14,6 +14,7 @@ import Research from './pages/Research.jsx';
 import BulkJobs from './pages/BulkJobs.jsx';
 import Exports from './pages/Exports.jsx';
 import Airtable from './pages/Airtable.jsx';
+import Analytics from './pages/Analytics.jsx';
 import ShopSettings from './pages/ShopSettings.jsx';
 import Settings from './pages/Settings.jsx';
 import ApiExplorer from './pages/ApiExplorer.jsx';
@@ -22,7 +23,10 @@ import NewListing from './pages/NewListing.jsx';
 const NAV = [
   {
     label: 'Overview',
-    items: [{ to: '/', icon: '◆', label: 'Dashboard', end: true }],
+    items: [
+      { to: '/', icon: '◆', label: 'Dashboard', end: true },
+      { to: '/analytics', icon: '📈', label: 'Shop data' },
+    ],
   },
   {
     label: 'Catalogue',
@@ -192,6 +196,7 @@ export default function App() {
             <Route path="/jobs" element={<BulkJobs />} />
             <Route path="/exports" element={<Exports />} />
             <Route path="/airtable" element={<Airtable />} />
+            <Route path="/analytics" element={<Analytics />} />
             <Route path="/shop" element={<ShopSettings />} />
             <Route path="/api-explorer" element={<ApiExplorer />} />
             <Route path="/settings" element={<Settings />} />

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../lib/api.js';
 import Page from '../components/Page.jsx';
@@ -18,17 +18,15 @@ export default function NewListing() {
     tags: '', materials: '', type: 'physical', is_supply: false,
     shipping_profile_id: '', return_policy_id: '', shop_section_id: '',
   });
-  const [taxSearch, setTaxSearch] = useState('');
-  const debouncedTax = useDebounced(taxSearch);
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState(null);
   const [images, setImages] = useState([]);
+  const [attributes, setAttributes] = useState({}); // propertyId -> [{ valueId, name }]
 
   const nav = useNavigate();
   const toast = useToast();
   const showError = useErrorToast();
 
-  const { data: taxonomy } = useAsync(() => api.get('/research/taxonomy/seller', { flat: true }), []);
   const { data: profiles } = useAsync(() => api.get('/shop/shipping-profiles').catch(() => null), []);
   const { data: sections } = useAsync(() => api.get('/shop/sections').catch(() => null), []);
 
@@ -54,12 +52,6 @@ export default function NewListing() {
   }, [toast]);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
-
-  const taxMatches = useMemo(() => {
-    if (!debouncedTax || !taxonomy) return [];
-    const q = debouncedTax.toLowerCase();
-    return taxonomy.filter((t) => t.path.toLowerCase().includes(q)).slice(0, 20);
-  }, [debouncedTax, taxonomy]);
 
   const tagList = form.tags.split(',').map((t) => t.trim()).filter(Boolean);
   const problems = [
@@ -89,6 +81,22 @@ export default function NewListing() {
       const listing = await api.post('/listings', body);
       setCreated(listing);
       toast({ kind: 'ok', title: `Draft ${listing.listing_id} created`, body: 'Add images, then activate it from Listings.' });
+
+      // The category attributes go on one at a time. Etsy takes one write at a
+      // time from this app by design, so a failure names the attribute that
+      // failed rather than losing the lot.
+      const chosen = Object.entries(attributes).filter(([, picked]) => picked?.length);
+      for (const [propertyId, picked] of chosen) {
+        try {
+          // Etsy wants both the ids and the words; sending one without the
+          // other is rejected.
+          await api.put(`/listings/${listing.listing_id}/properties/${propertyId}`, {
+            value_ids: picked.map((v) => v.valueId),
+            values: picked.map((v) => v.name),
+          });
+        } catch (err) { showError(err, `Attribute ${propertyId} was not saved`); }
+      }
+      if (chosen.length) toast({ kind: 'ok', title: `${chosen.length} attribute(s) set` });
 
       for (const file of images) {
         const fd = new FormData();
@@ -172,23 +180,12 @@ export default function NewListing() {
         <div className="card">
           <div className="card-head"><h3>Category &amp; logistics</h3></div>
 
-          <div className="field">
-            <label>Category (Etsy taxonomy)</label>
-            <input className="input" placeholder="Search, e.g. candle" value={taxSearch} onChange={(e) => setTaxSearch(e.target.value)} />
-            {form.taxonomy_id && (
-              <div className="small mt8">
-                Selected: <strong>{taxonomy?.find((t) => t.id === Number(form.taxonomy_id))?.path ?? form.taxonomy_id}</strong>
-              </div>
-            )}
-            <div style={{ maxHeight: 170, overflowY: 'auto', marginTop: 8 }}>
-              {taxMatches.map((t) => (
-                <div key={t.id} className="small" style={{ padding: '3px 0', cursor: 'pointer' }}
-                     onClick={() => { set('taxonomy_id', t.id); setTaxSearch(''); }}>
-                  {t.path}
-                </div>
-              ))}
-            </div>
-          </div>
+          <CategoryPicker
+            value={form.taxonomy_id}
+            onPick={(id) => set('taxonomy_id', id)}
+            attributes={attributes}
+            onAttributes={setAttributes}
+          />
 
           <div className="split">
             <div className="field">
@@ -246,5 +243,189 @@ export default function NewListing() {
         </div>
       </div>
     </Page>
+  );
+}
+
+/**
+ * The category box, as close to Etsy's own as its API allows.
+ *
+ * Etsy shows you more than the thing you typed: it shows the branch you would
+ * be listing in and what sits beside it, because that decides who finds the
+ * listing. So does this. Pick one and the attributes Etsy will ask for load
+ * underneath, with the required ones first and the occasion-style ones - the
+ * ones that put a listing into the gift guides and get forgotten - given their
+ * own section.
+ */
+function CategoryPicker({ value, onPick, attributes, onAttributes }) {
+  const [search, setSearch] = useState('');
+  const debounced = useDebounced(search);
+  const [open, setOpen] = useState(false);
+
+  const { data: found, loading } = useAsync(
+    () => (debounced.trim() ? api.get('/research/taxonomy/search', { q: debounced, limit: 8 }) : null),
+    [debounced],
+  );
+  const { data: detail, loading: loadingDetail } = useAsync(
+    () => (value ? api.get(`/research/taxonomy/${value}/detail`) : null),
+    [value],
+  );
+
+  const choose = (id) => { onPick(id); setSearch(''); setOpen(false); onAttributes({}); };
+
+  const picked = (propertyId) => attributes[propertyId] ?? [];
+  const isPicked = (propertyId, valueId) => picked(propertyId).some((v) => v.valueId === valueId);
+
+  const setValue = (propertyId, value, multi) => onAttributes({
+    ...attributes,
+    [propertyId]: multi
+      ? isPicked(propertyId, value.valueId)
+        ? picked(propertyId).filter((v) => v.valueId !== value.valueId)
+        : [...picked(propertyId), value]
+      : [value],
+  });
+
+  const propertyField = (p) => (
+    <div className="field" key={p.propertyId}>
+      <label>
+        {p.name}
+        {p.isRequired && <span className="badge red" style={{ marginLeft: 6 }}>required</span>}
+        {p.supportsVariations && <span className="badge blue" style={{ marginLeft: 6 }}>can vary</span>}
+      </label>
+      {p.values.length ? (
+        p.isMultivalued ? (
+          <div className="pill-row">
+            {p.values.map((v) => (
+              <button key={v.valueId} type="button"
+                      className={`btn xs ${isPicked(p.propertyId, v.valueId) ? 'primary' : ''}`}
+                      onClick={() => setValue(p.propertyId, v, true)}>
+                {v.name}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <select className="select" value={picked(p.propertyId)[0]?.valueId ?? ''}
+                  onChange={(e) => {
+                    const v = p.values.find((x) => String(x.valueId) === e.target.value);
+                    if (v) setValue(p.propertyId, v, false);
+                    else onAttributes({ ...attributes, [p.propertyId]: [] });
+                  }}>
+            <option value="">—</option>
+            {p.values.map((v) => <option key={v.valueId} value={v.valueId}>{v.name}</option>)}
+          </select>
+        )
+      ) : (
+        <div className="hint">Free text on Etsy — set it on the listing once it exists.</div>
+      )}
+      {p.maxValues > 1 && <div className="hint">Up to {p.maxValues} choices.</div>}
+    </div>
+  );
+
+  return (
+    <>
+      <div className="field">
+        <label>Category (Etsy taxonomy)</label>
+        <input className="input" placeholder="What is it? e.g. keycap set, mum, desk mat…"
+               value={search}
+               onChange={(e) => { setSearch(e.target.value); setOpen(true); }}
+               onFocus={() => setOpen(true)} />
+        <div className="hint">
+          Turkish works too — &ldquo;klavye&rdquo; finds Keyboards. Each result shows the branch it sits in
+          and what is next to it, so you can see the neighbourhood before you commit.
+        </div>
+
+        {loading && <div className="small dim mt8"><Spinner /> searching…</div>}
+
+        {open && found?.results?.length > 0 && (
+          <div className="mt8" style={{ maxHeight: 300, overflowY: 'auto' }}>
+            {found.results.map((hit) => (
+              <div key={hit.id} className="card" style={{ padding: 10, marginBottom: 6 }}>
+                <div className="flex" style={{ alignItems: 'center' }}>
+                  <button type="button" className="btn xs primary" onClick={() => choose(hit.id)}>Use this</button>
+                  <div style={{ marginLeft: 8 }}>
+                    <div><strong>{hit.name}</strong>{hit.isLeaf ? '' : <span className="badge grey" style={{ marginLeft: 6 }}>branch</span>}</div>
+                    <div className="small dim">{hit.path}</div>
+                  </div>
+                </div>
+                {hit.related.length > 0 && (
+                  <div className="pill-row mt8">
+                    <span className="small dim">also:</span>
+                    {hit.related.map((rel) => (
+                      <button key={`${hit.id}-${rel.id}`} type="button" className="btn xs ghost"
+                              title={`${rel.path} — ${rel.kind === 'narrower' ? 'inside this one' : rel.kind === 'broader' ? 'the branch above' : 'beside this one'}`}
+                              onClick={() => choose(rel.id)}>
+                        {rel.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {open && debounced.trim() && !loading && found && !found.results.length && (
+          <div className="small dim mt8">Nothing matches &ldquo;{debounced}&rdquo;. Try a plainer word — Etsy&rsquo;s categories are broad.</div>
+        )}
+      </div>
+
+      {value && (
+        <div className="card" style={{ padding: 12 }}>
+          {loadingDetail ? <Spinner /> : detail && (
+            <>
+              <div className="flex" style={{ alignItems: 'center' }}>
+                <div>
+                  <div><strong>{detail.name}</strong></div>
+                  <div className="small dim">{detail.path}</div>
+                </div>
+                <div className="spacer" />
+                <button type="button" className="btn xs ghost" onClick={() => { onPick(''); onAttributes({}); }}>Change</button>
+              </div>
+
+              {detail.note && <Banner kind="warn">{detail.note}</Banner>}
+
+              {detail.children.length > 0 && (
+                <div className="pill-row mt8">
+                  <span className="small dim">more specific:</span>
+                  {detail.children.map((c) => (
+                    <button key={c.id} type="button" className="btn xs ghost" onClick={() => choose(c.id)}>{c.name}</button>
+                  ))}
+                </div>
+              )}
+
+              {detail.required.length > 0 && (
+                <>
+                  <div className="section-title">Etsy requires these</div>
+                  {detail.required.map(propertyField)}
+                </>
+              )}
+
+              {detail.occasions.length > 0 && (
+                <>
+                  <div className="section-title">Occasion &amp; recipient</div>
+                  <div className="hint mb8">
+                    These are what put a listing into Etsy&rsquo;s gift guides and seasonal pages. They are optional,
+                    and they are the ones most often left blank.
+                  </div>
+                  {detail.occasions.map(propertyField)}
+                </>
+              )}
+
+              {detail.attributes.length > 0 && (
+                <>
+                  <div className="section-title">Other attributes</div>
+                  {detail.attributes.map(propertyField)}
+                </>
+              )}
+
+              {detail.propertyError && (
+                <div className="small dim mt8">
+                  Etsy returned no attributes for this category ({detail.propertyError}).
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </>
   );
 }

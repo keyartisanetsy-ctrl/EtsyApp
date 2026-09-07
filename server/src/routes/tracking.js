@@ -91,6 +91,30 @@ router.post('/sync', asyncRoute(async (req, res) => {
   }));
 }));
 
+/**
+ * Read the histories with the AI and say where the parcels really are.
+ * `apply: false` (the default) only reports; nothing is written.
+ */
+router.post('/ai-read', asyncRoute(async (req, res) => {
+  res.json(await tracking.readStatusesWithAi({
+    codes: list(req.body?.codes),
+    apply: bool(req.body?.apply),
+    minConfidence: req.body?.minConfidence != null ? Number(req.body.minConfidence) : 0.7,
+    provider: req.body?.provider,
+  }));
+}));
+
+/** Mark parcels delivered (or any other status) in one go, by hand. */
+router.post('/status', asyncRoute(async (req, res) => {
+  required(req.body ?? {}, ['status']);
+  const codes = list(req.body.codes) ?? [];
+  if (!codes.length) return res.status(400).json({ error: 'Pick the tracking numbers first.' });
+  const rows = codes.map((code) => tracking.setManualStatus(code, {
+    status: req.body.status, note: req.body.note ?? '',
+  }));
+  res.json({ updated: rows.length, rows });
+}));
+
 router.post('/refresh-alerts', asyncRoute(async (req, res) => {
   res.json({ recalculated: tracking.refreshStaleFlags() });
 }));

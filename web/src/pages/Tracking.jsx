@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import api from '../lib/api.js';
 import { TablePage } from '../components/Page.jsx';
 import {
-  Spinner, Empty, Banner, Checkbox, Pager, Drawer, CopyButton, Stat,
+  Spinner, Empty, Banner, Checkbox, Pager, Drawer, Modal, CopyButton, Stat,
   useAsync, useDebounced, useToast, useErrorToast, fmtDateTime, fmtAgo, TRACK_BADGE,
 } from '../components/ui.jsx';
 
@@ -24,6 +24,7 @@ export default function Tracking() {
   const [detail, setDetail] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [blocked, setBlocked] = useState(null);
+  const [aiOpen, setAiOpen] = useState(false);
 
   const toast = useToast();
   const showError = useErrorToast();
@@ -77,6 +78,20 @@ export default function Tracking() {
     return next;
   });
 
+  /** Set the same status on every selected parcel, by hand. */
+  const markSelected = async (newStatus) => {
+    const codes = [...selected];
+    if (!codes.length) return;
+    const label = statuses?.labels?.[newStatus] ?? newStatus;
+    if (!confirm(`Mark ${codes.length} parcel(s) as "${label}"?`)) return;
+    try {
+      const r = await api.post('/tracking/status', { codes, status: newStatus, note: `Set by hand to ${label}` });
+      toast({ kind: 'ok', title: `${r.updated} parcel(s) marked ${label}` });
+      setSelected(new Set());
+      refreshAll();
+    } catch (err) { showError(err, 'Could not set the status'); }
+  };
+
   return (
     <TablePage
       title="Tracking"
@@ -100,11 +115,27 @@ export default function Tracking() {
           </select>
           <Checkbox checked={alertsOnly} onChange={(v) => { setAlertsOnly(v); setOffset(0); }} label="Alerts only" />
           <div className="spacer" />
-          {selected.size > 0 && (
-            <button className="btn sm" onClick={() => sync([...selected])}>Sync {selected.size} selected</button>
-          )}
+          <span className="small muted">Tick the parcels you want to act on</span>
         </>
       }
+      selection={selected.size > 0 && (
+        <div className="selection-bar">
+          <span className="count">{selected.size} selected</span>
+          <button className="btn xs" disabled={syncing} onClick={() => sync([...selected])}>
+            {syncing ? <Spinner /> : 'Check these with the carrier'}
+          </button>
+          <button className="btn xs" onClick={() => markSelected('delivered')}>Mark delivered</button>
+          <select className="select sm" value="" onChange={(e) => e.target.value && markSelected(e.target.value)}>
+            <option value="">Set another status…</option>
+            {Object.entries(statuses?.labels ?? {})
+              .filter(([k]) => k !== 'delivered')
+              .map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+          <button className="btn xs" onClick={() => setAiOpen(true)}>Ask AI where they are</button>
+          <div className="spacer" />
+          <button className="btn xs ghost" onClick={() => setSelected(new Set())}>Clear selection</button>
+        </div>
+      )}
       pager={<Pager total={data?.total ?? 0} limit={LIMIT} offset={offset} onChange={setOffset} />}
     >
       <div style={{ padding: 16, paddingBottom: 0 }}>
@@ -141,7 +172,14 @@ export default function Tracking() {
           <table className="data">
             <thead>
               <tr>
-                <th className="col-tight" />
+                <th className="col-tight">
+                  <Checkbox
+                    checked={rows.length > 0 && rows.every((t) => selected.has(t.trackingCode))}
+                    indeterminate={selected.size > 0 && !rows.every((t) => selected.has(t.trackingCode))}
+                    onChange={() => setSelected(rows.every((t) => selected.has(t.trackingCode))
+                      ? new Set()
+                      : new Set(rows.map((t) => t.trackingCode)))} />
+                </th>
                 <th>Tracking</th>
                 <th>Order</th>
                 <th>Buyer</th>
@@ -199,6 +237,13 @@ export default function Tracking() {
           </table>
         )}
 
+      <AiStatusModal
+        open={aiOpen}
+        codes={[...selected]}
+        statuses={statuses}
+        onClose={() => setAiOpen(false)}
+        onApplied={() => { setAiOpen(false); setSelected(new Set()); refreshAll(); }}
+      />
       <ParcelDetail code={detail} onClose={() => setDetail(null)} onChanged={refreshAll} statuses={statuses} />
     </TablePage>
   );
@@ -259,6 +304,104 @@ function ShippingCostCell({ row, onSaved }) {
       <button className="btn xs primary" onClick={save} disabled={busy}>✓</button>
       <button className="btn xs ghost" onClick={() => setEditing(false)}>✕</button>
     </span>
+  );
+}
+
+/**
+ * Let the AI read the tracking histories and say where the parcels really are.
+ *
+ * It reports first and writes nothing. You see what it thinks, how sure it is
+ * and why, and then decide - because a parcel wrongly marked delivered stops
+ * being chased, and that is the mistake here that costs money.
+ */
+function AiStatusModal({ open, codes, statuses, onClose, onApplied }) {
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const showError = useErrorToast();
+
+  React.useEffect(() => { if (!open) setResult(null); }, [open]);
+
+  const readThem = async (apply) => {
+    setBusy(true);
+    try {
+      const r = await api.post('/tracking/ai-read', { codes, apply });
+      setResult(r);
+      if (apply) {
+        toast({
+          kind: 'ok',
+          title: `${r.applied} parcel(s) updated`,
+          body: r.applied < (r.parcels ?? []).filter((p) => p.changed).length
+            ? 'The rest were left alone because the AI was not sure enough.'
+            : undefined,
+        });
+        if (r.applied) onApplied();
+      }
+    } catch (err) { showError(err, 'Could not read the parcels'); }
+    finally { setBusy(false); }
+  };
+
+  if (!open) return null;
+  const changed = (result?.parcels ?? []).filter((p) => p.changed);
+
+  return (
+    <Modal open={open} onClose={onClose} lg
+           title={`Read ${codes.length} parcel${codes.length === 1 ? '' : 's'} with AI`}
+           footer={<>
+             <div className="spacer" />
+             {!result
+               ? <button className="btn primary" onClick={() => readThem(false)} disabled={busy || !codes.length}>
+                   {busy ? <Spinner /> : 'Read them'}
+                 </button>
+               : <button className="btn primary" onClick={() => readThem(true)} disabled={busy || !changed.length}>
+                   {busy ? <Spinner /> : `Apply ${changed.length} change${changed.length === 1 ? '' : 's'}`}
+                 </button>}
+           </>}>
+      {!result ? (
+        <p className="dim">
+          The AI reads each parcel&rsquo;s recent events — in whatever language the courier wrote them —
+          and says which have arrived, which are stuck at customs and which are simply still moving.
+          It reports first; nothing is written until you say so.
+        </p>
+      ) : (
+        <>
+          <Banner kind={changed.length ? 'info' : 'ok'}>
+            {changed.length
+              ? `${changed.length} parcel(s) look different from what the board says.`
+              : 'The board already matches what the histories say. Nothing to change.'}
+            {result.model ? ` Read by ${result.model}.` : ''}
+          </Banner>
+          <table className="data">
+            <thead><tr><th>Tracking</th><th>Board says</th><th>AI says</th><th>Sure</th><th>Why</th></tr></thead>
+            <tbody>
+              {(result.parcels ?? []).map((p) => (
+                <tr key={p.code}>
+                  <td className="mono small">{p.code}</td>
+                  <td className="small dim">{statuses?.labels?.[p.was] ?? p.was}</td>
+                  <td className="small">
+                    {p.changed
+                      ? <strong>{statuses?.labels?.[p.status] ?? p.status}</strong>
+                      : <span className="dim">no change</span>}
+                  </td>
+                  <td className="num small">
+                    <span className={`badge ${p.confidence >= 0.7 ? 'green' : 'amber'}`}>
+                      {Math.round((p.confidence ?? 0) * 100)}%
+                    </span>
+                  </td>
+                  <td className="small cell-wrap" style={{ maxWidth: 320 }}>
+                    {p.note}
+                    {p.heldBack && <div className="small dim">Left alone: {p.heldBack}.</div>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="small dim mt8">
+            Anything under {Math.round((result.minConfidence ?? 0.7) * 100)}% confidence is reported but not written.
+          </p>
+        </>
+      )}
+    </Modal>
   );
 }
 

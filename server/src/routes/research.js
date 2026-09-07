@@ -40,6 +40,22 @@ router.get('/taxonomy/buyer', asyncRoute(async (req, res) => {
   res.json(bool(req.query.flat) ? research.flattenTaxonomy(nodes) : nodes);
 }));
 
+/**
+ * Search the categories the way Etsy's own listing form does: the matches, plus
+ * the branch each one sits in and what is beside it.
+ */
+router.get('/taxonomy/search', asyncRoute(async (req, res) => {
+  res.json(await research.searchTaxonomy(req.query.q ?? req.query.query ?? '', {
+    limit: Number(req.query.limit) || 12,
+    related: Number(req.query.related) || 6,
+  }));
+}));
+
+/** One category in full: where it sits, what is under it, and every attribute. */
+router.get('/taxonomy/:id/detail', asyncRoute(async (req, res) => {
+  res.json(await research.taxonomyDetail(req.params.id));
+}));
+
 router.get('/taxonomy/:id/properties', asyncRoute(async (req, res) => {
   res.json(await research.taxonomyProperties(req.params.id));
 }));

@@ -12,6 +12,7 @@ import { createLogger } from '../../lib/logger.js';
 import { STATUS, STATUS_LABELS, TERMINAL } from './status.js';
 import * as yuntrack from './yuntrack.js';
 import * as yuntrackBrowser from './yuntrack-browser.js';
+import { run, parseJsonish } from '../ai/index.js';
 import * as seventeen from './seventeentrack.js';
 
 const log = createLogger('tracking');
@@ -28,28 +29,109 @@ const DAY_MS = 86_400_000;
  *   1234567890;LP00432300758472
  * Order id may be an Etsy receipt id or an order number the shop already holds.
  */
+/** An order id is a long run of digits; the order code is 26-0709-01. */
+const looksLikeOrderId = (t) => /^#?\d{6,}$/.test(String(t).trim());
+const looksLikeOrderCode = (t) => /^\d{2}-\d{4}-\d{1,3}$/.test(String(t).trim());
+const looksLikeTracking = (t) => /^[A-Za-z0-9-]{6,40}$/.test(String(t).trim()) && /[A-Za-z]/.test(String(t));
+
+/** Turn an order code (26-0709-01) back into the receipt it belongs to. */
+function receiptForCode(code) {
+  const row = getDb().prepare(
+    'SELECT receipt_id FROM order_codes WHERE shop_id IS ? AND code = ?',
+  ).get(activeShopId(), String(code).trim());
+  return row?.receipt_id ?? null;
+}
+
+/**
+ * Read a pasted block of tracking numbers.
+ *
+ * People paste from all sorts of places, so this is deliberately forgiving:
+ *
+ *   3799463891  YT2607600700845852            order id, then tracking
+ *   #3799463891, YT2607600700845852           with the hash and a comma
+ *   YT2607600700845852  3799463891            the other way round
+ *   26-0709-01  YT2607600700845852            your own order code
+ *   3799463891  YT26076007  Yun Express       with a carrier name that has a space in it
+ *
+ * Anything it cannot read comes back in `errors` with the line and the reason,
+ * rather than being dropped quietly - a tracking number that never arrives is
+ * worse than one that is refused loudly.
+ */
 export function parseTrackingInput(text) {
   const rows = [];
   const errors = [];
+  const seen = new Map();
   const lines = String(text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 
   for (const [i, line] of lines.entries()) {
-    if (/^(receipt|order)[\s_-]*(id|number)?\b/i.test(line)) continue; // header row
+    if (/^(receipt|order|sipari)[\s_-]*(id|no|number|kod)?\b/i.test(line)
+        && !/\d{6,}/.test(line)) continue; // header row
     const parts = line.split(/[,;\t]|\s{2,}| +/).map((p) => p.trim()).filter(Boolean);
-    if (parts.length < 2) { errors.push({ line: i + 1, text: line, reason: 'Need an order id and a tracking number' }); continue; }
+    if (parts.length < 2) {
+      errors.push({ line: i + 1, text: line, reason: 'Need an order (id or code) and a tracking number' });
+      continue;
+    }
 
-    const receiptId = Number(String(parts[0]).replace(/\D/g, ''));
-    const trackingCode = parts[1];
+    // Work out which column is which rather than insisting on an order.
+    let idPart = parts[0];
+    let codePart = parts[1];
+    let rest = parts.slice(2);
+    if (!looksLikeOrderId(idPart) && !looksLikeOrderCode(idPart)
+        && (looksLikeOrderId(codePart) || looksLikeOrderCode(codePart))) {
+      [idPart, codePart] = [codePart, idPart];
+    }
+
+    let receiptId = null;
+    if (looksLikeOrderCode(idPart)) {
+      receiptId = receiptForCode(idPart);
+      if (!receiptId) {
+        errors.push({ line: i + 1, text: line, reason: `No order here carries the code ${idPart}` });
+        continue;
+      }
+    } else {
+      receiptId = Number(String(idPart).replace(/\D/g, ''));
+    }
+
+    const trackingCode = String(codePart).trim();
     if (!receiptId) { errors.push({ line: i + 1, text: line, reason: 'Could not read an order id' }); continue; }
-    if (!/^[A-Za-z0-9-]{6,40}$/.test(trackingCode)) { errors.push({ line: i + 1, text: line, reason: `"${trackingCode}" does not look like a tracking number` }); continue; }
+    if (!/^[A-Za-z0-9-]{6,40}$/.test(trackingCode)) {
+      errors.push({ line: i + 1, text: line, reason: `"${trackingCode}" does not look like a tracking number` });
+      continue;
+    }
 
-    rows.push({ receiptId, trackingCode: trackingCode.toUpperCase(), carrierName: parts[2] || null });
+    const upper = trackingCode.toUpperCase();
+    if (seen.has(upper)) {
+      errors.push({ line: i + 1, text: line, reason: `${upper} is already on line ${seen.get(upper)} of this paste` });
+      continue;
+    }
+    seen.set(upper, i + 1);
+
+    rows.push({
+      receiptId,
+      trackingCode: upper,
+      // Whatever is left is the carrier, spaces and all.
+      carrierName: rest.length ? rest.join(' ') : null,
+    });
   }
   return { rows, errors };
 }
 
 /** Record tracking locally and (optionally) push it to Etsy, which also
  *  marks the receipt shipped and emails the buyer. */
+/**
+ * Which numbers can be assumed to be moving the moment they are added.
+ *
+ * A YunExpress code is only issued when the parcel is handed over, so treating
+ * it as "pre-shipped" until a scan arrives just hides real orders. The prefixes
+ * are a setting, since another courier may behave the same way.
+ */
+export function startsAsInTransit(code) {
+  const prefixes = (readSetting('tracking.in_transit_prefixes') || 'YT')
+    .split(',').map((p) => p.trim().toUpperCase()).filter(Boolean);
+  const upper = String(code || '').toUpperCase();
+  return prefixes.some((p) => upper.startsWith(p));
+}
+
 export async function addTracking(entries, { pushToEtsy = true, noteToBuyer = '', sendBcc = false, dryRun = false } = {}) {
   const db = getDb();
   const shopId = pushToEtsy ? requireShopId() : null;
@@ -69,11 +151,16 @@ export async function addTracking(entries, { pushToEtsy = true, noteToBuyer = ''
                   ON CONFLICT(receipt_id, tracking_code) DO UPDATE SET carrier_name = excluded.carrier_name`)
         .run(shopIdForEntry, entry.receiptId, entry.trackingCode, carrier, noteToBuyer || null, sendBcc ? 1 : 0);
 
+      // A YunExpress number (YT...) only exists once the parcel is with them,
+      // so it starts in transit rather than waiting for the first scan. Other
+      // carriers stay pre-shipped until something actually scans.
+      const startingStatus = startsAsInTransit(entry.trackingCode) ? STATUS.IN_TRANSIT : STATUS.PRE_SHIPPED;
       db.prepare(`INSERT INTO tracking (shop_id, tracking_code, receipt_id, carrier_name, provider, status)
-                  VALUES (?,?,?,?,?,'pre_shipped')
+                  VALUES (?,?,?,?,?,?)
                   ON CONFLICT(shop_id, tracking_code) DO UPDATE SET receipt_id = excluded.receipt_id,
                     carrier_name = COALESCE(excluded.carrier_name, tracking.carrier_name)`)
-        .run(shopIdForEntry, entry.trackingCode, entry.receiptId, carrier, readSetting('tracking.provider'));
+        .run(shopIdForEntry, entry.trackingCode, entry.receiptId, carrier,
+          readSetting('tracking.provider'), startingStatus);
 
       if (pushToEtsy) {
         const body = { tracking_code: entry.trackingCode };
@@ -422,4 +509,113 @@ export function trackingSummary() {
     byStatus: Object.fromEntries(byStatus.map((r) => [r.status, r.c])),
     labels: STATUS_LABELS,
   };
+}
+
+// --------------------------------------------------------- AI status reading
+
+const STATUS_SYSTEM = `You read parcel tracking histories and say where each parcel has got to.
+
+You get a list of parcels. Each has its tracking number, the status we currently hold,
+how many days since it last moved, and its recent events in the carrier's own words -
+which may be in English, Chinese, Turkish or anything else.
+
+Decide the true status of each from its events. Use exactly one of:
+pre_shipped, in_transit, out_for_delivery, pickup_waiting, delivered, exception, returned, expired, not_found
+
+Be careful with these, because they are the ones that get read wrong:
+- "delivered" needs an actual delivery or signature event. A parcel merely "out for delivery"
+  or "arrived at destination" has NOT been delivered.
+- A parcel sitting at a pickup point is pickup_waiting, not delivered.
+- Customs holds, failed attempts and address problems are exception.
+- A parcel with no movement for a long time and no delivery event is still in_transit;
+  say so in the note rather than inventing a delivery.
+
+Reply with JSON only, and only for parcels whose status should change:
+{"parcels":[{"code":"YT123","status":"delivered","confidence":0.0-1.0,"note":"why, in one short line"}]}`;
+
+/**
+ * Ask the AI to read the tracking histories and say which parcels have arrived.
+ *
+ * The pattern rules in status.js handle the ordinary wording. This is for the
+ * rest: a Chinese courier's phrasing, a carrier that says "handed to recipient"
+ * instead of "delivered", a history where the useful line is three events back.
+ *
+ * Nothing is written unless `apply` is set, and even then a low-confidence
+ * answer is left alone - a parcel wrongly marked delivered stops it being
+ * chased, which is the one mistake here that costs money.
+ */
+export async function readStatusesWithAi({ codes = [], apply = false, minConfidence = 0.7,
+  provider, runner = run } = {}) {
+  const db = getDb();
+  const shopId = activeShopId();
+  const list = (Array.isArray(codes) ? codes : [codes]).filter(Boolean);
+  if (!list.length) throw badRequest('Pick the tracking numbers to read first.');
+
+  const holes = list.map(() => '?').join(',');
+  const parcels = db.prepare(`
+    SELECT tracking_code, status, days_since_move, last_event_text, last_event_at
+    FROM tracking WHERE shop_id IS ? AND tracking_code IN (${holes})`).all(shopId, ...list);
+
+  if (!parcels.length) return { parcels: [], applied: 0, note: 'None of those tracking numbers are on the board.' };
+
+  const context = {
+    parcels: parcels.map((p) => ({
+      code: p.tracking_code,
+      currentStatus: p.status,
+      daysSinceMove: p.days_since_move,
+      events: db.prepare(`
+        SELECT event_at, description, location FROM tracking_events
+        WHERE shop_id IS ? AND tracking_code = ? ORDER BY event_at DESC LIMIT 12`)
+        .all(shopId, p.tracking_code)
+        .map((e) => `${e.event_at} ${e.description}${e.location ? ` (${e.location})` : ''}`),
+    })),
+  };
+
+  const result = await runner({
+    kind: 'custom', provider, promptOverride: STATUS_SYSTEM, context,
+    userInput: 'Read them now. JSON only.', maxTokens: 2000,
+  });
+
+  const parsed = parseJsonish(result.text);
+  if (!parsed) throw badRequest('The AI did not return a usable answer. Try again, or set the status by hand.');
+
+  const known = new Map(parcels.map((p) => [p.tracking_code.toUpperCase(), p]));
+  const valid = Object.values(STATUS);
+  const out = [];
+  let applied = 0;
+
+  for (const row of parsed.parcels ?? []) {
+    const code = String(row.code ?? '').trim().toUpperCase();
+    const parcel = known.get(code);
+    // A code the AI made up, or a status outside our vocabulary, is dropped
+    // rather than written.
+    if (!parcel || !valid.includes(row.status)) continue;
+
+    const confidence = Number(row.confidence);
+    const sure = Number.isFinite(confidence) ? confidence : 0;
+    const changed = row.status !== parcel.status;
+    const willApply = apply && changed && sure >= minConfidence;
+
+    if (willApply) {
+      setManualStatus(parcel.tracking_code, {
+        status: row.status,
+        note: `AI: ${String(row.note ?? '').slice(0, 200)}`,
+      });
+      applied += 1;
+    }
+
+    out.push({
+      code: parcel.tracking_code,
+      was: parcel.status,
+      status: row.status,
+      changed,
+      confidence: sure,
+      note: String(row.note ?? '').slice(0, 200),
+      applied: willApply,
+      heldBack: apply && changed && !willApply ? `confidence ${sure} is below ${minConfidence}` : null,
+    });
+  }
+
+  audit('tracking.ai_read', { detail: { asked: list.length, answered: out.length, applied } });
+  return { parcels: out, applied, provider: result.provider, model: result.model, minConfidence };
 }

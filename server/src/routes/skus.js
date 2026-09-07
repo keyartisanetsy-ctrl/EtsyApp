@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import * as skugen from '../services/skugen.js';
 import { asyncRoute, int, bool, num, required, ids } from '../lib/http.js';
 import * as inventory from '../services/inventory.js';
 import { syncVariationImages } from '../services/sync.js';
@@ -68,6 +69,21 @@ router.put('/meta/bulk', asyncRoute(async (req, res) => {
   required(req.body ?? {}, ['items']);
   const saved = req.body.items.map((item) => inventory.setSkuMeta(item.sku, item));
   res.json({ saved: saved.length, items: saved });
+}));
+
+// ------------------------------------------------------------ SKU generator
+
+/** Propose SKUs. Nothing is written until the plan is applied. */
+router.post('/generate/plan', asyncRoute(async (req, res) => {
+  const { listingIds = [], mode = 'rule', prefix, pattern, overwrite = false, startAt, provider } = req.body ?? {};
+  res.json(mode === 'ai'
+    ? await skugen.planByAi({ listingIds, provider })
+    : skugen.planByRule({ listingIds, prefix, pattern, overwrite, startAt: Number(startAt) || null }));
+}));
+
+/** Write an approved plan into the local mirror. */
+router.post('/generate/apply', asyncRoute(async (req, res) => {
+  res.json(skugen.applyPlan(req.body?.plan ?? {}));
 }));
 
 export default router;
