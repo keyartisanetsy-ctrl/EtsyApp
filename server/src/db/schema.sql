@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS etsy_accounts (
   shop_name      TEXT,
   user_id        INTEGER,
   label          TEXT DEFAULT '',                      -- optional nickname
+  -- What this shop is called in your Airtable sheets. Etsy's own shop name and
+  -- the option in an Airtable select column are often spelled differently, so
+  -- the mapping writes this instead of guessing.
+  airtable_name  TEXT DEFAULT '',
   access_token   TEXT NOT NULL,                        -- sealed
   refresh_token  TEXT NOT NULL,                        -- sealed
   scopes         TEXT NOT NULL DEFAULT '',

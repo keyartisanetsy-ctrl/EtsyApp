@@ -6,6 +6,7 @@ import { SOURCE_FIELDS } from '../airtable/fields.js';
 import { readSetting, writeSetting } from '../services/settings.js';
 import { maskSecret } from '../lib/crypto.js';
 import { currentShop } from '../etsy/shop.js';
+import { listAccounts, setAirtableName } from '../etsy/client.js';
 import * as fx from '../services/fx.js';
 import * as variantImages from '../services/variantimages.js';
 
@@ -88,6 +89,38 @@ router.post('/synced', asyncRoute(async (req, res) => {
 }));
 
 router.get('/runs', asyncRoute(async (req, res) => res.json(service.listRuns(Number(req.query.limit) || 20))));
+
+// ------------------------------------------------------------- shop names
+
+/**
+ * What each connected shop is called in Airtable. This is what a shop /
+ * MAĞAZA column gets filled with, and it is what decides which per-shop view
+ * a row shows up in, so it is worth setting explicitly.
+ */
+router.get('/shop-names', asyncRoute(async (req, res) => {
+  res.json(listAccounts().map((a) => ({
+    shopId: a.shopId,
+    shopName: a.shopName,
+    airtableName: a.airtableName || a.shopName || '',
+    isCustom: !!a.airtableName,
+    isActive: a.isActive,
+  })));
+}));
+
+router.put('/shop-names/:shopId', asyncRoute(async (req, res) => {
+  setAirtableName(Number(req.params.shopId), req.body?.name ?? '');
+  res.json(listAccounts().map((a) => ({
+    shopId: a.shopId, shopName: a.shopName, airtableName: a.airtableName || a.shopName || '', isActive: a.isActive,
+  })));
+}));
+
+/** The options an Airtable select column already offers, to pick a name from. */
+router.get('/bases/:baseId/tables/:tableId/choices', asyncRoute(async (req, res) => {
+  const table = await client.getTable(req.params.baseId, req.params.tableId);
+  res.json(table.fields
+    .filter((f) => f.choices?.length)
+    .map((f) => ({ name: f.name, type: f.type, choices: f.choices })));
+}));
 
 // ----------------------------------------------------------- exchange rates
 

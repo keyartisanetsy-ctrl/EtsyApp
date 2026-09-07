@@ -196,12 +196,15 @@ const SYNONYMS = {
   'variant image': 'item.variant_image_url',
   'variant image url': 'item.variant_image_url',
 
-  magaza: 'shop.name',
-  shop: 'shop.name',
-  store: 'shop.name',
-  'shop name': 'shop.name',
-  'etsy magaza': 'shop.name',
-  channel: 'shop.name',
+  // A shop column decides which per-shop view a row shows up in, so it is fed
+  // by the name the sheet uses rather than Etsy's own spelling.
+  magaza: 'shop.airtable_name',
+  shop: 'shop.airtable_name',
+  store: 'shop.airtable_name',
+  'shop name': 'shop.airtable_name',
+  'etsy magaza': 'shop.airtable_name',
+  'magaza adi': 'shop.airtable_name',
+  channel: 'shop.airtable_name',
 
   // "NOT 1" is what the buyer wrote; "NOT 2" is your own note.
   'not 1': 'order.buyer_message',

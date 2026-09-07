@@ -140,6 +140,29 @@ Change the shape in Settings with `orders.code_template` — `{YY} {YYYY} {DD} {
 `2026 Eylül` — the month the order arrived, in the same shape these sheets already use.
 `Month of the order (September 2026)` is there if you want English instead.
 
+### Which shop a row came from
+
+A shop column (`MAĞAZA`, `Shop`, `Store`, `CHANNEL`…) is what tells the sheet where an order
+came from, and it is what your per-shop views filter on. Two fields feed it:
+
+| Field | Gives |
+|---|---|
+| **Shop name as written in Airtable** | the wording you chose for that shop — what a shop column should use |
+| Shop name exactly as Etsy has it | Etsy's own spelling, which is often different |
+
+Set the wording once per shop under **Airtable sync → Shop names in Airtable**. Etsy might
+call a shop `KeyArtisan` while the sheet files it as `KeyArtisann`; this is where those are
+reconciled, and the box suggests the options your shop column already has so a typo cannot
+add a stray one.
+
+Because the value follows the shop you are in, **one destination can serve all three shops**:
+map the shop column to *Shop name as written in Airtable*, tick *available to every connected
+shop*, and each order files itself under the right name — `KeyArtisann`, `KeyArtisanUS` or
+`CutieGiftsUS` — landing in that shop's view.
+
+If you would rather keep a separate destination per shop, the alternative still works: set the
+shop column to a **fixed value** on each one. That box suggests the column's existing options too.
+
 ### Exchange rates and USD totals
 
 The app keeps the last ~3 months of daily rates from the European Central Bank and values

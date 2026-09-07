@@ -255,10 +255,15 @@ export const SOURCE_FIELDS = [
       : null) },
 
   // ----------------------------------------------------------------- shop
-  { key: 'shop.name', group: 'Shop', label: 'Shop name', hint: 'Which Etsy shop the order belongs to, e.g. KeyArtisanUS',
-    get: ({ shop }) => clean(shop?.shop_name) },
+  { key: 'shop.airtable_name', group: 'Shop', label: 'Shop name as written in Airtable',
+    hint: 'The name this shop goes by in your sheets (KeyArtisann, KeyArtisanUS, CutieGiftsUS). '
+      + 'This is what a shop/MAĞAZA column should be filled with, since it decides which view the row lands in.',
+    get: ({ shop }) => clean(shop?.airtableName || shop?.shopName) },
+  { key: 'shop.name', group: 'Shop', label: 'Shop name exactly as Etsy has it',
+    hint: 'The shop name Etsy returns, which may be spelled differently from your Airtable option',
+    get: ({ shop }) => clean(shop?.shopName) },
   { key: 'shop.id', group: 'Shop', label: 'Shop id', hint: 'Numeric Etsy shop id',
-    get: ({ shop }) => (shop?.shop_id ?? null) },
+    get: ({ shop }) => (shop?.shopId ?? null) },
 
   // ------------------------------------------------------- your own flags
   { key: 'flags.done', group: 'Your flags', label: 'Marked done?', hint: 'true/false, your own done tick in this app',

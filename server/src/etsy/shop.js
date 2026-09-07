@@ -19,11 +19,14 @@ export function activeShopId() {
 export function currentShop() {
   const token = getStoredToken();
   if (!token) return null;
+  const account = listAccounts().find((a) => a.shopId === token.shop_id);
   return {
     shopId: token.shop_id,
     shopName: token.shop_name,
     userId: token.user_id,
     label: token.label || '',
+    // What to write into an Airtable shop column; falls back to Etsy's name.
+    airtableName: account?.airtableName || token.shop_name || '',
     scopes: token.scopes,
   };
 }

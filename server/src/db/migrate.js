@@ -77,6 +77,9 @@ export function migrateSchema(db) {
   // can each have their own default.
   addColumn(db, 'airtable_destinations', 'channel', "TEXT NOT NULL DEFAULT 'etsy'");
 
+  // What each shop is called over in Airtable.
+  addColumn(db, 'etsy_accounts', 'airtable_name', "TEXT DEFAULT ''");
+
   if (active) {
     for (const table of ['shop_sections', 'bulk_jobs', 'research_runs']) {
       if (!hasTable(db, table) || !columns(db, table).includes('shop_id')) continue;

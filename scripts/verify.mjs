@@ -506,7 +506,8 @@ await check('name matching handles Turkish column names and skips computed ones'
   assert(got['Order ID'] === 'order.id', `Order ID -> ${got['Order ID']}`);
   assert(got['Sale Date'] === 'order.date', `Sale Date -> ${got['Sale Date']}`);
   assert(got['Takip No'] === 'tracking.code', `Takip No -> ${got['Takip No']}`);
-  assert(got['MAĞAZA'] === 'shop.name', `MAĞAZA -> ${got['MAĞAZA']}`);
+  // A shop column is fed by the name the sheet uses, not Etsy's own spelling.
+  assert(got['MAĞAZA'] === 'shop.airtable_name', `MAĞAZA -> ${got['MAĞAZA']}`);
   assert(got['Ship Zipcode'] === 'address.zip', `Ship Zipcode -> ${got['Ship Zipcode']}`);
   assert(got['BAŞLIK İLK 40'] === 'item.title40', `BAŞLIK İLK 40 -> ${got['BAŞLIK İLK 40']}`);
   assert(!('Profit' in got), 'a computed column was mapped');
@@ -759,6 +760,55 @@ await check('the matcher sends the order number without a #, and knows the new c
   assert(got['Shipping Cost Yuan'] === 'tracking.shipping_cost', 'the shipping cost column was not recognised');
   assert(got['Varyant Görsel'] === 'item.variant_image_url', 'the variant image column was not recognised');
   assert(got['Image URL'] === 'item.image_any', 'Image URL should take the best available photo');
+});
+
+await check('each shop writes its own name into the shop column', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const { matchByName } = await import('../server/src/airtable/mapping.js');
+  const { loadRows, resolveSource } = await import('../server/src/airtable/fields.js');
+  await initDb();
+  const db = getDb();
+
+  // A shop column must be fed by the Airtable name, not Etsy's spelling,
+  // because that column is what the per-shop views filter on.
+  const { map } = matchByName([{ name: 'MAĞAZA', type: 'singleSelect', writable: true }]);
+  assert(map[0]?.source === 'shop.airtable_name', `MAĞAZA -> ${map[0]?.source}`);
+
+  for (const id of [950001, 950002]) db.prepare('DELETE FROM etsy_accounts WHERE shop_id = ?').run(id);
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (950001,'KeyArtisan','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (950002,'CutieGifts','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+
+  for (const [id, receipt] of [[950001, 950100], [950002, 950200]]) {
+    db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, created_ts, grandtotal_amount, grandtotal_divisor, grandtotal_currency)
+                VALUES (?,?,?,1000,100,'USD')`).run(receipt, id, Math.floor(Date.now() / 1000));
+  }
+
+  // Etsy's spelling differs from the sheet's; the sheet's wins.
+  client.setActiveAccount(950001);
+  client.setAirtableName(950001, 'KeyArtisann');
+  let [row] = loadRows([950100], { rowMode: 'order' });
+  assert(resolveSource('shop.airtable_name', row) === 'KeyArtisann',
+    `shop A should file as KeyArtisann, got ${resolveSource('shop.airtable_name', row)}`);
+  assert(resolveSource('shop.name', row) === 'KeyArtisan', 'the Etsy spelling should still be available');
+
+  // Switching shop switches the value the same mapping writes.
+  client.setActiveAccount(950002);
+  client.setAirtableName(950002, 'CutieGiftsUS');
+  [row] = loadRows([950200], { rowMode: 'order' });
+  assert(resolveSource('shop.airtable_name', row) === 'CutieGiftsUS',
+    `shop B should file as CutieGiftsUS, got ${resolveSource('shop.airtable_name', row)}`);
+
+  // With no name set it falls back to Etsy's, rather than writing nothing.
+  client.setAirtableName(950002, '');
+  [row] = loadRows([950200], { rowMode: 'order' });
+  assert(resolveSource('shop.airtable_name', row) === 'CutieGifts', 'should fall back to the Etsy shop name');
+
+  db.prepare('DELETE FROM receipts WHERE receipt_id IN (950100,950200)').run();
+  client.removeAccount(950001);
+  client.removeAccount(950002);
 });
 
 await check('Airtable is disclosed as a destination and needs a token', async () => {

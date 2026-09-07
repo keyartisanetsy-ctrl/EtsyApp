@@ -156,6 +156,8 @@ export default function Airtable() {
         </div>
       </section>
 
+      <ShopNames destinations={status.data?.destinations ?? []} />
+
       <RatesPanel />
 
       <RunHistory />
@@ -397,12 +399,22 @@ function DestinationEditor({ destination, sources, onClose, onSaved }) {
                             ))}
                           </select>
                           {constant && (
-                            <input
-                              className="input mt8"
-                              placeholder={f.choices?.length ? `e.g. ${f.choices[0]}` : 'value to write every time'}
-                              value={constants[f.name] ?? ''}
-                              onChange={(e) => setConstants((c) => ({ ...c, [f.name]: e.target.value }))}
-                            />
+                            <>
+                              {/* Suggest the options the column already has, so a
+                                  typo does not add yet another stray option. */}
+                              <input
+                                className="input mt8"
+                                list={f.choices?.length ? `choices-${f.id}` : undefined}
+                                placeholder={f.choices?.length ? `e.g. ${f.choices[0]}` : 'value to write every time'}
+                                value={constants[f.name] ?? ''}
+                                onChange={(e) => setConstants((c) => ({ ...c, [f.name]: e.target.value }))}
+                              />
+                              {f.choices?.length > 0 && (
+                                <datalist id={`choices-${f.id}`}>
+                                  {f.choices.slice(0, 60).map((c) => <option key={c} value={c} />)}
+                                </datalist>
+                              )}
+                            </>
                           )}
                         </>
                       ) : <span className="small">Airtable calculates this column</span>}
@@ -453,6 +465,114 @@ function DestinationEditor({ destination, sources, onClose, onSaved }) {
         </>
       )}
     </Drawer>
+  );
+}
+
+/* ----------------------------------------------------------- shop names */
+
+/**
+ * What each connected shop is called over in Airtable.
+ *
+ * Etsy's own shop name and the option in an Airtable select column are often
+ * spelled differently, and that column is what decides which per-shop view a
+ * row lands in — so it is set here once per shop rather than guessed. A single
+ * destination shared by every shop then files each order under the right name
+ * automatically.
+ */
+function ShopNames({ destinations = [] }) {
+  const toast = useToast();
+  const showError = useErrorToast();
+  const shops = useAsync(() => api.get('/airtable/shop-names'), []);
+  const [draft, setDraft] = useState({});
+  const [choices, setChoices] = useState([]);
+
+  // Offer the options the shop column already has, so a typo cannot create a
+  // stray new option in Airtable.
+  const source = destinations.find((d) => d.channel === 'etsy') ?? destinations[0];
+  useEffect(() => {
+    if (!source) return;
+    api.get(`/airtable/bases/${source.baseId}/tables/${source.tableId}/choices`)
+      .then((cols) => {
+        const shopish = cols.find((c) => /mağaza|magaza|shop|store|channel/i.test(c.name));
+        setChoices(shopish?.choices ?? []);
+      })
+      .catch(() => setChoices([]));
+  }, [source?.baseId, source?.tableId]);
+
+  // Put the plausible shop names first: options that look like one of the
+  // connected shops, then short ones, ahead of the long strings that pile up
+  // in a select column over time.
+  const suggestions = useMemo(() => {
+    const names = (shops.data ?? []).map((s) => (s.shopName || '').toLowerCase());
+    const looksLikeShop = (c) => names.some((n) => n && (c.toLowerCase().includes(n.slice(0, 6)) || n.includes(c.toLowerCase())));
+    return [...choices].sort((a, b) => {
+      const rank = (c) => (looksLikeShop(c) ? 0 : 1) * 100 + Math.min(c.length, 60);
+      return rank(a) - rank(b);
+    }).slice(0, 40);
+  }, [choices, shops.data]);
+
+  const save = async (shopId, name) => {
+    try {
+      await api.put(`/airtable/shop-names/${shopId}`, { name });
+      toast({ kind: 'ok', title: 'Saved', body: `Rows from this shop will say "${name}".` });
+      shops.reload();
+    } catch (err) { showError(err, 'Could not save the name'); }
+  };
+
+  if (!shops.data?.length) return null;
+
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h3>Shop names in Airtable</h3>
+      </div>
+      <p className="small muted">
+        A shop column (MAĞAZA, Shop, Store…) is what tells your sheet which shop a row came from, and it is what
+        the per-shop views filter on. Set the exact wording each shop should be filed under — it does not have to
+        match Etsy's spelling. Map that column to <strong>Shop name as written in Airtable</strong> and one
+        destination can serve every shop.
+      </p>
+
+      <table className="data">
+        <thead>
+          <tr><th>Shop on Etsy</th><th>Filed in Airtable as</th><th className="col-tight" /></tr>
+        </thead>
+        <tbody>
+          {shops.data.map((s) => {
+            const value = draft[s.shopId] ?? s.airtableName;
+            const dirty = value !== s.airtableName;
+            return (
+              <tr key={s.shopId}>
+                <td>
+                  {s.shopName}
+                  {s.isActive && <span className="badge" style={{ marginLeft: 6 }}>active</span>}
+                </td>
+                <td>
+                  {/* A shop column can carry a lot of accumulated options, so
+                      this suggests rather than forcing a choice from a long list. */}
+                  <input
+                    className="input"
+                    list={`shop-choices-${s.shopId}`}
+                    value={value}
+                    placeholder={s.shopName}
+                    onChange={(e) => setDraft((d) => ({ ...d, [s.shopId]: e.target.value }))}
+                  />
+                  <datalist id={`shop-choices-${s.shopId}`}>
+                    {suggestions.map((c) => <option key={c} value={c} />)}
+                  </datalist>
+                  {value && choices.length > 0 && !choices.includes(value) && (
+                    <div className="hint">Not an option in Airtable yet — it will be created on the first send.</div>
+                  )}
+                </td>
+                <td>
+                  <button className="btn sm" disabled={!dirty} onClick={() => save(s.shopId, value)}>Save</button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </section>
   );
 }
 

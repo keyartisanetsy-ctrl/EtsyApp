@@ -453,7 +453,8 @@ export async function proposeMapping({ baseId, tableId, mode = 'name', provider,
   const shop = currentShop();
 
   const result = mode === 'ai'
-    ? await matchByAi({ table: table.name, fields: table.fields, provider, shopName: shop?.shop_name, rowMode })
+    ? await matchByAi({ table: table.name, fields: table.fields, provider,
+      shopName: shop?.airtableName || shop?.shopName, rowMode })
     : matchByName(table.fields);
 
   const mergeFields = result.mergeFields?.length ? result.mergeFields : suggestMergeFields(result.map, table.fields);

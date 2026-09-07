@@ -112,6 +112,7 @@ export function listAccounts() {
     shopName: r.shop_name,
     userId: r.user_id,
     label: r.label || '',
+    airtableName: r.airtable_name || '',
     scopes: (r.scopes || '').split(' ').filter(Boolean),
     expiresAt: r.expires_at,
     connectedAt: r.connected_at,
@@ -128,6 +129,18 @@ export function setActiveAccount(shopId) {
     db.prepare('UPDATE etsy_accounts SET is_active = 1 WHERE id = ?').run(row.id);
   })();
   log.info(`active shop is now ${shopId}`);
+  return listAccounts();
+}
+
+/**
+ * The name this shop goes by in Airtable. Etsy's shop name and the option in
+ * an Airtable select column are often spelled differently ("KeyArtisan" vs
+ * "KeyArtisann"), and that column is what decides which view a row lands in,
+ * so it is worth being explicit rather than guessing.
+ */
+export function setAirtableName(shopId, name) {
+  getDb().prepare("UPDATE etsy_accounts SET airtable_name = ?, updated_at = datetime('now') WHERE shop_id = ?")
+    .run(String(name ?? '').slice(0, 120), shopId);
   return listAccounts();
 }
 
