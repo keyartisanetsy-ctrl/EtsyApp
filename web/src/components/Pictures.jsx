@@ -115,12 +115,99 @@ export default function Pictures({ listingId, valueIds = [], productId = null, c
         </Empty>
       )}
 
-      {!data.hasVariantImages && data.images?.length > 0 && (
-        <Banner kind="info">
-          This listing has no per-option photos on Etsy, so a sheet gets the cover shot. Add them on Etsy
-          if you want each option to carry its own picture.
-        </Banner>
-      )}
+      {!compact && <PinVariantImages listingId={listingId} onChanged={reload} />}
+    </>
+  );
+}
+
+/**
+ * Choosing which photo goes with which option, from here instead of Etsy.
+ *
+ * Etsy replaces the entire set on every save and allows photos on one property
+ * only. Both of those are handled on the server - it reads what Etsy has,
+ * merges your change in, and sends the lot back - but they are worth saying on
+ * screen too, because "I changed one and the rest vanished" is the kind of
+ * surprise that costs an afternoon.
+ */
+function PinVariantImages({ listingId, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const showError = useErrorToast();
+
+  const { data, loading, reload } = useAsync(
+    () => (listingId ? api.get(`/listings/${listingId}/variant-images`) : null),
+    [listingId], { immediate: !!listingId },
+  );
+
+  if (loading && !data) return null;
+  if (!data?.options?.length) return null;
+
+  const pin = async (option, imageId) => {
+    setBusy(true);
+    try {
+      const r = await api.post(`/listings/${listingId}/variant-images`, {
+        changes: [{ propertyId: option.propertyId, valueId: option.valueId, imageId }],
+      });
+      toast({
+        kind: 'ok',
+        title: imageId ? `Photo pinned to "${option.value}"` : `Photo unpinned from "${option.value}"`,
+        body: r.note ?? `${r.pinned} option(s) now carry a photo on Etsy.`,
+        duration: r.note ? 9000 : undefined,
+      });
+      reload(); onChanged?.();
+    } catch (err) { showError(err, 'Etsy would not take that'); } finally { setBusy(false); }
+  };
+
+  return (
+    <>
+      <div className="section-title">Which photo for which option</div>
+      <div className="hint mb8">
+        Buyers see the matching photo when they pick an option. Etsy keeps these on one option type only, and
+        each save replaces the whole set — this app reads what Etsy has and merges your change in, so changing
+        one never clears the others.
+      </div>
+      {data.note && <Banner kind="warn">{data.note}</Banner>}
+
+      <table className="data">
+        <thead><tr><th>Option</th><th>Photo</th><th>Pick one</th></tr></thead>
+        <tbody>
+          {data.options.map((o) => (
+            <tr key={`${o.propertyId}-${o.valueId}`}>
+              <td className="small">
+                {o.value}
+                {o.propertyName && <div className="small dim">{o.propertyName}</div>}
+              </td>
+              <td>
+                {o.imageUrl
+                  ? <img src={o.imageUrl} alt={o.value} className="pic-thumb" />
+                  : <span className="muted small">none</span>}
+              </td>
+              <td>
+                <div className="flex gap4" style={{ flexWrap: 'wrap' }}>
+                  {data.images.map((img, n) => (
+                    <button
+                      key={img.imageId}
+                      type="button"
+                      className="pin-choice"
+                      disabled={busy}
+                      title={`Use photo #${n + 1} for "${o.value}"`}
+                      onClick={() => pin(o, img.imageId)}
+                      style={img.imageId === o.imageId
+                        ? { outline: '2px solid var(--brand)', outlineOffset: 1 }
+                        : undefined}
+                    >
+                      <img src={img.thumb || img.url} alt={`photo ${n + 1}`} />
+                    </button>
+                  ))}
+                  {o.imageId && (
+                    <button className="btn xs ghost" disabled={busy} onClick={() => pin(o, null)}>clear</button>
+                  )}
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </>
   );
 }

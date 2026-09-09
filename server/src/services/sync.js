@@ -510,6 +510,8 @@ export async function enrichReceiptContacts({ limit = 60, receiptIds = null } = 
 
   const found = [];
   const missing = [];
+  // Orders where Etsy answered but simply had no address to give.
+  let withheldByEtsy = 0;
 
   for (const { receipt_id: receiptId } of rows) {
     try {
@@ -542,6 +544,26 @@ export async function enrichReceiptContacts({ limit = 60, receiptIds = null } = 
         }
       } catch { /* the payment record is optional */ }
 
+      // Last source: the buyer's own user record. Etsy's User schema carries
+      // primary_email, but its own note says access "is granted on a case by
+      // case basis for third-party integrations that require full access" - so
+      // this often comes back without one, and that is not a fault to report.
+      const buyerId = r?.buyer_user_id
+        ?? db.prepare('SELECT buyer_user_id FROM receipts WHERE receipt_id = ?').get(receiptId)?.buyer_user_id;
+      if (buyerId) {
+        try {
+          const user = await call('getUser', { user_id: Number(buyerId) });
+          const userEmail = user?.primary_email || null;
+          if (userEmail) {
+            db.prepare("UPDATE receipts SET buyer_email = COALESCE(buyer_email, ?), synced_at = datetime('now') WHERE receipt_id = ? AND shop_id IS ?")
+              .run(userEmail, receiptId, shopId);
+            found.push({ receiptId, email: userEmail, source: 'buyer profile' });
+            continue;
+          }
+          withheldByEtsy += 1;
+        } catch { /* no access to the profile, which is the common case */ }
+      }
+
       missing.push(receiptId);
     } catch (err) {
       log.warn(`receipt ${receiptId}: ${err.message}`);
@@ -556,8 +578,13 @@ export async function enrichReceiptContacts({ limit = 60, receiptIds = null } = 
     stillMissing: missing.length,
     receipts: found,
     missingIds: missing,
+    // Three sources were tried: the receipt on its own, the payment record, and
+    // the buyer's profile. Saying so matters, because the honest answer for the
+    // rest is that Etsy has it and will not hand it over.
+    triedSources: ['receipt', 'payment record', 'buyer profile'],
+    withheldByEtsy,
     note: missing.length
-      ? 'Etsy returned no email for these orders. It withholds the address on some sales; there is nowhere else to read it from.'
+      ? 'Etsy returned no email for these orders. Its buyer profile carries one, but Etsy grants access to that field only to apps it has approved for full access, so there is nowhere else to read it from.'
       : null,
   };
 }

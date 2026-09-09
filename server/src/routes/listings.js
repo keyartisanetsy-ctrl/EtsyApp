@@ -155,6 +155,27 @@ router.get('/pictures/by-url', asyncRoute(async (req, res) => {
   res.json(images.resolveFromUrl(req.query.url));
 }));
 
+/**
+ * Which options can carry a photo, and which one each currently has.
+ * Everything a "pick the picture for each option" screen needs, in one call.
+ */
+router.get('/:id/variant-images', asyncRoute(async (req, res) => {
+  res.json(images.pinnableOptions(Number(req.params.id)));
+}));
+
+/**
+ * Pin photos to options.
+ *
+ * Etsy replaces the whole set on every call and allows one property only, so
+ * this reads what it has, merges the change in, and sends the lot back. Send
+ * imageId null to unpin one.
+ */
+router.post('/:id/variant-images', asyncRoute(async (req, res) => {
+  res.json(await images.pinVariantImages(Number(req.params.id), req.body?.changes ?? [], {
+    replace: !!req.body?.replace,
+  }));
+}));
+
 /** Ask Etsy again which photo belongs to which option. */
 router.post('/:id/pictures/refresh', asyncRoute(async (req, res) => {
   res.json(await images.refreshVariationImages(Number(req.params.id)));

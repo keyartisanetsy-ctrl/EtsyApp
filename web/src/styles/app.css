@@ -456,3 +456,9 @@ table.data td.subtotal-cell { color: var(--text-dim); font-variant-numeric: tabu
 .pic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
 .pic-cell { text-align: center; }
 .pic-cell img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+
+/* Picking the photo for an option: a row of thumbnails you click. */
+.pin-choice { padding: 0; border: 1px solid var(--border); border-radius: 5px; background: none; cursor: pointer; line-height: 0; }
+.pin-choice:hover { border-color: var(--brand); }
+.pin-choice img { width: 34px; height: 34px; object-fit: cover; border-radius: 4px; }
+.pin-choice:disabled { opacity: .5; cursor: default; }

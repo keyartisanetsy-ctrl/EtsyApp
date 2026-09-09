@@ -1915,6 +1915,109 @@ await check('the pairing key is not readable without it', async () => {
   assert(/key/i.test(refused.body.error), 'the refusal does not say why');
 });
 
+console.log('\nEtsy image, video and user endpoints');
+await check('pinning one variant photo does not wipe the others', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const pics = await import('../server/src/services/productimages.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960108').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960108,'Pin Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960108);
+
+  try {
+    // Etsy's own words: "The update overwrites all existing variation images on
+    // a listing". Sending only the pair that changed would unpin every other
+    // variant, so the service reads, merges and sends the whole set.
+    const onEtsy = [
+      { property_id: 200, value_id: 1, image_id: 9001 },
+      { property_id: 200, value_id: 2, image_id: 9002 },
+      { property_id: 200, value_id: 3, image_id: 9003 },
+    ];
+    let sent = null;
+    const caller = async (op, params, opts) => {
+      if (op === 'getListingVariationImages') return { results: onEtsy };
+      if (op === 'updateVariationImages') { sent = opts.body.variation_images; return { results: sent }; }
+      return {};
+    };
+
+    const r = await pics.pinVariantImages(4447531240, [{ propertyId: 200, valueId: 2, imageId: 9999 }], { caller });
+    assert(sent.length === 3, `sent ${sent.length} pairs; the other two would have been wiped`);
+    assert(sent.find((x) => x.value_id === 1).image_id === 9001, 'an untouched variant lost its photo');
+    assert(sent.find((x) => x.value_id === 2).image_id === 9999, 'the change was not applied');
+    assert(r.hadBefore === 3, 'it did not report what Etsy held before');
+
+    // Unpinning removes exactly one.
+    sent = null;
+    await pics.pinVariantImages(4447531240, [{ propertyId: 200, valueId: 3, imageId: null }], { caller });
+    assert(sent.length === 2 && !sent.some((x) => x.value_id === 3), `unpin left ${JSON.stringify(sent)}`);
+
+    // Etsy: "does not contain more than one property_id". Switching property
+    // drops the old pairs, and that is reported rather than done quietly.
+    sent = null;
+    const cross = await pics.pinVariantImages(4447531240, [{ propertyId: 501, valueId: 77, imageId: 9004 }], { caller });
+    assert(sent.length === 1 && sent[0].property_id === 501, `two properties were sent: ${JSON.stringify(sent)}`);
+    assert(cross.droppedForProperty === 3, 'the dropped pairings were not counted');
+    assert(/one property only/i.test(cross.note ?? ''), 'the user was not told why they went');
+
+    // Clearing everything has to be deliberate.
+    let refused = false;
+    try { await pics.pinVariantImages(4447531240, [{ propertyId: 200, valueId: 1, imageId: null }], { caller }); }
+    catch { refused = true; }
+    assert(refused || sent.length, 'emptying the whole set slipped through without asking');
+  } finally {
+    client.removeAccount(960108);
+  }
+});
+
+await check('a draft is checked against what Etsy actually requires', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960109').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960109,'Draft Rules','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960109);
+
+  try {
+    // Etsy's createDraftListing requires quantity; the preview used to let a
+    // draft with none through, and Etsy refused it instead of this app.
+    const base = {
+      title: 'Keycap Set', description: 'A set.', price: 39.99,
+      taxonomy_id: 1000, who_made: 'i_did', when_made: 'made_to_order',
+      shipping_profile_id: 5, quantity: 0,
+    };
+    const noStock = drafts.createLocal(base);
+    const p1 = drafts.preview(noStock.listingId);
+    assert(p1.problems.some((x) => /quantity/i.test(x)), `a draft with no stock passed: ${p1.problems.join('; ')}`);
+
+    // Etsy allows %, :, & and + once each in a title.
+    const badTitle = drafts.createLocal({ ...base, quantity: 5, title: 'Keycaps & Mats & More' });
+    const p2 = drafts.preview(badTitle.listingId);
+    assert(p2.problems.some((x) => x.includes('"&"')), `the repeated & was not caught: ${p2.problems.join('; ')}`);
+
+    // With everything Etsy asks for, it is ready.
+    const good = drafts.createLocal({ ...base, quantity: 5 });
+    const p3 = drafts.preview(good.listingId);
+    assert(p3.ready, `should be ready: ${p3.problems.join('; ')}`);
+
+    assert(drafts.REQUIRED.includes('quantity'), 'quantity is missing from the required list');
+    // The units Etsy accepts, so the app cannot offer one it will reject.
+    assert(drafts.WEIGHT_UNITS.join(',') === 'oz,lb,g,kg', `weight units: ${drafts.WEIGHT_UNITS}`);
+    assert(drafts.DIMENSION_UNITS.includes('cm') && drafts.DIMENSION_UNITS.includes('in'), 'dimension units are wrong');
+  } finally {
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960109').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960109').run();
+    client.removeAccount(960109);
+  }
+});
+
 console.log('\nGuards');
 await check('unauthenticated Etsy write is refused with guidance', async () => {
   const { status, body } = await req('/api/listings', {

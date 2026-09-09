@@ -22,7 +22,12 @@
  */
 import { getDb, parse } from '../db/index.js';
 import { syncListing } from './variantimages.js';
+import { call } from '../etsy/client.js';
+import { requireShopId } from '../etsy/shop.js';
+import { createLogger } from '../lib/logger.js';
 import { badRequest } from '../lib/errors.js';
+
+const log = createLogger('product-images');
 
 /**
  * Pull the value ids out of an Etsy listing URL.
@@ -221,4 +226,150 @@ export async function refreshVariationImages(listingId) {
   }
 
   return { listingId: id, pinned: mapped, variations: products.length, updated };
+}
+
+// ------------------------------------------------- pinning a photo to a variant
+
+/**
+ * Tell Etsy which photo belongs to which option.
+ *
+ * Two things in Etsy's own description of this endpoint decide how it has to be
+ * written, and both are easy to get wrong:
+ *
+ *   "The update overwrites all existing variation images on a listing, so if
+ *    your request is successful, the variation images on the listing will be
+ *    exactly those you specify."
+ *
+ * So sending only the pair you just changed would silently unpin every other
+ * variant. Every call here therefore reads what Etsy currently has, merges the
+ * change into it, and sends the complete set back.
+ *
+ *   "variation_images does not contain more than one property_id as variation
+ *    images can only be associated on one property."
+ *
+ * A listing can pin photos to Colour or to Size, but not both. So changing the
+ * property clears the pairs belonging to the old one, and that is said out loud
+ * in the result rather than happening quietly.
+ */
+export async function pinVariantImages(listingId, changes = [], { replace = false, caller = call } = {}) {
+  const id = Number(listingId);
+  const shopId = requireShopId();
+  if (!changes.length && !replace) throw badRequest('Nothing to pin.');
+
+  // What Etsy has right now. Local rows are a mirror and may be stale, so ask.
+  let current = [];
+  try {
+    const res = await caller('getListingVariationImages', { shop_id: shopId, listing_id: id });
+    current = (res?.results ?? [])
+      .filter((r) => r.image_id)
+      .map((r) => ({ property_id: Number(r.property_id), value_id: Number(r.value_id), image_id: Number(r.image_id) }));
+  } catch (err) {
+    log.debug?.(`listing ${id} had no variation images yet: ${err.message}`);
+  }
+
+  const wanted = changes
+    .map((c) => ({
+      property_id: Number(c.propertyId ?? c.property_id),
+      value_id: Number(c.valueId ?? c.value_id),
+      image_id: c.imageId ?? c.image_id ?? null,
+    }))
+    .filter((c) => c.property_id && c.value_id);
+
+  // Merge, unless the caller means "these and nothing else".
+  const merged = new Map();
+  if (!replace) for (const r of current) merged.set(`${r.property_id}:${r.value_id}`, r);
+  for (const c of wanted) {
+    const key = `${c.property_id}:${c.value_id}`;
+    // A null image id means "unpin this one".
+    if (c.image_id === null) merged.delete(key);
+    else merged.set(key, { ...c, image_id: Number(c.image_id) });
+  }
+
+  let final = [...merged.values()];
+
+  // One property only. The newest change decides which one wins.
+  const properties = [...new Set(final.map((r) => r.property_id))];
+  let droppedForProperty = [];
+  if (properties.length > 1) {
+    const keep = wanted[wanted.length - 1]?.property_id ?? properties[0];
+    droppedForProperty = final.filter((r) => r.property_id !== keep);
+    final = final.filter((r) => r.property_id === keep);
+  }
+
+  if (!final.length && !replace) throw badRequest('That would leave no variation images at all. Use replace to clear them deliberately.');
+
+  const res = await caller('updateVariationImages', { shop_id: shopId, listing_id: id },
+    { body: { variation_images: final } });
+
+  // Bring the local mirror in line with what Etsy now holds.
+  await refreshVariationImages(id).catch(() => {});
+
+  return {
+    listingId: id,
+    pinned: final.length,
+    // Said plainly, because Etsy replaced the lot and the caller should know.
+    hadBefore: current.length,
+    droppedForProperty: droppedForProperty.length,
+    note: droppedForProperty.length
+      ? `Etsy allows variation images on one property only, so ${droppedForProperty.length} pairing(s) on the other property were removed.`
+      : null,
+    results: res?.results ?? final,
+  };
+}
+
+/**
+ * What can be pinned: every option on the listing, and every photo, with what
+ * is currently paired. This is what a "choose the photo for each option" screen
+ * needs in one call.
+ */
+export function pinnableOptions(listingId) {
+  const id = Number(listingId);
+  const db = getDb();
+  const images = listingImages(id);
+
+  const products = db.prepare(`
+    SELECT product_id, sku, variation_label, property_values
+    FROM listing_products WHERE listing_id = ? AND is_deleted = 0 ORDER BY product_id`).all(id);
+
+  const pinned = new Map(
+    db.prepare('SELECT property_id, value_id, image_id FROM variation_images WHERE listing_id = ?')
+      .all(id).map((r) => [`${r.property_id}:${r.value_id}`, r.image_id]),
+  );
+
+  // One row per distinct property value, since that - not the variation - is
+  // what a photo is actually pinned to.
+  const seen = new Map();
+  for (const p of products) {
+    for (const pv of parse(p.property_values, []) ?? []) {
+      const propertyId = Number(pv.property_id);
+      for (const [i, valueId] of (pv.value_ids ?? []).entries()) {
+        const key = `${propertyId}:${valueId}`;
+        if (seen.has(key)) continue;
+        seen.set(key, {
+          propertyId,
+          propertyName: pv.property_name ?? pv.formatted_name ?? '',
+          valueId: Number(valueId),
+          value: pv.values?.[i] ?? pv.formatted_values?.[i] ?? String(valueId),
+          imageId: pinned.get(key) ?? null,
+          imageUrl: pinned.has(key) ? images.find((im) => im.imageId === pinned.get(key))?.url ?? null : null,
+        });
+      }
+    }
+  }
+
+  const options = [...seen.values()];
+  const properties = [...new Set(options.map((o) => o.propertyId))];
+
+  return {
+    listingId: id,
+    images,
+    options,
+    properties,
+    // Etsy pins on one property; say which, so the screen can group by it.
+    pinnedProperty: [...new Set(options.filter((o) => o.imageId).map((o) => o.propertyId))][0] ?? null,
+    canPinOnOnePropertyOnly: properties.length > 1,
+    note: properties.length > 1
+      ? 'This listing varies on more than one option, and Etsy allows photos on only one of them.'
+      : null,
+  };
 }

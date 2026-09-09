@@ -34,7 +34,20 @@ export const EDITABLE = [
   'shipping_profile_id', 'return_policy_id', 'item_weight', 'item_length',
   'item_width', 'item_height', 'is_personalizable', 'personalization_instructions',
   'is_customizable', 'state',
+  // The rest of what Etsy's own spec accepts on a draft. Without these the app
+  // could not set a processing time or a weight unit, and the listing had to be
+  // finished on Etsy anyway - which defeats the point of the desk.
+  'styles', 'processing_min', 'processing_max', 'readiness_state_id',
+  'item_weight_unit', 'item_dimensions_unit', 'production_partner_ids',
+  'should_auto_renew', 'is_taxable', 'type', 'image_ids',
 ];
+
+/** Etsy refuses a draft without these. Its spec, not a guess. */
+export const REQUIRED = ['title', 'description', 'price', 'quantity', 'who_made', 'when_made', 'taxonomy_id'];
+
+/** The units Etsy accepts, so the app cannot offer one it will reject. */
+export const WEIGHT_UNITS = ['oz', 'lb', 'g', 'kg'];
+export const DIMENSION_UNITS = ['in', 'ft', 'mm', 'cm', 'm', 'yd', 'inches'];
 
 const asList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(',').map((s) => s.trim()).filter(Boolean));
 
@@ -117,8 +130,13 @@ function cleanFields(fields = {}) {
     let value = fields[key];
     if (value === '' || value === undefined) continue;
     if (key === 'tags' || key === 'materials') value = asList(value);
+    if (key === 'styles') value = asList(value).slice(0, 2);       // Etsy allows two
+    if (key === 'image_ids' || key === 'production_partner_ids') {
+      value = asList(value).map(Number).filter(Boolean);
+    }
     if (['price', 'quantity', 'taxonomy_id', 'shop_section_id', 'shipping_profile_id',
-      'return_policy_id', 'item_weight', 'item_length', 'item_width', 'item_height'].includes(key)) {
+      'return_policy_id', 'item_weight', 'item_length', 'item_width', 'item_height',
+      'processing_min', 'processing_max', 'readiness_state_id'].includes(key)) {
       const n = Number(value);
       if (!Number.isFinite(n)) continue;
       value = n;
@@ -275,8 +293,18 @@ export function preview(listingId) {
   const merged = draft.merged;
   const problems = [];
 
+  // Etsy's spec requires quantity on a draft. The preview never checked it, so a
+  // draft with no stock passed here and was refused by Etsy instead.
+  if (merged.quantity == null || Number(merged.quantity) < 1) {
+    problems.push('A quantity of at least 1 is required.');
+  }
   if (!merged.title?.trim()) problems.push('A title is required.');
   if (merged.title && merged.title.length > 140) problems.push(`The title is ${merged.title.length} characters; Etsy allows 140.`);
+  // Etsy's title rule: %, :, & and + may each appear only once.
+  for (const ch of ['%', ':', '&', '+']) {
+    const n = (merged.title ?? '').split(ch).length - 1;
+    if (n > 1) problems.push(`The title uses "${ch}" ${n} times; Etsy allows it once.`);
+  }
   if (!merged.description?.trim()) problems.push('A description is required.');
   if (merged.price == null || Number(merged.price) <= 0) problems.push('A price above zero is required.');
   if (!merged.taxonomy_id) problems.push('A category is required.');
@@ -284,8 +312,9 @@ export function preview(listingId) {
   if (!merged.when_made) problems.push('"When was it made" is required.');
   if ((merged.tags ?? []).length > 13) problems.push(`${merged.tags.length} tags; Etsy allows 13.`);
   if ((merged.tags ?? []).some((t) => t.length > 20)) problems.push('A tag is longer than 20 characters.');
-  if (draft.isLocalOnly && !merged.shipping_profile_id) {
-    problems.push('A new listing needs a shipping profile before Etsy will take it.');
+  // Etsy: "Required when listing type is physical".
+  if (draft.isLocalOnly && (merged.type ?? 'physical') === 'physical' && !merged.shipping_profile_id) {
+    problems.push('A physical listing needs a shipping profile before Etsy will take it.');
   }
 
   return {
