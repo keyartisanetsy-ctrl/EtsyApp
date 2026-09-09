@@ -44,6 +44,18 @@ export default function Settings() {
     } catch (err) { showError(err, 'Test failed'); } finally { setTesting(false); }
   };
 
+  // What the saved token can actually do. Worth its own button: when a call is
+  // refused for "insufficient scope", this says which permission is missing
+  // instead of leaving you to guess whether reconnecting would help.
+  const [scopes, setScopes] = useState(null);
+  const [checkingScopes, setCheckingScopes] = useState(false);
+  const checkScopes = async () => {
+    setCheckingScopes(true);
+    try { setScopes(await api.get('/etsy-extra/scopes')); }
+    catch (err) { showError(err, 'Could not read the token permissions'); }
+    finally { setCheckingScopes(false); }
+  };
+
   const connect = async () => {
     try {
       const r = await api.post('/auth/connect', {});
@@ -147,6 +159,10 @@ export default function Settings() {
             <button className="btn" onClick={testConnection} disabled={testing}>
               {testing ? <Spinner /> : '⚡'} Test connection
             </button>
+            <button className="btn" onClick={checkScopes} disabled={checkingScopes}
+                    title="Ask Etsy which permissions this token actually carries">
+              {checkingScopes ? <Spinner /> : '🔑'} Check permissions
+            </button>
             {testResult && (
               <span className={`badge ${testResult.ok ? 'green' : 'red'}`}>
                 {testResult.ok ? 'all checks passed' : 'problems found'}
@@ -163,6 +179,24 @@ export default function Settings() {
                   <span className="dim">{c.detail}</span>
                 </div>
               ))}
+            </div>
+          )}
+
+          {scopes && (
+            <div className="card mb16" style={{ background: 'var(--bg)' }}>
+              <div className="section-title">
+                What this token can do
+                <span className={`badge ${scopes.complete ? 'green' : 'amber'}`} style={{ marginLeft: 8 }}>
+                  {scopes.granted.length} permission(s)
+                </span>
+              </div>
+              <div className="hint mb8">{scopes.note}</div>
+              <div className="pill-row">
+                {scopes.granted.map((sc) => <span key={sc} className="badge green">{sc}</span>)}
+                {scopes.missing.map((sc) => (
+                  <span key={sc} className="badge red" title="Reconnect the shop to grant this">{sc}</span>
+                ))}
+              </div>
             </div>
           )}
 
@@ -260,14 +294,17 @@ export default function Settings() {
       )}
 
       {tab === 'ai' && (
-        <Banner kind="info">
-          <div>
-            <strong>Manus</strong> is an agent API: a request is submitted as a task and polled until it finishes,
-            so replies can take minutes and it does not accept images.{' '}
-            <strong>Anthropic</strong> and <strong>OpenAI</strong> answer immediately and read screenshots;
-            image editing needs OpenAI. The app falls back to whichever provider can actually do the job.
-          </div>
-        </Banner>
+        <>
+          <Banner kind="info">
+            <div>
+              <strong>Manus</strong> is an agent API: a request is submitted as a task and polled until it finishes,
+              so replies can take minutes and it does not accept images.{' '}
+              <strong>Anthropic</strong> and <strong>OpenAI</strong> answer immediately and read screenshots;
+              image editing needs OpenAI. The app falls back to whichever provider can actually do the job.
+            </div>
+          </Banner>
+          <ModelPicker draft={draft} setDraft={setDraft} />
+        </>
       )}
 
       {tab === 'tracking' && (
@@ -348,5 +385,93 @@ export default function Settings() {
         </div>
       </div>
     </Page>
+  );
+}
+
+/**
+ * Which model does what.
+ *
+ * Two separate choices on purpose. The everyday default is what listing copy
+ * and message replies use, where speed matters and a small slip is cheap. The
+ * address check is its own choice, because that one decides whether a parcel
+ * ships to a real house - it is worth the careful model even if it costs more.
+ *
+ * Left blank, a job just uses the provider's own default, so this is a
+ * refinement rather than something you have to fill in.
+ */
+function ModelPicker({ draft, setDraft }) {
+  const { data } = useAsync(() => api.get('/ai/models'), []);
+  const providers = data?.providers ?? [];
+  const usable = providers.filter((p) => p.configured);
+
+  const set = (key, value) => setDraft({ ...draft, [key]: value });
+  const valueOf = (key, fallback = '') => draft[key] ?? fallback;
+
+  if (!providers.length) return null;
+
+  return (
+    <div className="card">
+      <div className="card-head"><h3>Which model does what</h3></div>
+
+      {!usable.length && (
+        <Banner kind="warn">
+          No provider has a key yet. Add one below and these choices become available.
+        </Banner>
+      )}
+
+      <div className="field">
+        <label>Everyday default</label>
+        <select className="select" value={valueOf('ai.provider')} onChange={(e) => set('ai.provider', e.target.value)}>
+          <option value="">Whichever is configured</option>
+          {usable.map((p) => <option key={p.provider} value={p.provider}>{p.provider}</option>)}
+        </select>
+        <div className="hint">Used for listing copy, message replies and the mapping suggestions.</div>
+      </div>
+
+      {usable.map((p) => (
+        <div className="field" key={p.provider}>
+          <label>{p.provider} version</label>
+          <select
+            className="select"
+            value={valueOf(`ai.${p.provider}.model`, p.current ?? '')}
+            onChange={(e) => set(`ai.${p.provider}.model`, e.target.value)}
+          >
+            {p.models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+          </select>
+          <div className="hint">
+            {p.models.find((m) => m.id === valueOf(`ai.${p.provider}.model`, p.current))?.note
+              ?? 'Any model id this provider accepts can also be typed into the field below.'}
+          </div>
+        </div>
+      ))}
+
+      <div className="section-title">Address checking</div>
+      <div className="hint mb8">
+        This one is worth setting on its own. A wrong address costs the parcel, the postage and the refund,
+        so the careful model earns its keep here even though it is slower.
+      </div>
+      <div className="split">
+        <div className="field">
+          <label>Provider</label>
+          <select className="select" value={valueOf('ai.address.provider')}
+                  onChange={(e) => set('ai.address.provider', e.target.value)}>
+            <option value="">Same as the everyday default</option>
+            {usable.map((p) => <option key={p.provider} value={p.provider}>{p.provider}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label>Version</label>
+          <select className="select" value={valueOf('ai.address.model')}
+                  onChange={(e) => set('ai.address.model', e.target.value)}>
+            <option value="">That provider&rsquo;s default</option>
+            {(providers.find((p) => p.provider === (valueOf('ai.address.provider') || usable[0]?.provider))?.models ?? [])
+              .map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="hint">
+        You can also pick a model for one order at a time, on the order itself.
+      </div>
+    </div>
   );
 }

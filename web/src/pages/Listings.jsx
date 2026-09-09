@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import api from '../lib/api.js';
+import Pictures from '../components/Pictures.jsx';
 import { TablePage } from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Checkbox, Pager, SortTh, Drawer, Modal, Thumb, CopyButton,
@@ -214,6 +215,8 @@ function ListingDetail({ id, onClose, onChanged }) {
           <div className="flex wrap mb16">
             {data.images.map((img) => <Thumb key={img.id} src={img.url} size="lg" />)}
           </div>
+
+          <Pictures listingId={data.listingId ?? data.listing_id} />
 
           <div className="field">
             <label>Title <span className="muted">({(edit.title ?? data.title ?? '').length}/140)</span></label>

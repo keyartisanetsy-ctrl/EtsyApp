@@ -2,6 +2,7 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../lib/api.js';
 import { useRates } from '../lib/rates.js';
+import Pictures from '../components/Pictures.jsx';
 import { TablePage } from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Checkbox, Thumb, Pager, SortTh, Drawer, Modal, CopyButton,
@@ -472,6 +473,10 @@ function SkuDetail({ row, pct, onClose, onSaved }) {
         <label>Notes</label>
         <textarea className="textarea" value={meta.notes ?? ''} onChange={(e) => setMeta({ ...meta, notes: e.target.value })} />
       </div>
+
+      {row.listingId && (
+        <Pictures listingId={row.listingId} productId={row.productId} />
+      )}
 
       <div className="section-title">Attributes</div>
       {row.properties?.length

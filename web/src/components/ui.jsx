@@ -234,6 +234,17 @@ export function useAsync(fn, deps = [], { immediate = true } = {}) {
   }, []);
 
   useEffect(() => { if (immediate) reload(); /* eslint-disable-next-line */ }, deps);
+
+  // An undo rewrites rows underneath whatever is on screen, so every screen
+  // that reads data has to look again. Listening here rather than in each page
+  // means a new page gets this for free and can never forget it.
+  useEffect(() => {
+    if (!immediate) return undefined;
+    const onUndone = () => reload();
+    window.addEventListener('etsyapp:undone', onUndone);
+    return () => window.removeEventListener('etsyapp:undone', onUndone);
+  }, [immediate, reload]);
+
   return { data, loading, error, reload, setData };
 }
 

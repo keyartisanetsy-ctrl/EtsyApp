@@ -28,6 +28,7 @@ export default function Orders() {
   const [sendingToAirtable, setSendingToAirtable] = useState(null);
   const [detailId, setDetailId] = useState(null);
   const [trackingOpen, setTrackingOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const toast = useToast();
   const showError = useErrorToast();
@@ -42,6 +43,40 @@ export default function Orders() {
 
   const rows = data?.rows ?? [];
   const reportCurrency = data?.reportingCurrency ?? 'USD';
+
+  /** Check the addresses of everything ticked, one at a time. */
+  const checkAddresses = async () => {
+    const receiptIds = [...selected];
+    if (!receiptIds.length) return;
+    setBusy(true);
+    try {
+      const r = await api.post('/orders/address-check', { receiptIds });
+      toast({
+        kind: r.problems ? 'warn' : 'ok',
+        title: r.problems ? `${r.problems} of ${r.checked} need a look` : `All ${r.checked} addresses look fine`,
+        body: r.problems ? 'Open an order to see what is wrong and what to do about it.' : undefined,
+        duration: 9000,
+      });
+      refreshAll();
+    } catch (err) { showError(err, 'Could not check those'); } finally { setBusy(false); }
+  };
+
+  /** Ask Etsy again for the buyer emails it did not send the first time. */
+  const chaseEmails = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post('/orders/enrich-contacts', {
+        receiptIds: selected.size ? [...selected] : undefined,
+      });
+      toast({
+        kind: r.found ? 'ok' : 'warn',
+        title: r.found ? `Found ${r.found} email address(es)` : 'Etsy had none to give',
+        body: r.note ?? `Checked ${r.checked} order(s).`,
+        duration: 9000,
+      });
+      refreshAll();
+    } catch (err) { showError(err, 'Could not ask Etsy'); } finally { setBusy(false); }
+  };
   const refreshAll = () => { reload(); reloadCounters(); };
 
   const toggle = (id) => setSelected((s) => {
@@ -99,6 +134,10 @@ export default function Orders() {
       subtitle={counters ? `${counters.newOrders} new · ${counters.notDone} not done · ${counters.noTracking} without tracking` : ''}
       actions={
         <>
+          <button className="btn sm" disabled={busy} onClick={chaseEmails}
+            title="Ask Etsy for the buyer emails missing from recent orders">
+            {busy ? <Spinner /> : '✉'} Find missing emails
+          </button>
           <button className="btn sm" onClick={exportXlsx}>⤓ Excel</button>
           <button className="btn sm" onClick={syncOrders}>↻ Sync</button>
           <button className="btn sm primary" onClick={() => setTrackingOpen(true)}>➤ Bulk tracking</button>
@@ -134,6 +173,12 @@ export default function Orders() {
             onClick={() => setOffsite([...selected], true)}>◈ Offsite ad</button>
           <button className="btn xs ghost" title="Clear the offsite ad mark"
             onClick={() => setOffsite([...selected], false)}>Not offsite</button>
+          <button className="btn xs" disabled={busy}
+            title="Check these addresses: post code shape, ZIP against the state, missing house number, then the AI"
+            onClick={checkAddresses}>{busy ? <Spinner /> : '🔍'} Check addresses</button>
+          <button className="btn xs" disabled={busy}
+            title="Ask Etsy again for the buyer emails it left out of the order list"
+            onClick={chaseEmails}>✉ Find missing emails</button>
           <button className="btn xs primary" onClick={() => setSendingToAirtable([...selected])}>⇉ Send to Airtable</button>
           <div className="spacer" />
           <button className="btn xs ghost" onClick={() => setSelected(new Set())}>Clear</button>
