@@ -10,6 +10,7 @@ import { getStoredToken } from './etsy/client.js';
 import { syncTracking, refreshStaleFlags } from './services/tracking/index.js';
 import { syncReceipts } from './services/sync.js';
 import { ensureRates } from './services/fx.js';
+import { scanInbox } from './services/productstudio.js';
 
 const log = createLogger('scheduler');
 const timers = [];
@@ -50,7 +51,21 @@ export function startScheduler() {
     }, 24 * 60 * 60_000).unref());
   }
 
-  log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every 30m)`);
+  // Product Studio's drop folder. This is the path for when that app cannot
+  // make an HTTP request and writes a file instead - and a folder you have to
+  // remember to press a button for is a folder nobody uses. Reading it is a
+  // directory listing, so it costs nothing to do often.
+  timers.push(setInterval(() => {
+    try {
+      const r = scanInbox();
+      if (r.created) log.info(`product studio: ${r.created} product(s) picked up from the drop folder`);
+      if (r.failed) log.warn(`product studio: ${r.failed} file(s) could not be read, moved to "failed"`);
+    } catch (err) {
+      log.warn(`product studio inbox: ${err.message}`);
+    }
+  }, 20_000).unref());
+
+  log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every 30m, drop folder every 20s)`);
 }
 
 export const stopScheduler = () => { for (const t of timers) clearInterval(t); timers.length = 0; };

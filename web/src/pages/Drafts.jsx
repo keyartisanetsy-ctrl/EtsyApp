@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import api from '../lib/api.js';
 import { TablePage } from '../components/Page.jsx';
 import {
@@ -20,6 +21,18 @@ export default function Drafts() {
   const [open, setOpen] = useState(null);
   const [busy, setBusy] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
+  const [params, setParams] = useSearchParams();
+
+  // Product Studio is handed a link straight to the draft it just created, so
+  // that link has to actually open it rather than dropping you on the list.
+  useEffect(() => {
+    const wanted = params.get('open');
+    if (!wanted) return;
+    setOpen(Number(wanted));
+    const next = new URLSearchParams(params);
+    next.delete('open');
+    setParams(next, { replace: true });
+  }, [params, setParams]);
   const toast = useToast();
   const showError = useErrorToast();
 
