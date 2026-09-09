@@ -313,8 +313,14 @@ export function preview(listingId) {
   if ((merged.tags ?? []).length > 13) problems.push(`${merged.tags.length} tags; Etsy allows 13.`);
   if ((merged.tags ?? []).some((t) => t.length > 20)) problems.push('A tag is longer than 20 characters.');
   // Etsy: "Required when listing type is physical".
-  if (draft.isLocalOnly && (merged.type ?? 'physical') === 'physical' && !merged.shipping_profile_id) {
+  const isPhysical = (merged.type ?? 'physical') === 'physical';
+  if (draft.isLocalOnly && isPhysical && !merged.shipping_profile_id) {
     problems.push('A physical listing needs a shipping profile before Etsy will take it.');
+  }
+  // Etsy's spec marks readiness_state_id optional, but the live API answers
+  // "A readiness_state_id is required for physical listings." Trust the API.
+  if (draft.isLocalOnly && isPhysical && !merged.readiness_state_id) {
+    problems.push('A physical listing needs a processing profile (how long it takes you to dispatch). Pick one below.');
   }
 
   return {
@@ -393,4 +399,100 @@ export async function push(listingId, { activate = false } = {}) {
     db.prepare('UPDATE listing_drafts SET push_error = ? WHERE listing_id = ?').run(err.message, id);
     throw err;
   }
+}
+
+/**
+ * The choices this shop actually offers, for the fields that are numeric ids.
+ *
+ * Etsy asks for a shipping profile, a processing profile, a section and a
+ * return policy by id. Nobody knows those by heart, and typing one wrong is how
+ * you get a 400 from Etsy after filling in a whole listing. So the desk fetches
+ * the real ones and offers them as lists.
+ *
+ * Each part is fetched independently: a shop with no return policies should
+ * still get its shipping profiles, rather than the whole panel failing.
+ */
+export async function shopChoices() {
+  const shopId = requireShopId();
+  const out = {};
+
+  const settle = async (name, fn, fallback = []) => {
+    try { out[name] = await fn(); }
+    catch (err) { out[name] = fallback; out[`${name}Error`] = err.message; }
+  };
+
+  await Promise.all([
+    settle('shippingProfiles', async () => {
+      const r = await call('getShopShippingProfiles', { shop_id: shopId });
+      return (r?.results ?? []).map((p) => ({
+        id: p.shipping_profile_id,
+        title: p.title,
+        // What the buyer is told, which is what makes one profile the right one.
+        processing: p.processing_days_display_label
+          ?? [p.min_processing_days, p.max_processing_days].filter((n) => n != null).join('–'),
+        origin: p.origin_country_iso,
+      }));
+    }),
+
+    // The one Etsy refuses a physical listing without, whatever its spec says.
+    settle('processingProfiles', async () => {
+      const r = await call('getShopReadinessStateDefinitions', { shop_id: shopId, limit: 100 });
+      return (r?.results ?? []).map((p) => ({
+        id: p.readiness_state_id,
+        readinessState: p.readiness_state,
+        label: p.processing_days_display_label
+          ?? [p.min_processing_days, p.max_processing_days].filter((n) => n != null).join('–'),
+        minDays: p.min_processing_days,
+        maxDays: p.max_processing_days,
+      }));
+    }),
+
+    settle('sections', async () => {
+      const r = await call('getShopSections', { shop_id: shopId });
+      return (r?.results ?? []).map((s) => ({ id: s.shop_section_id, title: s.title }));
+    }),
+
+    settle('returnPolicies', async () => {
+      const r = await call('getShopReturnPolicies', { shop_id: shopId });
+      return (r?.results ?? []).map((p) => ({
+        id: p.return_policy_id,
+        accepts: !!p.accepts_returns,
+        days: p.return_deadline,
+      }));
+    }),
+  ]);
+
+  return {
+    ...out,
+    // Said here so the screen can offer to make one rather than dead-ending.
+    needsProcessingProfile: !out.processingProfiles?.length,
+    note: out.processingProfiles?.length
+      ? null
+      : 'This shop has no processing profile yet. Etsy will not take a physical listing without one - make one below and it becomes the default for new drafts.',
+  };
+}
+
+/**
+ * Make a processing profile, for a shop that has none.
+ *
+ * Etsy's error for a missing one names a field but not how to get it, which
+ * leaves you clicking around the seller dashboard. This makes one from the two
+ * numbers you actually know.
+ */
+export async function createProcessingProfile({ minDays = 1, maxDays = 3,
+  readinessState = 'made_to_order', unit = 'days' } = {}) {
+  const shopId = requireShopId();
+  const res = await call('createShopReadinessStateDefinition', { shop_id: shopId }, {
+    body: {
+      readiness_state: readinessState,
+      min_processing_time: Number(minDays),
+      max_processing_time: Number(maxDays),
+      processing_time_unit: unit,
+    },
+  });
+  audit('drafts.processing_profile', { detail: { minDays, maxDays, readinessState } });
+  return {
+    id: res?.readiness_state_id ?? res?.results?.[0]?.readiness_state_id ?? null,
+    ...res,
+  };
 }

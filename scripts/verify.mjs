@@ -1991,7 +1991,8 @@ await check('a draft is checked against what Etsy actually requires', async () =
     const base = {
       title: 'Keycap Set', description: 'A set.', price: 39.99,
       taxonomy_id: 1000, who_made: 'i_did', when_made: 'made_to_order',
-      shipping_profile_id: 5, quantity: 0,
+      // A physical listing needs both of these before Etsy will take it.
+      shipping_profile_id: 5, readiness_state_id: 77, quantity: 0,
     };
     const noStock = drafts.createLocal(base);
     const p1 = drafts.preview(noStock.listingId);
@@ -2015,6 +2016,48 @@ await check('a draft is checked against what Etsy actually requires', async () =
     db.prepare('DELETE FROM undo_log WHERE shop_id = 960109').run();
     db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960109').run();
     client.removeAccount(960109);
+  }
+});
+
+await check('a physical draft is refused without a processing profile', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960110').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960110,'Readiness','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960110);
+
+  try {
+    // Etsy's spec calls readiness_state_id optional, but the live API answers
+    // "A readiness_state_id is required for physical listings." The API wins.
+    const base = {
+      title: 'Keycap Set', description: 'A set.', price: 39.99, quantity: 5,
+      taxonomy_id: 1000, who_made: 'i_did', when_made: 'made_to_order',
+      shipping_profile_id: 5,
+    };
+    const without = drafts.createLocal(base);
+    const p1 = drafts.preview(without.listingId);
+    assert(p1.problems.some((x) => /processing profile/i.test(x)),
+      `a physical draft with no processing profile passed: ${p1.problems.join('; ')}`);
+    assert(!p1.ready, 'it was called ready and Etsy would have rejected it');
+
+    const with_ = drafts.createLocal({ ...base, readiness_state_id: 77 });
+    const p2 = drafts.preview(with_.listingId);
+    assert(p2.ready, `should be ready once it has one: ${p2.problems.join('; ')}`);
+
+    // A digital listing needs neither, so it must not be blocked by them.
+    const digital = drafts.createLocal({ ...base, type: 'download', shipping_profile_id: null });
+    const p3 = drafts.preview(digital.listingId);
+    assert(!p3.problems.some((x) => /processing profile|shipping profile/i.test(x)),
+      `a download was blocked by physical-only rules: ${p3.problems.join('; ')}`);
+  } finally {
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960110').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960110').run();
+    client.removeAccount(960110);
   }
 });
 

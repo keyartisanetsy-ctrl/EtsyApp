@@ -14,6 +14,17 @@ router.post('/pull', asyncRoute(async (req, res) => {
   res.json(await drafts.pullFromEtsy({ includeInactive: bool(req.body?.includeInactive) }));
 }));
 
+/**
+ * The shipping profiles, processing profiles, sections and return policies this
+ * shop actually has, so those fields are lists rather than numbers to look up.
+ */
+router.get('/choices', asyncRoute(async (req, res) => res.json(await drafts.shopChoices())));
+
+/** Make a processing profile, for a shop that has none yet. */
+router.post('/choices/processing-profile', asyncRoute(async (req, res) => {
+  res.status(201).json(await drafts.createProcessingProfile(req.body ?? {}));
+}));
+
 /** Start one here. Etsy sees nothing until it is pushed. */
 router.post('/', asyncRoute(async (req, res) => res.json(drafts.createLocal(req.body ?? {}))));
 

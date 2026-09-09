@@ -131,6 +131,9 @@ function DraftEditor({ id, onClose, onChanged }) {
     () => (id ? api.get(`/drafts/${id}`) : null), [id], { immediate: !!id });
   const { data: plan, reload: replan } = useAsync(
     () => (id ? api.get(`/drafts/${id}/preview`) : null), [id], { immediate: !!id });
+  // Etsy asks for these by numeric id; nobody knows them by heart.
+  const { data: choices, reload: reloadChoices } = useAsync(
+    () => (id ? api.get('/drafts/choices') : null), [id], { immediate: !!id });
 
   if (!id) return null;
 
@@ -155,6 +158,22 @@ function DraftEditor({ id, onClose, onChanged }) {
 
   const merged = draft?.merged ?? {};
   const isChanged = (f) => draft?.changed?.includes(f);
+
+  /** A dropdown of what the shop really has, instead of a number to look up. */
+  const pick = (name, label, options, hint) => (
+    <div className="field">
+      <label>
+        {label}
+        {isChanged(name) && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
+      </label>
+      <select className="select" value={merged[name] ?? ''} onChange={(e) => save({ [name]: e.target.value })}>
+        <option value="">—</option>
+        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+      {!options.length && <div className="hint">This shop has none set up yet.</div>}
+      {hint && <div className="hint">{hint}</div>}
+    </div>
+  );
 
   const field = (name, label, props = {}) => (
     <div className="field">
@@ -242,7 +261,53 @@ function DraftEditor({ id, onClose, onChanged }) {
           </div>
           <div className="split">
             {field('when_made', 'When was it made', { options: WHEN_MADE })}
-            {field('shipping_profile_id', 'Shipping profile id', { type: 'number' })}
+            {pick('shipping_profile_id', 'Shipping delivery profile',
+              (choices?.shippingProfiles ?? []).map((p) => ({
+                value: p.id, label: `${p.title}${p.processing ? ` · ${p.processing}` : ''}`,
+              })),
+              'Where you post from and what you charge.')}
+          </div>
+
+          <div className="field">
+            <label>
+              Processing profile
+              {isChanged('readiness_state_id') && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
+            </label>
+            {choices?.needsProcessingProfile ? (
+              <>
+                <Banner kind="warn">
+                  {choices.note}
+                </Banner>
+                <MakeProcessingProfile onMade={(newId) => { save({ readiness_state_id: newId }); reloadChoices(); }} />
+              </>
+            ) : (
+              <>
+                <select className="select" value={merged.readiness_state_id ?? ''}
+                        onChange={(e) => save({ readiness_state_id: e.target.value })}>
+                  <option value="">—</option>
+                  {(choices?.processingProfiles ?? []).map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label ? `${p.label} · ` : ''}{String(p.readinessState ?? '').replace(/_/g, ' ')}
+                    </option>
+                  ))}
+                </select>
+                <div className="hint">
+                  How long before you dispatch. Etsy refuses a physical listing without one, even though its
+                  own documentation calls this optional.
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="split">
+            {pick('shop_section_id', 'Shop section',
+              (choices?.sections ?? []).map((x) => ({ value: x.id, label: x.title })),
+              'Optional. Which part of your shop it appears in.')}
+            {pick('return_policy_id', 'Return policy',
+              (choices?.returnPolicies ?? []).map((x) => ({
+                value: x.id, label: x.accepts ? `Accepts returns${x.days ? ` within ${x.days} days` : ''}` : 'No returns',
+              })),
+              'Optional.')}
           </div>
 
           <div className="section-title">What Etsy has right now</div>
@@ -455,5 +520,57 @@ function ConnectProductStudio({ open, onClose, onImported }) {
         </>
       )}
     </Modal>
+  );
+}
+
+/**
+ * Making a processing profile without leaving for the seller dashboard.
+ *
+ * Etsy's rejection names the missing field but not how to get one, which is the
+ * kind of error that costs half an hour. Two numbers is all it needs.
+ */
+function MakeProcessingProfile({ onMade }) {
+  const [minDays, setMinDays] = useState(1);
+  const [maxDays, setMaxDays] = useState(3);
+  const [state, setState] = useState('made_to_order');
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const showError = useErrorToast();
+
+  const make = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post('/drafts/choices/processing-profile', {
+        minDays: Number(minDays), maxDays: Number(maxDays), readinessState: state,
+      });
+      toast({ kind: 'ok', title: 'Processing profile created', body: `Dispatch in ${minDays}–${maxDays} days.` });
+      onMade(r.id);
+    } catch (err) { showError(err, 'Etsy would not create it'); } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="card" style={{ padding: 10 }}>
+      <div className="split3">
+        <div className="field">
+          <label>Dispatch in, at least</label>
+          <input className="input" type="number" min="1" value={minDays} onChange={(e) => setMinDays(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>at most (days)</label>
+          <input className="input" type="number" min="1" value={maxDays} onChange={(e) => setMaxDays(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Kind</label>
+          <select className="select" value={state} onChange={(e) => setState(e.target.value)}>
+            <option value="made_to_order">Made to order</option>
+            <option value="ready_to_ship">Ready to ship</option>
+          </select>
+        </div>
+      </div>
+      <button className="btn primary" onClick={make} disabled={busy}>
+        {busy ? <Spinner /> : 'Create it and use it'}
+      </button>
+      <div className="hint">This is made on Etsy and can be reused by every listing afterwards.</div>
+    </div>
   );
 }
