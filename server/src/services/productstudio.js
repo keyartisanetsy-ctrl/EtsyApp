@@ -70,6 +70,119 @@ const ALIASES = {
   notes: ['notes', 'note', 'remark', 'comment', 'not', 'notlar', '备注'],
 };
 
+/**
+ * Product Studio's own shapes, read exactly rather than guessed at.
+ *
+ * That app hands over two objects: a `NormalisedProduct` (what it scraped from
+ * Taobao or 1688) and a `GeneratedListing` (what the AI wrote for Etsy). Neither
+ * uses the field names a generic reader would guess - the item number is
+ * `numIid`, the link is `sourceUrl`, the cost is `priceOriginal`, and the
+ * English title lives in `titleTranslated` while `title` is still Chinese.
+ *
+ * Three details from its own export code that matter, and would be wrong if
+ * guessed:
+ *
+ *   - An image has a `role`. Only "gallery" and "description" belong on a
+ *     listing; "variant" photos are the swatches and "unused" is discarded.
+ *   - Which URL to take is not obvious. `url` is often a local /api/media file
+ *     that nothing outside that app can fetch, and `remoteUrl` is a CDN link
+ *     that expires in about two days. `srcUrl` is the permanent marketplace
+ *     original. So: a public working url, else the permanent source, else the
+ *     expiring one - the opposite order from its Shopify export, because
+ *     nothing here re-hosts the file.
+ *   - Etsy renders no HTML, so `descHtml` is not a description. The AI's
+ *     plain-text description is the one to use.
+ */
+function isProductStudioPayload(payload) {
+  const p = payload?.product ?? payload;
+  return !!(p && typeof p === 'object'
+    && (p.numIid !== undefined || p.platform !== undefined)
+    && (p.sourceUrl !== undefined || p.images !== undefined));
+}
+
+/** The AI's value for one field of the generated listing. */
+const generatedField = (listing, key) =>
+  (listing?.fields ?? []).find((f) => f.key === key)?.value ?? '';
+
+/** Etsy's own tag rules, as Product Studio applies them on export. */
+const usableTag = (tag) => {
+  const t = String(tag ?? '').trim();
+  return !!t && t.length <= 20 && t.split(/\s+/).length <= 3;
+};
+
+/** A URL something outside Product Studio can actually fetch. */
+const publicImageUrl = (im) => {
+  const usable = (u) => (typeof u === 'string' && /^https?:\/\//i.test(u)
+    && !/\/api\/media\//.test(u) ? u : null);
+  // The permanent marketplace original is preferred over the CDN copy, which
+  // expires in about two days - this app stores the link, not the file.
+  return usable(im?.url) ?? usable(im?.srcUrl) ?? usable(im?.remoteUrl) ?? usable(im?.originalUrl) ?? null;
+};
+
+/** Read Product Studio's pair of objects into this app's shape. */
+function readProductStudio(payload) {
+  const p = payload.product ?? payload;
+  const listing = payload.listing ?? payload.generated ?? null;
+
+  // The AI's Etsy title wins, then the translated one; `title` alone is the
+  // original Chinese and would go on the listing untranslated.
+  const title = generatedField(listing, 'title') || p.titleTranslated || p.title || '';
+
+  const description = generatedField(listing, 'description') || '';
+
+  const tags = String(generatedField(listing, 'tags') || '')
+    .split(/[,\n]/).map((t) => t.trim()).filter(usableTag).slice(0, 13);
+
+  // Only the photos that belong on a listing, in the order they are shown.
+  const images = (p.images ?? [])
+    .filter((im) => im?.role === 'gallery' || im?.role === 'description' || im?.role === undefined)
+    .map(publicImageUrl)
+    .filter(Boolean);
+
+  // The listing's variants override the product's when the AI rewrote them.
+  const rawVariants = (listing?.variants?.length ? listing.variants : p.variants) ?? [];
+  const variants = rawVariants.map((v, i) => ({
+    name: v.nameTranslated || v.name || `Variant ${i + 1}`,
+    sku: v.sku ?? '',
+    price: v.price ?? null,
+    url: '',
+    image: publicImageUrl({ url: v.imageUrl }) ?? v.imageUrl ?? null,
+    stock: v.stock ?? null,
+  })).filter((v) => v.name || v.sku);
+
+  return {
+    title,
+    description,
+    // Etsy sells in your currency; the Taobao price is the cost, not the price.
+    price: null,
+    cost: p.priceOriginal ?? null,
+    currency: (p.currencyOriginal || 'CNY').toUpperCase(),
+    quantity: variants.reduce((n, v) => n + (v.stock ?? 0), 0) || 10,
+    sku: '',
+    url: p.sourceUrl ?? '',
+    variantUrl: '',
+    images,
+    variants,
+    tags,
+    materials: [],
+    supplier: p.platform === '1688' ? '1688' : 'taobao',
+    itemId: p.numIid ? String(p.numIid) : null,
+    moq: null,
+    shippingCost: null,
+    taxonomyId: null,
+    // Everything Product Studio worked out that Etsy also wants.
+    weightKg: p.weightKg ?? null,
+    hsCode: p.hsCode ?? '',
+    originCountry: p.originCountry ?? '',
+    videoUrl: p.videoUrl ?? '',
+    notes: [
+      p.shopType ? `Type: ${p.shopType}` : '',
+      p.category ? `Category: ${p.category}` : '',
+      listing?.model ? `Written by ${listing.model}` : '',
+    ].filter(Boolean).join('\n'),
+  };
+}
+
 /** The first alias that actually carries something. */
 function pick(payload, field) {
   for (const key of ALIASES[field] ?? []) {
@@ -108,6 +221,26 @@ const asNumber = (v) => {
  */
 export function readProduct(payload = {}) {
   if (!payload || typeof payload !== 'object') throw badRequest('Send the product as a JSON object.');
+
+  // Product Studio's own shape is read exactly. Everything else falls through
+  // to the forgiving reader below, so another tool can still post here.
+  if (isProductStudioPayload(payload)) {
+    const product = readProductStudio(payload);
+    const missing = [];
+    if (!product.title) missing.push('a title');
+    if (!product.url && !product.itemId) missing.push('the source link');
+    return {
+      product,
+      source: 'product-studio',
+      mapping: { '(read as)': 'Product Studio NormalisedProduct + GeneratedListing' },
+      ignored: [],
+      missing,
+      linkReadAs: product.url ? (() => {
+        const l = taobao.parseSupplyUrl(product.url);
+        return l.ok ? { supplier: l.supplierLabel, itemId: l.itemId, cleanUrl: l.cleanUrl } : null;
+      })() : null,
+    };
+  }
 
   const mapping = {};
   const take = (field) => {

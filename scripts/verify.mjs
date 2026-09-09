@@ -2061,6 +2061,82 @@ await check('a physical draft is refused without a processing profile', async ()
   }
 });
 
+await check("Product Studio's own shapes are read exactly, not guessed at", async () => {
+  const ps = await import('../server/src/services/productstudio.js');
+
+  // The two objects that app actually holds, with the traps its own export code
+  // works around: a Chinese `title`, a local-only image url, swatch photos, and
+  // tags the AI wrote longer than Etsy allows.
+  const payload = {
+    product: {
+      numIid: '1012415746554', platform: 'taobao',
+      sourceUrl: 'https://item.taobao.com/item.htm?id=1012415746554',
+      title: '海贼王主题动漫树脂键帽套装',
+      titleTranslated: 'One Piece Theme Anime Resin Keycap Set',
+      priceOriginal: 128.5, currencyOriginal: 'CNY',
+      descHtml: '<p>树脂键帽</p>',
+      images: [
+        { url: 'http://localhost:8787/api/media/local1.jpg', srcUrl: 'https://img.alicdn.com/perm1.jpg', role: 'gallery' },
+        { url: 'https://img.alicdn.com/pub2.jpg', role: 'gallery' },
+        { url: 'https://img.alicdn.com/swatch.jpg', role: 'variant' },
+        { url: 'https://img.alicdn.com/desc.jpg', role: 'description' },
+        { url: 'https://img.alicdn.com/junk.jpg', role: 'unused' },
+      ],
+      variants: [
+        { name: 'MOA 高度', nameTranslated: 'MOA Profile', price: 128.5, sku: 'KC-MOA', stock: 8 },
+        { name: 'Cherry 高度', nameTranslated: 'Cherry Profile', price: 132, stock: 4 },
+      ],
+      weightKg: 0.35, shopType: 'Keycap Set',
+    },
+    listing: {
+      channel: 'etsy',
+      fields: [
+        { key: 'title', value: 'One Piece Anime Artisan Keycap Set' },
+        { key: 'description', value: 'A hand-finished resin keycap set.' },
+        { key: 'tags', value: 'keycap, artisan keycap, a tag far too long to be allowed here, one two three four' },
+      ],
+      variants: [], model: 'claude-opus-5',
+    },
+  };
+
+  const { product, source, missing } = ps.readProduct(payload);
+  assert(source === 'product-studio', `read as ${source} rather than natively`);
+  assert(!missing.length, `missing ${missing.join(', ')}`);
+
+  // The AI's English title, not the Chinese one that would go on the listing raw.
+  assert(product.title === 'One Piece Anime Artisan Keycap Set', `title: ${product.title}`);
+  assert(product.title !== payload.product.title, 'the untranslated Chinese title was used');
+
+  // A /api/media url only exists inside that app, so the permanent marketplace
+  // source has to be taken instead or the picture is a dead link here.
+  assert(product.images[0] === 'https://img.alicdn.com/perm1.jpg',
+    `a local-only url was kept: ${product.images[0]}`);
+  // Swatches and discarded photos are not listing photos.
+  assert(product.images.length === 3, `expected 3 listing photos, got ${product.images.length}`);
+  assert(!product.images.some((u) => /swatch|junk/.test(u)), 'a variant swatch or unused photo was included');
+
+  // Etsy's tag rules: 20 characters, at most three words.
+  assert(product.tags.length === 2, `tags: ${JSON.stringify(product.tags)}`);
+  assert(!product.tags.some((t) => t.length > 20 || t.split(' ').length > 3), 'an unusable tag survived');
+
+  // The Taobao price is the cost, not what it sells for on Etsy.
+  assert(product.cost === 128.5 && product.currency === 'CNY', 'the cost was misread');
+  assert(product.price === null, 'the supplier price was put in as the Etsy price');
+
+  // Translated variant names, and stock summed for the listing quantity.
+  assert(product.variants[0].name === 'MOA Profile', `variant: ${product.variants[0].name}`);
+  assert(product.quantity === 12, `quantity should sum the stock, got ${product.quantity}`);
+  assert(product.itemId === '1012415746554' && product.supplier === 'taobao', 'the source was misread');
+
+  // A 1688 product is recognised as such.
+  const from1688 = ps.readProduct({ product: { ...payload.product, platform: '1688' }, listing: payload.listing });
+  assert(from1688.product.supplier === '1688', 'the 1688 platform was not carried over');
+
+  // Anything else still goes through the forgiving reader.
+  const generic = ps.readProduct({ title: 'x', url: 'https://item.taobao.com/item.htm?id=1', cost: 5 });
+  assert(generic.source !== 'product-studio', 'a generic payload was read as Product Studio');
+});
+
 console.log('\nGuards');
 await check('unauthenticated Etsy write is refused with guidance', async () => {
   const { status, body } = await req('/api/listings', {
