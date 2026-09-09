@@ -636,3 +636,19 @@ CREATE TABLE IF NOT EXISTS supply_items (
   PRIMARY KEY (shop_id, sku)
 );
 CREATE INDEX IF NOT EXISTS idx_supply_supplier ON supply_items(shop_id, supplier);
+
+-- What Product Studio (the Taobao/1688 app) sent when a product was pushed
+-- across. The draft itself lives in listing_drafts; this keeps the photos, the
+-- options and the raw payload beside it, because those are not Etsy fields yet
+-- and would otherwise be thrown away between arriving and being finished.
+CREATE TABLE IF NOT EXISTS product_studio_inbox (
+  draft_id    INTEGER PRIMARY KEY,
+  shop_id     INTEGER,
+  sku         TEXT,
+  source      TEXT,            -- taobao | 1688 | ...
+  payload     TEXT,            -- JSON, exactly as it arrived
+  images      TEXT,            -- JSON array of URLs
+  variants    TEXT,            -- JSON array of options
+  received_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_psinbox_shop ON product_studio_inbox(shop_id, received_at DESC);

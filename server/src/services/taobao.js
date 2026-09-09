@@ -57,9 +57,15 @@ export function parseSupplyUrl(url) {
   const supplier = SUPPLIERS.find((s) => s.hosts.some((h) => host === h || host.endsWith(`.${h}`)))?.id ?? 'other';
 
   const q = parsed.searchParams;
+  // The id is in the query for Taobao and Tmall, and in the path for the
+  // others. Without it the same product sent twice gets two different SKUs,
+  // which is how duplicates creep in.
   const itemId = q.get('id') || q.get('itemId') || q.get('offerId')
-    // AliExpress puts it in the path: /item/1005001234567890.html
-    || /\/item\/(\d{6,})/.exec(parsed.pathname)?.[1]
+    // AliExpress: /item/1005001234567890.html
+    // 1688:       /offer/888002.html
+    // Alibaba:    /product-detail/…_1600123456789.html
+    || /\/(?:item|offer|p|product)\/(\d{6,})/.exec(parsed.pathname)?.[1]
+    || /_(\d{9,})\.html/.exec(parsed.pathname)?.[1]
     || null;
 
   return {

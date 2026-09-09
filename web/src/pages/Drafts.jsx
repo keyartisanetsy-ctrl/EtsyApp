@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import api from '../lib/api.js';
 import { TablePage } from '../components/Page.jsx';
 import {
-  Spinner, Empty, Banner, Drawer, Thumb, useAsync, useToast, useErrorToast, fmtMoney, fmtAgo,
+  Spinner, Empty, Banner, Drawer, Modal, Thumb, CopyButton, Tabs,
+  useAsync, useToast, useErrorToast, fmtMoney, fmtAgo,
 } from '../components/ui.jsx';
 
 const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007'];
@@ -18,6 +19,7 @@ const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'befo
 export default function Drafts() {
   const [open, setOpen] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [connectOpen, setConnectOpen] = useState(false);
   const toast = useToast();
   const showError = useErrorToast();
 
@@ -48,6 +50,7 @@ export default function Drafts() {
       subtitle={drafts.length ? `${drafts.length} draft(s) — nothing here is on Etsy until you send it` : ''}
       actions={
         <>
+          <button className="btn sm" onClick={() => setConnectOpen(true)}>🔗 Connect Product Studio</button>
           <button className="btn sm" onClick={startNew}>＋ Start one here</button>
           <button className="btn sm primary" disabled={busy} onClick={pull}>
             {busy ? <Spinner /> : '↧'} Get drafts from Etsy
@@ -101,6 +104,7 @@ export default function Drafts() {
         )}
 
       <DraftEditor id={open} onClose={() => setOpen(null)} onChanged={reload} />
+      <ConnectProductStudio open={connectOpen} onClose={() => setConnectOpen(false)} onImported={reload} />
     </TablePage>
   );
 }
@@ -237,5 +241,206 @@ function DraftEditor({ id, onClose, onChanged }) {
         </>
       )}
     </Drawer>
+  );
+}
+
+/**
+ * Wiring the Taobao/1688 app's "Etsy'e ekle" button to this one.
+ *
+ * Everything the other app needs is here to copy: the address to post to, the
+ * pairing key, and a snippet in three languages. There is also a folder it can
+ * write a file into, for the case where the button cannot make an HTTP request.
+ *
+ * The key matters. The server listens on localhost, but so does every page in
+ * your browser, and a web page can post to localhost - without a key, a site
+ * you happened to have open could drop products onto your desk.
+ */
+function ConnectProductStudio({ open, onClose, onImported }) {
+  const [tab, setTab] = useState('setup');
+  const [sample, setSample] = useState('');
+  const [read, setRead] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const showError = useErrorToast();
+
+  const { data: contract, reload } = useAsync(
+    () => (open ? api.get('/integrations/product-studio') : null), [open], { immediate: open });
+
+  if (!open) return null;
+
+  const newKey = async () => {
+    if (!confirm('Make a new key? Product Studio will stop working until you paste the new one in.')) return;
+    try { await api.post('/integrations/product-studio/key', {}); reload(); toast({ kind: 'ok', title: 'New key made' }); }
+    catch (err) { showError(err); }
+  };
+
+  const scan = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post('/integrations/product-studio/scan', {});
+      toast({
+        kind: r.created ? 'ok' : 'warn',
+        title: r.created ? `${r.created} product(s) came in` : 'Nothing in the folder',
+        body: r.failed ? `${r.failed} file(s) could not be read; they were moved to "failed".` : undefined,
+      });
+      onImported();
+    } catch (err) { showError(err, 'Could not read the folder'); } finally { setBusy(false); }
+  };
+
+  /** Try a real payload without creating anything, to check the mapping. */
+  const tryIt = async () => {
+    setBusy(true);
+    try {
+      let parsed;
+      try { parsed = JSON.parse(sample); }
+      catch { toast({ kind: 'warn', title: 'That is not valid JSON' }); return; }
+      setRead(await api.post(`/integrations/product-studio/dry-run?key=${encodeURIComponent(contract.key)}`, parsed));
+    } catch (err) { showError(err, 'Could not read that'); } finally { setBusy(false); }
+  };
+
+  const Line = ({ label, value, mono = true }) => (
+    <div className="field">
+      <label>{label}</label>
+      <div className="flex gap4">
+        <input className={`input ${mono ? 'mono' : ''}`} readOnly value={value ?? ''} onFocus={(e) => e.target.select()} />
+        <CopyButton text={value ?? ''} label="⧉" className="btn xs ghost" />
+      </div>
+    </div>
+  );
+
+  return (
+    <Modal open={open} onClose={onClose} lg title="Connect Product Studio">
+      <Tabs
+        active={tab} onChange={setTab}
+        tabs={[
+          { id: 'setup', label: 'Set it up' },
+          { id: 'fields', label: 'Field names' },
+          { id: 'test', label: 'Try a payload' },
+          { id: 'folder', label: 'Without code' },
+        ]}
+      />
+
+      {!contract ? <Spinner /> : (
+        <>
+          {tab === 'setup' && (
+            <>
+              <Banner kind="info">
+                Make the &ldquo;Etsy&rsquo;e ekle&rdquo; button post the product to the address below. It arrives
+                here as a draft — it never goes to Etsy on its own, you finish it and press Send.
+              </Banner>
+              <Line label="Post to this address" value={contract.url} />
+              <Line label="Send this header" value={`X-Product-Studio-Key: ${contract.key}`} />
+              <div className="flex gap4 mb16">
+                <button className="btn xs ghost" onClick={newKey}>Make a new key</button>
+                <span className="small dim">Only needed if the key has leaked.</span>
+              </div>
+
+              <div className="section-title">Paste this into Product Studio</div>
+              {Object.entries(contract.snippets).map(([lang, code]) => (
+                <div className="field" key={lang}>
+                  <label>{lang}<CopyButton text={code} label="Copy" className="btn xs ghost" /></label>
+                  <pre className="copy-block mono" style={{ whiteSpace: 'pre-wrap', fontSize: 11 }}>{code}</pre>
+                </div>
+              ))}
+
+              <Banner kind="ok">
+                Only <span className="mono">title</span> and <span className="mono">url</span> are required.
+                Everything else just makes the draft more complete.
+              </Banner>
+            </>
+          )}
+
+          {tab === 'fields' && (
+            <>
+              <p className="dim small">
+                Send the product in whatever shape Product Studio already uses. For each row below, the first
+                name it finds with a value wins — so you probably do not have to change anything over there.
+              </p>
+              <table className="data">
+                <thead><tr><th>This app wants</th><th>and accepts any of these names</th></tr></thead>
+                <tbody>
+                  {Object.entries(contract.accepts).map(([field, names]) => (
+                    <tr key={field}>
+                      <td className="mono small">
+                        {field}
+                        {contract.required.includes(field) && <span className="badge red" style={{ marginLeft: 6 }}>required</span>}
+                      </td>
+                      <td className="small dim cell-wrap">{names.join(', ')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+
+          {tab === 'test' && (
+            <>
+              <p className="dim small">
+                Paste one real product exactly as Product Studio would send it. This shows how each field was
+                understood and creates nothing, so it is safe to try as often as you like.
+              </p>
+              <div className="flex gap4 mb8">
+                <button className="btn xs ghost" onClick={() => setSample(JSON.stringify(contract.example, null, 2))}>
+                  Fill in an example
+                </button>
+              </div>
+              <textarea className="textarea mono" rows={10} value={sample} onChange={(e) => setSample(e.target.value)}
+                        placeholder='{ "title": "…", "url": "https://item.taobao.com/item.htm?id=…" }' />
+              <button className="btn primary mt8" onClick={tryIt} disabled={busy || !sample.trim()}>
+                {busy ? <Spinner /> : 'Read it'}
+              </button>
+
+              {read && (
+                <>
+                  <Banner kind={read.missing?.length ? 'warn' : 'ok'}>
+                    {read.missing?.length
+                      ? `This would be refused: it still needs ${read.missing.join(', ')}.`
+                      : 'This would work. Every required field was found.'}
+                  </Banner>
+                  <table className="data">
+                    <thead><tr><th>Field</th><th>Read from</th><th>Value</th></tr></thead>
+                    <tbody>
+                      {Object.entries(read.product ?? {}).filter(([, v]) =>
+                        v !== null && v !== '' && !(Array.isArray(v) && !v.length)).map(([k, v]) => (
+                        <tr key={k}>
+                          <td className="mono small">{k}</td>
+                          <td className="small dim mono">{read.mapping?.[k] ?? '—'}</td>
+                          <td className="small cell-wrap">
+                            {Array.isArray(v) ? `${v.length} item(s)` : String(v).slice(0, 80)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {read.ignored?.length > 0 && (
+                    <div className="hint">
+                      Not used: <span className="mono">{read.ignored.join(', ')}</span>. If one of those is
+                      something you need, tell me the name and it can be added.
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+
+          {tab === 'folder' && (
+            <>
+              <Banner kind="info">
+                If the button cannot make an HTTP request, have it save the same JSON as a file into this
+                folder instead. One product per file, or a list of them in one file.
+              </Banner>
+              <Line label="Drop folder" value={contract.dropFolder} />
+              <button className="btn primary" onClick={scan} disabled={busy}>
+                {busy ? <Spinner /> : '↧'} Read the folder now
+              </button>
+              <div className="hint">
+                Files that are read are moved into <span className="mono">done</span>, and ones that could not be
+                read into <span className="mono">failed</span>, so nothing is picked up twice or lost quietly.
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </Modal>
   );
 }

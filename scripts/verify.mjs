@@ -1776,6 +1776,145 @@ await check('every Etsy operation the spec publishes has a caller', async () => 
   assert(!unused.length, `${unused.length} operation(s) have no caller: ${unused.slice(0, 8).join(', ')}`);
 });
 
+console.log('\nProduct Studio bridge');
+await check('a product is read whatever field names it arrives under', async () => {
+  const ps = await import('../server/src/services/productstudio.js');
+
+  // This app cannot know Product Studio's exact JSON, so the reader has to cope
+  // with the shapes such a tool plausibly uses.
+  const shapes = {
+    english: { title: 'One Piece Keycap Set', url: 'https://item.taobao.com/item.htm?id=1012415746554', cost: 18.5, price: 39.99 },
+    camel: { productName: 'Chikawa Keycap', productUrl: 'https://item.taobao.com/item.htm?id=999888', costPrice: '¥22.00', salePrice: '34.99' },
+    turkish: { baslik: 'Kawaii Keycap Seti', urunLinki: 'https://detail.1688.com/offer/778899.html', maliyet: '25,50', fiyat: 44.9 },
+    chinese: { 標題: 'x', '标题': '动漫键帽', '商品链接': 'https://item.taobao.com/item.htm?id=555444', '成本': 30 },
+  };
+
+  for (const [name, payload] of Object.entries(shapes)) {
+    const { product, missing } = ps.readProduct(payload);
+    assert(!missing.length, `${name}: still missing ${missing.join(', ')}`);
+    assert(product.title, `${name}: no title was found`);
+    assert(product.cost !== null, `${name}: no cost was found`);
+  }
+
+  // Prices arrive formatted in all sorts of ways.
+  assert(ps.readProduct(shapes.camel).product.cost === 22, 'a ¥-prefixed price was not read');
+  assert(ps.readProduct(shapes.turkish).product.cost === 25.5, 'a comma decimal was not read');
+  // And the supplier is worked out from the link when it is not stated.
+  assert(ps.readProduct(shapes.turkish).product.supplier === '1688', 'the supplier was not read from the link');
+
+  // A payload it cannot use says what is missing rather than guessing.
+  const { missing } = ps.readProduct({ foo: 'bar' });
+  assert(missing.length >= 2, 'a useless payload was accepted');
+});
+
+await check('a product arrives as a draft, twice does not make two', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const ps = await import('../server/src/services/productstudio.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  const taobao = await import('../server/src/services/taobao.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960107').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960107,'PS Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960107);
+
+  try {
+    const payload = {
+      title: 'One Piece Theme Anime Artisan Keycap Set',
+      url: 'https://item.taobao.com/item.htm?abbucket=10&id=1012415746554',
+      variantUrl: 'https://item.taobao.com/item.htm?id=1012415746554&skuId=55',
+      cost: 18.5, currency: 'CNY', price: 39.99,
+      images: ['https://img.alicdn.com/a.jpg', 'https://img.alicdn.com/b.jpg'],
+      variants: [{ name: 'MOA Profile', price: 18.5 }],
+    };
+
+    const first = ps.receive(payload);
+    assert(first.ok && first.draftId < 0, 'it should land as a local draft, not an Etsy listing');
+    assert(first.sku === 'PS-1012415746554', `the SKU should come from the item id, got ${first.sku}`);
+
+    // The draft is on the desk and has NOT gone to Etsy.
+    const draft = drafts.get(first.draftId);
+    assert(draft.isLocalOnly, 'a product from another app must not go straight to Etsy');
+    assert(draft.merged.title === payload.title, 'the title did not reach the draft');
+
+    // And the supply side is joined to the same SKU.
+    const item = taobao.getItem(first.sku);
+    assert(item.price === 18.5 && item.currency === 'CNY', 'the cost did not reach the supply book');
+    assert(item.variantUrl.includes('skuId=55'), 'the variant link did not reach the supply book');
+
+    // The photos and options are kept even though they are not Etsy fields yet.
+    const inbox = ps.inboxFor(first.draftId);
+    assert(inbox.images.length === 2 && inbox.variants.length === 1, 'what arrived was not kept');
+
+    // Pressing the button again updates the same draft rather than adding one.
+    const second = ps.receive({ ...payload, title: 'Corrected title', cost: 19.9 });
+    assert(second.updated === true, 'a second send was not recognised as the same product');
+    assert(second.draftId === first.draftId, `a duplicate draft was made: ${first.draftId} vs ${second.draftId}`);
+    assert(drafts.get(first.draftId).merged.title === 'Corrected title', 'the correction was not picked up');
+    const count = db.prepare('SELECT COUNT(*) AS c FROM listing_drafts WHERE shop_id IS ?').get(960107).c;
+    assert(count === 1, `expected one draft on the desk, found ${count}`);
+  } finally {
+    db.prepare('DELETE FROM product_studio_inbox WHERE shop_id = 960107').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960107').run();
+    db.prepare('DELETE FROM supply_items WHERE shop_id = 960107').run();
+    db.prepare('DELETE FROM sku_meta WHERE shop_id = 960107').run();
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960107').run();
+    client.removeAccount(960107);
+  }
+});
+
+await check('every supplier link yields a stable id', async () => {
+  const taobao = await import('../server/src/services/taobao.js');
+  // Without an id the same product sent twice gets two different SKUs, which is
+  // exactly how duplicates creep in.
+  const cases = [
+    ['https://item.taobao.com/item.htm?abbucket=10&id=1012415746554', 'taobao', '1012415746554'],
+    ['https://detail.tmall.com/item.htm?id=654321', 'tmall', '654321'],
+    ['https://detail.1688.com/offer/888002.html', '1688', '888002'],
+    ['https://www.aliexpress.com/item/1005001234567890.html', 'aliexpress', '1005001234567890'],
+    ['https://www.alibaba.com/product-detail/Custom-Keycaps_1600123456789.html', 'alibaba', '1600123456789'],
+  ];
+  for (const [url, supplier, id] of cases) {
+    const p = taobao.parseSupplyUrl(url);
+    assert(p.supplier === supplier, `${url} was read as ${p.supplier}`);
+    assert(p.itemId === id, `${url} gave id ${p.itemId}, expected ${id}`);
+  }
+  assert(!taobao.parseSupplyUrl('not a link').ok, 'nonsense was accepted');
+});
+
+await check('only a program on this machine may add products', async () => {
+  const ps = await import('../server/src/services/productstudio.js');
+  const key = ps.pairingKey();
+  assert(key && key.length >= 24, 'the pairing key is too short to be worth having');
+  assert(ps.checkKey(key), 'the real key was refused');
+  assert(!ps.checkKey('wrong'), 'a wrong key was accepted');
+  assert(!ps.checkKey(''), 'an empty key was accepted');
+  assert(!ps.checkKey(null), 'a missing key was accepted');
+
+  // The contract the other app is handed has to be complete enough to wire up.
+  const c = ps.contract();
+  assert(c.url.includes('/api/integrations/product-studio/product'), 'the address is wrong');
+  assert(c.headers['X-Product-Studio-Key'] === key, 'the header does not carry the key');
+  assert(c.required.includes('title') && c.required.includes('url'), 'the required fields are not stated');
+  assert(Object.keys(c.snippets).length >= 3, 'there is no code to copy across');
+});
+
+await check('the pairing key is not readable without it', async () => {
+  // The endpoint that hands over the contract is deliberately open, since you
+  // need it to pair - but the one that creates products is not.
+  const open = await req('/api/integrations/product-studio');
+  assert(open.body.key, 'the setup screen cannot show a key it cannot read');
+
+  const refused = await req('/api/integrations/product-studio/product', {
+    method: 'POST', body: { title: 'x', url: 'https://item.taobao.com/item.htm?id=1' }, allowError: true,
+  });
+  assert(refused.status === 401, `posting without a key returned ${refused.status}`);
+  assert(/key/i.test(refused.body.error), 'the refusal does not say why');
+});
+
 console.log('\nGuards');
 await check('unauthenticated Etsy write is refused with guidance', async () => {
   const { status, body } = await req('/api/listings', {

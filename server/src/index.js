@@ -29,6 +29,7 @@ import undoRoutes from './routes/undo.js';
 import draftRoutes from './routes/drafts.js';
 import supplyRoutes from './routes/supply.js';
 import etsyExtraRoutes from './routes/etsyextra.js';
+import integrationRoutes from './routes/integrations.js';
 
 import { startScheduler } from './scheduler.js';
 import { openBrowser, shouldOpenBrowser } from './lib/open-browser.js';
@@ -94,6 +95,7 @@ app.use('/api/undo', undoRoutes);
 app.use('/api/drafts', draftRoutes);
 app.use('/api/supply', supplyRoutes);
 app.use('/api/etsy-extra', etsyExtraRoutes);
+app.use('/api/integrations', integrationRoutes);
 
 // Serve the built frontend when it exists, so `npm start` runs the whole app.
 const webDist = path.join(ROOT, 'web', 'dist');

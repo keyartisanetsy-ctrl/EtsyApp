@@ -26,6 +26,7 @@ export const SETTING_DEFS = {
   'ai.openai.api_key':     { env: config.ai.openai.apiKey, def: '', secret: true, label: 'OpenAI API key' },
   'ai.openai.model':       { env: config.ai.openai.model, def: 'gpt-4o', label: 'OpenAI model' },
   'ai.openai.image_model': { env: config.ai.openai.imageModel, def: 'gpt-image-1', label: 'OpenAI image model' },
+  'integrations.product_studio.key': { env: '', def: '', secret: true, label: 'Product Studio pairing key' },
   'ai.address.provider':   { env: '', def: '', label: 'AI provider for address checks (blank = the default one)' },
   'ai.address.model':      { env: '', def: '', label: 'Model version for address checks (blank = that provider\u2019s default)' },
 
