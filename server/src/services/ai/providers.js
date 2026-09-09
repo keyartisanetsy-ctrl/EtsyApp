@@ -118,11 +118,51 @@ export function extractManusText(task) {
   return chunks.join('\n').trim() || (task.metadata?.task_title ?? '');
 }
 
+/**
+ * The models worth offering, newest first.
+ *
+ * A list rather than a free-text box, because a mistyped model id fails at the
+ * API with a message that says nothing useful, and because the difference
+ * between them matters: an address check wants the careful one, a batch of
+ * title rewrites wants the cheap one. Anything not listed can still be typed in
+ * - this is a shortlist, not a whitelist.
+ */
+export const MODEL_CATALOGUE = {
+  anthropic: [
+    { id: 'claude-opus-5', label: 'Claude Opus 5', note: 'The most capable. Use it for judgement calls - address checks, mapping, anything you would double-check by hand.' },
+    { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', note: 'Nearly as good and quicker. A sensible default for everyday work.' },
+    { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', note: 'Tuned for writing. Good for listing copy.' },
+    { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', note: 'Fastest and cheapest. Fine for bulk jobs where each answer is small.' },
+  ],
+  openai: [
+    { id: 'gpt-4o', label: 'GPT-4o', note: 'Reads images as well as text.' },
+    { id: 'gpt-4o-mini', label: 'GPT-4o mini', note: 'Cheaper, for bulk work.' },
+  ],
+  manus: [
+    { id: 'manus-1.6', label: 'Manus 1.6', note: 'Runs as an agent, so it takes longer but can look things up.' },
+  ],
+};
+
+/** Everything the settings screen needs to offer a provider and a version. */
+export function modelOptions() {
+  const status = providerStatus();
+  return Object.entries(MODEL_CATALOGUE).map(([provider, models]) => ({
+    provider,
+    configured: !!status[provider]?.configured,
+    supportsImages: !!status[provider]?.supportsImages,
+    current: status[provider]?.model ?? null,
+    models,
+  }));
+}
+
 // --------------------------------------------------------------- Anthropic
 
-async function anthropicComplete({ prompt, system, images = [], maxTokens = 4096, signal }) {
+async function anthropicComplete({ prompt, system, images = [], maxTokens = 4096, model: override, signal }) {
   const apiKey = readSetting('ai.anthropic.api_key');
-  const model = readSetting('ai.anthropic.model');
+  // A caller may name the exact version for one job - an address check wants a
+  // careful model, a title rewrite wants a fast one - without disturbing the
+  // saved default.
+  const model = override || readSetting('ai.anthropic.model');
 
   const content = [];
   for (const img of images) {
@@ -149,9 +189,9 @@ async function anthropicComplete({ prompt, system, images = [], maxTokens = 4096
 
 // ------------------------------------------------------------------ OpenAI
 
-async function openaiComplete({ prompt, system, images = [], maxTokens = 4096, signal }) {
+async function openaiComplete({ prompt, system, images = [], maxTokens = 4096, model: override, signal }) {
   const apiKey = readSetting('ai.openai.api_key');
-  const model = readSetting('ai.openai.model');
+  const model = override || readSetting('ai.openai.model');
 
   const content = [{ type: 'text', text: prompt }];
   for (const img of images) {

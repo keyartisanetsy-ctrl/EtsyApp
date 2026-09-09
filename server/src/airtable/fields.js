@@ -13,6 +13,7 @@ import { readSetting } from '../services/settings.js';
 import { rateOn, convert } from '../services/fx.js';
 import { codeFor, monthLabelTr, monthLabelEn } from '../services/ordercode.js';
 import { imageForTransaction } from '../services/variantimages.js';
+import { resolveForTransaction, variantUrlForTransaction, listingImages } from '../services/productimages.js';
 import { feeFor as offsiteFeeFor } from '../services/offsiteads.js';
 
 const iso = (ts) => (ts ? new Date(ts * 1000).toISOString() : null);
@@ -129,8 +130,20 @@ export const SOURCE_FIELDS = [
   // ----------------------------------------------------------- buyer info
   { key: 'buyer.name', group: 'Buyer', label: 'Buyer full name', hint: 'Name on the shipping label',
     get: ({ order }) => clean(order.name) },
-  { key: 'buyer.email', group: 'Buyer', label: 'Buyer email', hint: 'Email address of the buyer',
+  // Etsy fills buyer_email on some orders and leaves it null on others, but it
+  // sends payment_email in the same receipt - and it is the same person. Taking
+  // only the first was why this column arrived empty, so the plain "email"
+  // field now uses whichever one Etsy actually sent.
+  { key: 'buyer.email', group: 'Buyer', label: 'Buyer email', hint: 'The buyer\u2019s email - Etsy\u2019s buyer address, or the payment address when that is the one it sent',
+    get: ({ order }) => clean(order.buyer_email || order.payment_email) },
+  { key: 'buyer.email_buyer', group: 'Buyer', label: 'Buyer email (buyer field only)', hint: 'Strictly Etsy\u2019s buyer_email, blank when Etsy did not send one',
     get: ({ order }) => clean(order.buyer_email) },
+  { key: 'buyer.email_payment', group: 'Buyer', label: 'Buyer email (payment field only)', hint: 'Strictly Etsy\u2019s payment_email',
+    get: ({ order }) => clean(order.payment_email) },
+  { key: 'buyer.email_source', group: 'Buyer', label: 'Which email field was used', hint: 'Says whether the address came from Etsy\u2019s buyer field, its payment field, or neither',
+    get: ({ order }) => (order.buyer_email ? 'buyer' : order.payment_email ? 'payment' : null) },
+  { key: 'buyer.user_id', group: 'Buyer', label: 'Buyer user id', hint: 'Etsy\u2019s numeric id for the buyer',
+    get: ({ order }) => order.buyer_user_id ?? null },
   { key: 'address.line1', group: 'Address', label: 'Street line 1', hint: 'First address line',
     get: ({ order }) => clean(order.first_line) },
   { key: 'address.line2', group: 'Address', label: 'Street line 2', hint: 'Second address line, often empty',
@@ -160,8 +173,19 @@ export const SOURCE_FIELDS = [
     } },
   { key: 'item.quantity', group: 'Item', label: 'Quantity', hint: 'How many units, a number',
     get: ({ item, items, rowMode }) => (rowMode === 'item' ? (item?.quantity ?? null) : items.reduce((n, i) => n + (i.quantity || 0), 0)) },
-  { key: 'item.price', group: 'Item', label: 'Unit price', hint: 'Price of one unit as a number',
+  { key: 'item.price', group: 'Item', label: 'Unit price (one unit)', hint: 'What a single unit sold for. For the figure a price column normally wants, use the subtotal instead.',
     get: ({ item, rowMode }) => (rowMode === 'item' ? money(item?.price_amount, item?.price_divisor) : null) },
+  { key: 'item.line_subtotal', group: 'Item', label: 'Line subtotal (unit price \u00d7 quantity)',
+    hint: 'What this line came to: the unit price times how many were bought.',
+    get: ({ item, items, rowMode }) => {
+      const lineOf = (i) => {
+        const unit = money(i?.price_amount, i?.price_divisor);
+        return unit === null ? null : Math.round(unit * (i?.quantity ?? 1) * 100) / 100;
+      };
+      if (rowMode === 'item') return lineOf(item);
+      const sum = items.reduce((n, i) => n + (lineOf(i) ?? 0), 0);
+      return items.length ? Math.round(sum * 100) / 100 : null;
+    } },
   { key: 'item.variations', group: 'Item', label: 'Variant (what the buyer picked)',
     hint: 'Only the chosen values, no option titles, e.g. "Silver / 8 US"',
     get: ({ item, items, rowMode }) => (rowMode === 'item' ? variationValues(item ?? {}) : joinItems(items, variationValues, ' | ')) },
@@ -194,6 +218,75 @@ export const SOURCE_FIELDS = [
     get: ({ item, items, rowMode }) => (rowMode === 'item' ? clean(item?.supplier_name) : joinItems(items, (i) => i.supplier_name)) },
   { key: 'item.supply_cost', group: 'Item', label: 'Supply cost', hint: 'What the item costs you, as a number',
     get: ({ item, rowMode }) => (rowMode === 'item' ? (item?.supply_cost ?? null) : null) },
+  { key: 'item.variant_supply_link', group: 'Item', label: 'Variant supply link',
+    hint: 'The supplier page for this exact option, when one is saved against the SKU',
+    get: ({ item, items, rowMode }) => (rowMode === 'item'
+      ? clean(item?.variant_supply_link)
+      : joinItems(items, (i) => i.variant_supply_link, ' ')) },
+  { key: 'item.supply_link_any', group: 'Item', label: 'Supply link (variant, else main)',
+    hint: 'The variant supplier page when there is one, otherwise the main product page. Use this for a single "\u00dcr\u00fcn Tedarik Link" column.',
+    get: ({ item, items, rowMode }) => {
+      const pick = (i) => i?.variant_supply_link || i?.supply_link || null;
+      return rowMode === 'item' ? clean(pick(item)) : joinItems(items, pick, ' ');
+    } },
+
+  // --------------------------------------------------- pictures of the item
+  // Three separate columns, because a sheet wants different things in each:
+  // the id to match rows on, the URL to look at, and the link to click.
+  { key: 'item.variant_image_id', group: 'Item images', label: 'Variant image id',
+    hint: 'Etsy\u2019s numeric id for the photo pinned to the chosen option. Stable, so it makes a good key.',
+    get: ({ item, items, rowMode }) => {
+      const idOf = (i) => resolveForTransaction(i)?.variant?.imageId ?? null;
+      return rowMode === 'item' ? idOf(item) : joinItems(items, idOf, ' ');
+    } },
+  { key: 'item.variant_image', group: 'Item images', label: 'Variant image (URL)',
+    hint: 'The photo for the exact option bought. Falls back to the listing\u2019s cover shot when the listing has no per-option photos.',
+    get: ({ item, items, rowMode }) => {
+      const pick = (i) => resolveForTransaction(i)?.best?.url ?? null;
+      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
+    } },
+  { key: 'item.variant_link', group: 'Item images', label: 'Variant link on Etsy',
+    hint: 'The listing URL pinned to this option, e.g. \u2026/listing/4447531240?variation0=6251766498',
+    get: ({ item, items, rowMode }) => (rowMode === 'item'
+      ? variantUrlForTransaction(item)
+      : joinItems(items, variantUrlForTransaction, ' ')) },
+  { key: 'item.first_image', group: 'Item images', label: 'First listing photo',
+    hint: 'The cover shot. This is what to use when a listing has no per-option photos.',
+    get: ({ item, items, rowMode }) => {
+      const pick = (i) => (i?.listing_id ? listingImages(i.listing_id)[0]?.url ?? null : null);
+      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
+    } },
+  { key: 'item.last_image', group: 'Item images', label: 'Last listing photo',
+    hint: 'The final photo, which on these listings is usually the size or layout chart.',
+    get: ({ item, items, rowMode }) => {
+      const pick = (i) => {
+        if (!i?.listing_id) return null;
+        const all = listingImages(i.listing_id);
+        return all.length > 1 ? all[all.length - 1].url : all[0]?.url ?? null;
+      };
+      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
+    } },
+  { key: 'item.first_last_image', group: 'Item images', label: 'First and last photo together',
+    hint: 'Both URLs in one cell, for a listing with no per-option photos. Airtable shows both as attachments.',
+    get: ({ item, items, rowMode }) => {
+      const pick = (i) => {
+        if (!i?.listing_id) return null;
+        const all = listingImages(i.listing_id);
+        if (!all.length) return null;
+        const ends = all.length > 1 ? [all[0].url, all[all.length - 1].url] : [all[0].url];
+        return ends.filter(Boolean).join(' ') || null;
+      };
+      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
+    } },
+  { key: 'item.all_images', group: 'Item images', label: 'Every listing photo',
+    hint: 'All the listing\u2019s photo URLs, space separated, in the order they appear on Etsy.',
+    get: ({ item, items, rowMode }) => {
+      const pick = (i) => (i?.listing_id ? listingImages(i.listing_id).map((x) => x.url).filter(Boolean).join(' ') || null : null);
+      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
+    } },
+  { key: 'item.image_count', group: 'Item images', label: 'How many photos',
+    hint: 'Number of photos on the listing, as a number',
+    get: ({ item, rowMode }) => (rowMode === 'item' && item?.listing_id ? listingImages(item.listing_id).length : null) },
 
   // -------------------------------------------------------------- parcels
   { key: 'tracking.code', group: 'Tracking', label: 'Tracking number', hint: 'Parcel tracking number',
@@ -357,7 +450,8 @@ export function loadRows(receiptIds, { rowMode = 'item' } = {}) {
     ORDER BY r.created_ts DESC`).all(shopId, ...receiptIds);
 
   const items = db.prepare(`
-    SELECT x.*, m.supply_link, m.supplier_name, m.supply_cost
+    SELECT x.*, m.supply_link, m.variant_supply_link, m.supplier_name, m.supply_cost,
+           m.supply_currency, m.variant_image_url AS saved_variant_image_url
     FROM receipt_transactions x
     LEFT JOIN sku_meta m ON m.sku = x.sku AND m.shop_id IS ? AND x.sku <> ''
     WHERE x.receipt_id IN (${holes})

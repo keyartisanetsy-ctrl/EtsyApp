@@ -20,6 +20,7 @@ import { activeShopId } from '../etsy/shop.js';
 import { readSetting } from './settings.js';
 import { badRequest } from '../lib/errors.js';
 import { run, parseJsonish } from './ai/index.js';
+import * as undo from './undo.js';
 
 export const DEFAULT_PREFIX = 'KC';
 export const DEFAULT_PATTERN = '{PREFIX}{PRODUCT}-{VARIANT}';
@@ -240,6 +241,22 @@ export function applyPlan(plan) {
   const shopId = activeShopId();
   let updated = 0;
 
+  const listingIds = (plan?.listings ?? []).map((l) => l.listingId).filter(Boolean);
+  // Snapshot every variation of every listing being renumbered, so one Ctrl+Z
+  // puts all the old codes back. A wrong bulk SKU run is otherwise a very long
+  // evening.
+  const handle = listingIds.length
+    ? undo.begin({
+      label: `Generate SKUs for ${listingIds.length} listing${listingIds.length === 1 ? '' : 's'}`,
+      kind: 'sku.generate',
+      targets: [{
+        table: 'listing_products',
+        where: `listing_id IN (${listingIds.map(() => '?').join(',')})`,
+        params: listingIds,
+      }],
+    })
+    : null;
+
   db.transaction(() => {
     for (const listing of plan?.listings ?? []) {
       for (const row of listing.rows ?? []) {
@@ -251,5 +268,6 @@ export function applyPlan(plan) {
     }
   })();
 
-  return { updated, shopId };
+  const undoId = handle ? undo.commit(handle, { affected: updated }) : null;
+  return { updated, shopId, undoId };
 }

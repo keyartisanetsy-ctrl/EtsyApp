@@ -60,6 +60,12 @@ const SYNONYMS = {
   mail: 'buyer.email',
   eposta: 'buyer.email',
   'e posta': 'buyer.email',
+  'buyer email': 'buyer.email',
+  'musteri mail': 'buyer.email',
+  'musteri email': 'buyer.email',
+  'alici mail': 'buyer.email',
+  'mail adresi': 'buyer.email',
+  'email adresi': 'buyer.email',
 
   street: 'address.street',
   address: 'address.street',
@@ -108,6 +114,54 @@ const SYNONYMS = {
   total: 'total.grand',
   toplam: 'total.grand',
   tutar: 'total.grand',
+
+  // A price column on these sheets means the order subtotal, not the unit
+  // price - that is what the shop reconciles against, so every wording of
+  // "price" lands on the subtotal rather than on a single unit.
+  price: 'total.subtotal',
+  fiyat: 'total.subtotal',
+  'urun fiyati': 'total.subtotal',
+  'urun fiyat': 'total.subtotal',
+  'product price': 'total.subtotal',
+  'item price': 'total.subtotal',
+  subtotal: 'total.subtotal',
+  'sub total': 'total.subtotal',
+  'ara toplam': 'total.subtotal',
+  'ara tutar': 'total.subtotal',
+  'urun tutari': 'total.subtotal',
+
+  // The columns in these sheets, by the names they actually carry.
+  'baslik ilk 40': 'item.title40',
+  'baslik ilk40': 'item.title40',
+  'etsy link': 'item.etsy_link',
+  'etsy linki': 'item.etsy_link',
+  'urun linki': 'item.etsy_link',
+  'urun tedarik link': 'item.supply_link_any',
+  'urun tedarik linki': 'item.supply_link_any',
+  'tedarik link': 'item.supply_link_any',
+  'tedarik linki': 'item.supply_link_any',
+  'varyant tedarik link': 'item.variant_supply_link',
+  'varyant gorsel id': 'item.variant_image_id',
+  'varyant gorsel': 'item.variant_image',
+  'varyant gorseli': 'item.variant_image',
+  'variant image': 'item.variant_image',
+  'variant image id': 'item.variant_image_id',
+  'varyant link': 'item.variant_link',
+  'variants': 'item.variations',
+  'varyant': 'item.variations',
+  'varyantlar': 'item.variations',
+  'ilk gorsel': 'item.first_image',
+  'son gorsel': 'item.last_image',
+  'first image': 'item.first_image',
+  'last image': 'item.last_image',
+  'urun gorseli': 'item.image_any',
+  'gorsel': 'item.image_any',
+  'image': 'item.image_any',
+  'image url': 'item.image_any',
+
+  // The address block, as the sheets name it.
+  'sokak': 'address.street',
+  'ship zip': 'address.zip',
   revenue: 'total.grand',
   'shipping cost': 'total.shipping',
   kargo: 'total.shipping',
@@ -124,31 +178,25 @@ const SYNONYMS = {
   'product title': 'item.title',
   urun: 'item.title',
   'urun adi': 'item.title',
-  'baslik ilk 40': 'item.title40',
   'title 40': 'item.title40',
 
-  variants: 'item.variations',
   variant: 'item.variations',
   variation: 'item.variations',
   'variant name': 'item.variations',
-  varyant: 'item.variations',
   varyasyon: 'item.variations',
   'varyant adi': 'item.variations',
 
   'image link': 'item.image_any',
-  image: 'item.image_any',
-  gorsel: 'item.image_any',
   'urun gorsel': 'item.image_any',
   'product image': 'item.image_any',
 
-  'etsy link': 'item.etsy_link',
   'product url': 'item.etsy_link',
   'marketplace url': 'item.etsy_link',
   'listing link': 'item.etsy_link',
   'order link': 'order.etsy_url',
 
-  'urun tedarik link': 'item.supply_link',
-  'tedarik link': 'item.supply_link',
+  // These two now resolve to the variant link when one is saved, falling back
+  // to the main product link, which is what a single "tedarik link" column wants.
   'supplier link': 'item.supply_link',
   'buying url': 'item.supply_link',
   'source url': 'item.supply_link',
@@ -193,15 +241,16 @@ const SYNONYMS = {
   'yuan usd': 'rate.cny_usd',
 
   'shipping cost yuan': 'tracking.shipping_cost',
+  'kargo ucreti': 'tracking.shipping_cost',
+  'kargo bedeli': 'tracking.shipping_cost',
   'kargo maliyeti': 'tracking.shipping_cost',
   'kargo masrafi': 'tracking.shipping_cost',
   'shipping cost usd': 'tracking.shipping_cost_usd',
 
-  'image url': 'item.image_any',
-  'varyant gorsel': 'item.variant_image_url',
-  'varyant gorsel link': 'item.variant_image_url',
-  'variant image': 'item.variant_image_url',
-  'variant image url': 'item.variant_image_url',
+  // A variant-image column should never come back empty just because the
+  // listing has no per-option photo, so these use the falling-back source.
+  'varyant gorsel link': 'item.variant_image',
+  'variant image url': 'item.variant_image',
 
   // A shop column decides which per-shop view a row shows up in, so it is fed
   // by the name the sheet uses rather than Etsy's own spelling.

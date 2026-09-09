@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import api from './lib/api.js';
 import { ToastHost, useToast, useErrorToast } from './components/ui.jsx';
+import UndoHost from './components/Undo.jsx';
 
 import Dashboard from './pages/Dashboard.jsx';
 import Listings from './pages/Listings.jsx';
@@ -15,6 +16,8 @@ import BulkJobs from './pages/BulkJobs.jsx';
 import Exports from './pages/Exports.jsx';
 import Airtable from './pages/Airtable.jsx';
 import Analytics from './pages/Analytics.jsx';
+import Drafts from './pages/Drafts.jsx';
+import Supply from './pages/Supply.jsx';
 import ShopSettings from './pages/ShopSettings.jsx';
 import Settings from './pages/Settings.jsx';
 import ApiExplorer from './pages/ApiExplorer.jsx';
@@ -34,6 +37,8 @@ const NAV = [
       { to: '/listings', icon: '▤', label: 'Listings', badge: 'listings' },
       { to: '/skus', icon: '⧉', label: 'SKUs & variations', badge: 'missingSku', badgeKind: 'muted' },
       { to: '/listings/new', icon: '＋', label: 'Create listing' },
+      { to: '/drafts', icon: '✎', label: 'Draft desk' },
+      { to: '/supply', icon: '🛒', label: 'Supply book' },
       { to: '/research', icon: '◎', label: 'Product research' },
     ],
   },
@@ -158,6 +163,8 @@ export default function App() {
 
           <ShopSwitcher summary={summary} onSwitched={refresh} />
 
+          <UndoHost />
+
           <div className="nav">
             {NAV.map((group) => (
               <div className="nav-group" key={group.label}>
@@ -197,6 +204,8 @@ export default function App() {
             <Route path="/exports" element={<Exports />} />
             <Route path="/airtable" element={<Airtable />} />
             <Route path="/analytics" element={<Analytics />} />
+            <Route path="/drafts" element={<Drafts />} />
+            <Route path="/supply" element={<Supply />} />
             <Route path="/shop" element={<ShopSettings />} />
             <Route path="/api-explorer" element={<ApiExplorer />} />
             <Route path="/settings" element={<Settings />} />

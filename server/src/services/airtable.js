@@ -18,6 +18,7 @@ import { loadRows, resolveSource, SOURCE_FIELDS, isOrderLevel } from '../airtabl
 import { matchByName, matchByAi, suggestMergeFields } from '../airtable/mapping.js';
 import { ensureRates } from './fx.js';
 import { syncForReceipts } from './variantimages.js';
+import { enrichReceiptContacts } from './sync.js';
 
 const log = createLogger('airtable');
 
@@ -210,13 +211,30 @@ export function coerce(value, field, { createLinks = false } = {}) {
 async function prepareSources(destination, receiptIds) {
   const used = new Set((destination.fieldMap ?? []).map((e) => e.source));
   const needsRates = [...used].some((k) => k.startsWith('rate.') || k.endsWith('_usd'));
-  const needsVariantImages = used.has('item.variant_image_url') || used.has('item.image_any');
+  // Every column that resolves to a picture needs the variation map on hand,
+  // or the cell arrives empty for the listings that have not been synced.
+  const needsVariantImages = [...used].some((k) => k.startsWith('item.variant_image')
+    || k === 'item.image_any' || k === 'item.first_image' || k === 'item.last_image'
+    || k === 'item.first_last_image' || k === 'item.all_images' || k === 'item.image_count');
+  // The buyer's email is worth chasing before a push: it is the column most
+  // often blank, and the single-receipt endpoint usually has it.
+  const needsEmail = [...used].some((k) => k.startsWith('buyer.email'));
 
   if (needsRates) {
     try { await ensureRates(); } catch (err) { log.warn(`rates unavailable: ${err.message}`); }
   }
   if (needsVariantImages) {
     try { await syncForReceipts(receiptIds); } catch (err) { log.warn(`variant images unavailable: ${err.message}`); }
+  }
+  if (needsEmail) {
+    const missing = getDb().prepare(`
+      SELECT receipt_id FROM receipts
+      WHERE receipt_id IN (${receiptIds.map(() => '?').join(',')})
+        AND COALESCE(buyer_email,'') = '' AND COALESCE(payment_email,'') = ''`).all(...receiptIds);
+    if (missing.length) {
+      try { await enrichReceiptContacts({ receiptIds: missing.map((r) => r.receipt_id) }); }
+      catch (err) { log.warn(`could not chase buyer emails: ${err.message}`); }
+    }
   }
 }
 

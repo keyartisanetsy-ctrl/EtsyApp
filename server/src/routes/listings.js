@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import * as images from '../services/productimages.js';
 import multer from 'multer';
 import { asyncRoute, int, bool, list, tri, required } from '../lib/http.js';
 import * as listings from '../services/listings.js';
@@ -132,6 +133,31 @@ router.put('/:id/properties/:propertyId', asyncRoute(async (req, res) => {
 
 router.delete('/:id/properties/:propertyId', asyncRoute(async (req, res) => {
   res.json(await listings.deleteProperty(Number(req.params.id), Number(req.params.propertyId)));
+}));
+
+// ---------------------------------------------------------------- pictures
+
+/**
+ * Every photo on a listing, plus which one belongs to a given variant.
+ * `?variation0=6251766498` on the URL, or `valueIds=1,2`, both work.
+ */
+router.get('/:id/pictures', asyncRoute(async (req, res) => {
+  const valueIds = String(req.query.valueIds ?? '').split(',').map(Number).filter(Boolean);
+  res.json(images.resolveImages(Number(req.params.id), {
+    valueIds,
+    productId: req.query.productId ? Number(req.query.productId) : null,
+  }));
+}));
+
+/** Paste an Etsy variant URL and get the picture for that exact option. */
+router.get('/pictures/by-url', asyncRoute(async (req, res) => {
+  if (!req.query.url) throw new Error('Give the Etsy listing URL as ?url=');
+  res.json(images.resolveFromUrl(req.query.url));
+}));
+
+/** Ask Etsy again which photo belongs to which option. */
+router.post('/:id/pictures/refresh', asyncRoute(async (req, res) => {
+  res.json(await images.refreshVariationImages(Number(req.params.id)));
 }));
 
 export default router;

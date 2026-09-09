@@ -762,7 +762,10 @@ await check('the matcher sends the order number without a #, and knows the new c
   assert(got['NOT 2'] === 'flags.notes', 'NOT 2 should be your own note');
   assert(got['Yuan - USD Kur (Ürün)'] === 'rate.cny_usd', 'the yuan rate column was not recognised');
   assert(got['Shipping Cost Yuan'] === 'tracking.shipping_cost', 'the shipping cost column was not recognised');
-  assert(got['Varyant Görsel'] === 'item.variant_image_url', 'the variant image column was not recognised');
+  // This deliberately maps to the falling-back source rather than the strict
+  // one: a listing with no per-option photo should still put its cover shot in
+  // the cell, instead of leaving it blank.
+  assert(got['Varyant Görsel'] === 'item.variant_image', `the variant image column went to ${got['Varyant Görsel']}`);
   assert(got['Image URL'] === 'item.image_any', 'Image URL should take the best available photo');
 });
 
@@ -1405,6 +1408,372 @@ await check('todays rates answer even on a day the ECB does not publish', async 
     // Carried forward from the last published day, so a Sunday still answers.
     assert(latest.asOf.TRY <= latest.day, 'the rate is dated after the day asked for');
   }
+});
+
+console.log('\nBuyer contact and variant images');
+await check('the buyer email falls back to the payment address', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const fields = await import('../server/src/airtable/fields.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960101').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960101,'Email Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960101);
+
+  try {
+    // Etsy leaves buyer_email null on plenty of orders but sends payment_email.
+    // Reading only the first was why this column arrived empty.
+    db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, name, status, buyer_email, payment_email,
+                grandtotal_amount, grandtotal_divisor, grandtotal_currency, created_ts)
+                VALUES (960110, 960101, 'A', 'Paid', NULL, 'payer@example.com', 1000, 100, 'USD', ?)`)
+      .run(Math.floor(Date.now() / 1000));
+    db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, name, status, buyer_email, payment_email,
+                grandtotal_amount, grandtotal_divisor, grandtotal_currency, created_ts)
+                VALUES (960111, 960101, 'B', 'Paid', 'buyer@example.com', 'payer@example.com', 1000, 100, 'USD', ?)`)
+      .run(Math.floor(Date.now() / 1000));
+
+    const byKey = new Map(fields.SOURCE_FIELDS.map((f) => [f.key, f]));
+    const rowFor = (id) => fields.loadRows([id], { rowMode: 'order' })[0];
+
+    assert(byKey.get('buyer.email').get(rowFor(960110)) === 'payer@example.com',
+      'the payment address was not used when Etsy sent no buyer address');
+    assert(byKey.get('buyer.email_source').get(rowFor(960110)) === 'payment', 'the source was not reported');
+    // When Etsy sends both, its own buyer field wins.
+    assert(byKey.get('buyer.email').get(rowFor(960111)) === 'buyer@example.com', 'the buyer address should win');
+    assert(byKey.get('buyer.email_buyer').get(rowFor(960110)) === null,
+      'the strict field must stay empty rather than borrowing the payment address');
+  } finally {
+    db.prepare('DELETE FROM receipts WHERE receipt_id IN (960110, 960111)').run();
+    client.removeAccount(960101);
+  }
+});
+
+await check('a variant URL resolves to that variant\'s own photo', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const pics = await import('../server/src/services/productimages.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960102').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960102,'Image Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960102);
+
+  try {
+    db.prepare('INSERT OR REPLACE INTO listings (listing_id, shop_id, title, state) VALUES (?,?,?,?)')
+      .run(4447531240, 960102, 'One Piece Theme Anime Artisan Keycap Set', 'active');
+    for (const [id, rank, f] of [[9001, 1, 'cover'], [9002, 2, 'moa'], [9003, 3, 'cherry'], [9004, 4, 'chart']]) {
+      db.prepare(`INSERT OR REPLACE INTO listing_images (listing_image_id, listing_id, rank, url_75x75, url_570xN, url_fullxfull)
+                  VALUES (?,?,?,?,?,?)`).run(id, 4447531240, rank, `t/${f}`, `m/${f}`, `https://i.etsystatic.com/${f}.jpg`);
+    }
+    // The two variants the shop actually sells.
+    db.prepare('INSERT OR REPLACE INTO variation_images (listing_id, property_id, value_id, image_id) VALUES (?,?,?,?)')
+      .run(4447531240, 200, 6251766498, 9002);
+    db.prepare('INSERT OR REPLACE INTO variation_images (listing_id, property_id, value_id, image_id) VALUES (?,?,?,?)')
+      .run(4447531240, 200, 6242408909, 9003);
+
+    const base = 'https://www.etsy.com/listing/4447531240/one-piece-theme-anime-artisan-keycap-set?ref=listings_manager_table';
+    const moa = pics.resolveFromUrl(`${base}&variation0=6251766498`);
+    const cherry = pics.resolveFromUrl(`${base}&variation0=6242408909`);
+
+    assert(moa.variant.url === 'https://i.etsystatic.com/moa.jpg', `MOA got ${moa.variant?.url}`);
+    assert(cherry.variant.url === 'https://i.etsystatic.com/cherry.jpg', `Cherry got ${cherry.variant?.url}`);
+    assert(moa.variant.imageId === 9002, 'the image id is needed as a key and was missing');
+    assert(moa.variant.url !== cherry.variant.url, 'two different variants returned the same photo');
+
+    // A listing with no per-variant photos: the cover shot and the last photo,
+    // which on these listings is the chart.
+    db.prepare('INSERT OR REPLACE INTO listings (listing_id, shop_id, title, state) VALUES (?,?,?,?)')
+      .run(4544914574, 960102, 'Cute Pastel Chikawa Kawaii Keycap Set', 'active');
+    for (const [id, rank, f] of [[9101, 1, 'chikawa-cover'], [9102, 2, 'chikawa-2'], [9103, 3, 'chikawa-chart']]) {
+      db.prepare(`INSERT OR REPLACE INTO listing_images (listing_image_id, listing_id, rank, url_75x75, url_570xN, url_fullxfull)
+                  VALUES (?,?,?,?,?,?)`).run(id, 4544914574, rank, `t/${f}`, `m/${f}`, `https://i.etsystatic.com/${f}.jpg`);
+    }
+    const plain = pics.resolveImages(4544914574);
+    assert(plain.variant === null, 'a listing with no pinned photos should not claim to have one');
+    assert(plain.first.url === 'https://i.etsystatic.com/chikawa-cover.jpg', 'the first photo is wrong');
+    assert(plain.last.url === 'https://i.etsystatic.com/chikawa-chart.jpg', 'the last photo is wrong');
+    assert(plain.best.url === plain.first.url, 'with no variant photo, the cover shot is what a sheet should get');
+
+    // And the variant link that reopens exactly what was bought.
+    const url = pics.listingUrl(4447531240, { valueIds: [6251766498] });
+    assert(url.endsWith('?variation0=6251766498'), `variant link: ${url}`);
+  } finally {
+    db.prepare('DELETE FROM listing_images WHERE listing_id IN (4447531240, 4544914574)').run();
+    db.prepare('DELETE FROM variation_images WHERE listing_id = 4447531240').run();
+    db.prepare('DELETE FROM listings WHERE listing_id IN (4447531240, 4544914574)').run();
+    client.removeAccount(960102);
+  }
+});
+
+await check('the sheet\'s own column names all map to something', async () => {
+  const { matchByName } = await import('../server/src/airtable/mapping.js');
+  const columns = ['BAŞLIK İLK 40', 'Etsy Link', 'Ürün Tedarik Link', 'Varyant Görsel ID', 'Varyant Görsel',
+    'Variants', 'E-MAIL', 'Full Name', 'Street', 'Ship City', 'Ship State', 'Ship Zip', 'Ship Country',
+    'Fiyat', 'Ürün Fiyatı', 'Kargo Ücreti', 'NOT 1', 'NOT 2', 'MAĞAZA', 'KOD'];
+  const { map, unmatched } = matchByName(columns.map((name) => ({ name, type: 'singleLineText', writable: true })));
+  const by = new Map(map.map((m) => [m.target, m.source]));
+
+  assert(!unmatched.length, `unmatched columns: ${unmatched.join(', ')}`);
+  // A price column on these sheets means the order subtotal, not one unit.
+  assert(by.get('Fiyat') === 'total.subtotal', `Fiyat went to ${by.get('Fiyat')}`);
+  assert(by.get('Ürün Fiyatı') === 'total.subtotal', `Ürün Fiyatı went to ${by.get('Ürün Fiyatı')}`);
+  assert(by.get('E-MAIL') === 'buyer.email', 'the email column did not map');
+  assert(by.get('Varyant Görsel ID') === 'item.variant_image_id', 'the image id column did not map');
+  // These two must use the falling-back sources, or the cell is empty whenever
+  // the listing has no per-variant photo or no variant supplier page.
+  assert(by.get('Varyant Görsel') === 'item.variant_image', `Varyant Görsel went to ${by.get('Varyant Görsel')}`);
+  assert(by.get('Ürün Tedarik Link') === 'item.supply_link_any', `Tedarik Link went to ${by.get('Ürün Tedarik Link')}`);
+});
+
+console.log('\nUndo');
+await check('an undo puts the rows back and only fires once', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const skugen = await import('../server/src/services/skugen.js');
+  const undo = await import('../server/src/services/undo.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960103').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960103,'Undo Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960103);
+
+  try {
+    db.prepare('INSERT OR REPLACE INTO listings (listing_id, shop_id, title, state) VALUES (?,?,?,?)')
+      .run(9601, 960103, 'Keycap Set', 'active');
+    for (let i = 0; i < 3; i += 1) {
+      db.prepare(`INSERT OR REPLACE INTO listing_products (product_id, listing_id, sku, variation_label, is_deleted)
+                  VALUES (?,?,?,?,0)`).run(960110 + i, 9601, `OLD-0${i + 1}`, `V${i + 1}`);
+    }
+    const skus = () => db.prepare('SELECT sku FROM listing_products WHERE listing_id = 9601 ORDER BY product_id')
+      .all().map((r) => r.sku).join(',');
+
+    skugen.applyPlan(skugen.planByRule({ listingIds: [9601], prefix: 'KC', overwrite: true }));
+    assert(skus() === 'KC001-01,KC001-02,KC001-03', `after generating: ${skus()}`);
+
+    const pending = undo.next();
+    assert(pending && /Generate SKUs/.test(pending.label), 'the change was not recorded for undo');
+
+    const r = undo.undo();
+    assert(skus() === 'OLD-01,OLD-02,OLD-03', `after undo: ${skus()}`);
+    assert(r.restored === 3, `expected 3 rows back, got ${r.restored}`);
+
+    // A second press must move on, not re-apply the same snapshot.
+    assert(undo.next() === null, 'a spent undo entry is still being offered');
+
+    // Something that went to Etsy is in the history but is not ours to reverse.
+    undo.recordExternal({ label: 'Pushed to Etsy', kind: 'etsy.write', note: 'Change it on Etsy instead.' });
+    let refused = false;
+    try { undo.undo(undo.history({ limit: 1 })[0].id); } catch { refused = true; }
+    assert(refused, 'an Etsy write was offered as undoable');
+  } finally {
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960103').run();
+    db.prepare('DELETE FROM listing_products WHERE listing_id = 9601').run();
+    db.prepare('DELETE FROM listings WHERE listing_id = 9601').run();
+    client.removeAccount(960103);
+  }
+});
+
+console.log('\nAddress checking');
+await check('post code rules catch what they should and leave the rest alone', async () => {
+  const { ruleChecks } = await import('../server/src/services/addresscheck.js');
+  const clean = (a) => ruleChecks(a).length === 0;
+
+  assert(clean({ line1: '644 E 14th Street Apt 808', city: 'New York', state: 'NY', zip: '10009', country: 'US' }),
+    'a good US address was flagged');
+  assert(clean({ line1: '61 Dove Street', city: 'Bristol', state: 'England', zip: 'BS2 8LS', country: 'GB' }),
+    'a good UK address was flagged');
+  // A foreign format must not be treated as an error just for looking unusual.
+  assert(clean({ line1: 'Bagdat Caddesi 120', city: 'Istanbul', state: '', zip: '34728', country: 'TR' }),
+    'a good Turkish address was flagged');
+
+  const wrongState = ruleChecks({ line1: '1 Main St', city: 'San Antonio', state: 'TX', zip: '10009', country: 'US' });
+  assert(wrongState.some((f) => f.field === 'zip' && /belongs to NY/.test(f.says)),
+    'a ZIP belonging to another state went unnoticed');
+
+  const noNumber = ruleChecks({ line1: 'Beaver Ave', city: 'Fort Wayne', state: 'IN', zip: '46807', country: 'US' });
+  assert(noNumber.some((f) => f.field === 'line1'), 'a street with no number went unnoticed');
+
+  const badUk = ruleChecks({ line1: '61 Dove Street', city: 'Bristol', state: '', zip: 'BS2', country: 'GB' });
+  assert(badUk.some((f) => f.field === 'zip'), 'a half-written UK post code went unnoticed');
+});
+
+await check('the AI cannot invent fields or rewrite an address on its own', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const ac = await import('../server/src/services/addresscheck.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960104').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960104,'Addr Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960104);
+
+  try {
+    db.prepare(`INSERT OR REPLACE INTO receipts (receipt_id, shop_id, name, first_line, city, state, zip,
+                country_iso, status, grandtotal_amount, grandtotal_divisor, grandtotal_currency, created_ts)
+                VALUES (960120, 960104, 'Kellee Tay', '1115 Via Belcanto', 'SAN ANTONIO', 'TX', '78260', 'US',
+                'Paid', 1000, 100, 'USD', ?)`).run(Math.floor(Date.now() / 1000));
+
+    const runner = async () => ({
+      text: JSON.stringify({
+        verdict: 'suspect', confidence: 0.8, summary: 'Looks like a unit number is missing.',
+        findings: [
+          { field: 'line1', level: 'warn', says: 'No apartment number.' },
+          { field: 'invented', level: 'catastrophe', says: 'a field and a level that do not exist' },
+        ],
+        suggestion: { city: 'San Antonio', zip: '78260', bogusKey: 'should be dropped' },
+        suggestionReason: 'City is normally title case.',
+      }),
+      provider: 'anthropic', model: 'claude-opus-5',
+    });
+
+    const r = await ac.checkAddress({ receiptId: 960120, runner });
+    assert(r.ai.model === 'claude-opus-5', 'the model that read it was not reported');
+    assert(!r.ai.findings.some((f) => f.field === 'invented'), 'an invented field was kept');
+    assert(!r.ai.findings.some((f) => f.level === 'catastrophe'), 'an invented severity was kept');
+    assert(!('bogusKey' in r.suggestion.changes), 'a made-up field reached the suggestion');
+    // The zip was not actually different, so it is not a change.
+    assert(!('zip' in r.suggestion.changes), 'an unchanged field was proposed as a correction');
+    assert(r.suggestion.changes.city === 'San Antonio', 'the real correction was lost');
+
+    // Nothing is applied until it is accepted, and Etsy's record is left alone.
+    const before = db.prepare('SELECT city FROM receipts WHERE receipt_id = 960120').get().city;
+    assert(before === 'SAN ANTONIO', 'the receipt was rewritten without being asked');
+    ac.acceptSuggestion(960120);
+    const after = db.prepare('SELECT city FROM receipts WHERE receipt_id = 960120').get().city;
+    assert(after === 'SAN ANTONIO', 'accepting a correction overwrote what the buyer typed');
+    assert(ac.checkFor(960120).acceptedAddress.city === 'San Antonio', 'the accepted version was not stored');
+  } finally {
+    db.prepare('DELETE FROM address_checks WHERE receipt_id = 960120').run();
+    db.prepare('DELETE FROM receipts WHERE receipt_id = 960120').run();
+    client.removeAccount(960104);
+  }
+});
+
+console.log('\nDraft desk and supply book');
+await check('a draft is edited locally and Etsy is not touched until it is sent', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960105').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960105,'Draft Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960105);
+
+  try {
+    db.prepare(`INSERT OR REPLACE INTO listing_drafts (listing_id, shop_id, source, etsy_state, etsy_snapshot, staged)
+                VALUES (960130, 960105, 'etsy', 'draft', ?, '{}')`).run(JSON.stringify({
+      listing_id: 960130, title: 'Draft keycap set', description: 'From Etsy.',
+      price: { amount: 2999, divisor: 100 }, quantity: 5, tags: ['keycap'],
+      taxonomy_id: 1000, who_made: 'i_did', when_made: 'made_to_order', state: 'draft',
+    }));
+
+    drafts.stage(960130, { title: 'One Piece Theme Anime Artisan Keycap Set', price: 39.99 });
+    const d = drafts.get(960130);
+    assert(d.merged.title === 'One Piece Theme Anime Artisan Keycap Set', 'the edit was not staged');
+    // The whole point: Etsy's copy is untouched and still visible.
+    assert(d.etsy.title === 'Draft keycap set', 'the edit overwrote what Etsy has');
+    assert(d.changed.includes('title') && d.changed.includes('price'), `changed: ${d.changed.join(',')}`);
+
+    const plan = drafts.preview(960130);
+    assert(plan.ready, `should be ready: ${plan.problems.join('; ')}`);
+    assert(plan.willChange.length === 2, `expected 2 fields to change, got ${plan.willChange.length}`);
+
+    // A brand new draft says exactly what Etsy would refuse it for.
+    const local = drafts.createLocal({ title: 'New idea' });
+    const localPlan = drafts.preview(local.listingId);
+    assert(!localPlan.ready, 'an empty draft was called ready');
+    assert(localPlan.problems.some((p) => /description/i.test(p)), 'a missing description was not reported');
+
+    drafts.revert(960130);
+    assert(drafts.get(960130).merged.title === 'Draft keycap set', 'reverting did not go back to Etsy\'s version');
+  } finally {
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960105').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960105').run();
+    client.removeAccount(960105);
+  }
+});
+
+await check('supplier links are read and joined to the SKU', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const tb = await import('../server/src/services/taobao.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960106').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960106,'Supply Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960106);
+
+  try {
+    // The item id and shop are in the URL, so a pasted link works offline.
+    const taobao = tb.parseSupplyUrl('https://item.taobao.com/item.htm?abbucket=10&id=1012415746554');
+    assert(taobao.supplier === 'taobao' && taobao.itemId === '1012415746554', JSON.stringify(taobao));
+    assert(taobao.cleanUrl === 'https://item.taobao.com/item.htm?id=1012415746554',
+      `the tracking parameters were not stripped: ${taobao.cleanUrl}`);
+    assert(tb.parseSupplyUrl('https://detail.1688.com/offer/778899001122.html?offerId=778899001122').supplier === '1688',
+      '1688 was not recognised');
+    assert(tb.parseSupplyUrl('https://www.aliexpress.com/item/1005001234567890.html').itemId === '1005001234567890',
+      'AliExpress puts the id in the path and it was missed');
+    assert(!tb.parseSupplyUrl('not a link').ok, 'nonsense was accepted as a link');
+
+    const imported = tb.importRows([
+      'SKU, link, variant link, price, currency',
+      'VER-01, https://item.taobao.com/item.htm?id=1012415746554, https://item.taobao.com/item.htm?id=1012415746554&skuId=55, 18.50, CNY',
+      'VER-02, not-a-link',
+    ].join('\n'));
+    assert(imported.saved === 1 && imported.failed === 1, `imported ${imported.saved}/${imported.failed}`);
+
+    const item = tb.getItem('VER-01');
+    assert(item.price === 18.5 && item.currency === 'CNY', 'the price did not survive the import');
+    assert(item.priceUsd > 0 && item.priceUsd < 18.5, `18.50 CNY should be a few dollars, got ${item.priceUsd}`);
+    assert(String(item.priceUsd) === String(Math.round(item.priceUsd * 100) / 100),
+      `money should be to the cent, got ${item.priceUsd}`);
+
+    // It writes through to the SKU record the SKU page and order desk read.
+    const meta = db.prepare('SELECT supply_link, variant_supply_link, supply_currency FROM sku_meta WHERE shop_id IS ? AND sku = ?')
+      .get(960106, 'VER-01');
+    assert(meta.supply_link.includes('1012415746554'), 'the main link did not reach the SKU record');
+    assert(meta.variant_supply_link.includes('skuId=55'), 'the variant link did not reach the SKU record');
+    assert(meta.supply_currency === 'CNY', 'the currency did not reach the SKU record');
+  } finally {
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960106').run();
+    db.prepare('DELETE FROM supply_items WHERE shop_id = 960106').run();
+    db.prepare('DELETE FROM sku_meta WHERE shop_id = 960106').run();
+    client.removeAccount(960106);
+  }
+});
+
+await check('every Etsy operation the spec publishes has a caller', async () => {
+  const { readFileSync, readdirSync, statSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { OPERATIONS } = await import('../server/src/etsy/operations.generated.js');
+
+  const walk = (dir) => readdirSync(dir).flatMap((name) => {
+    const full = join(dir, name);
+    return statSync(full).isDirectory() ? walk(full) : full.endsWith('.js') ? [full] : [];
+  });
+  const source = walk('server/src')
+    .filter((f) => !f.endsWith('operations.generated.js'))
+    .map((f) => readFileSync(f, 'utf8')).join('\n');
+
+  const called = new Set([...source.matchAll(/call(?:All)?\(\s*['"]([A-Za-z]+)['"]/g)].map((m) => m[1]));
+  const all = Object.keys(OPERATIONS);
+  const unused = all.filter((op) => !called.has(op));
+  assert(all.length === 105, `expected 105 operations, the spec has ${all.length}`);
+  assert(!unused.length, `${unused.length} operation(s) have no caller: ${unused.slice(0, 8).join(', ')}`);
 });
 
 console.log('\nGuards');

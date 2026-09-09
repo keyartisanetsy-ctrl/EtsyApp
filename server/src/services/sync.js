@@ -480,3 +480,84 @@ export async function syncAll(opts = {}) {
   const receipts = await syncReceipts(opts);
   return { listings, sections, receipts };
 }
+
+/**
+ * Chase down the buyer's email for orders that arrived without one.
+ *
+ * Etsy's bulk receipt list is not always complete: the same order fetched on
+ * its own often carries an email the list left null. So for orders where we
+ * have neither address, ask again one receipt at a time. Reads are cheap and
+ * parallel-safe; only writes are queued.
+ *
+ * Nothing is invented. If Etsy has no email for an order, the order keeps none
+ * and the screen says so, which is the honest answer.
+ */
+export async function enrichReceiptContacts({ limit = 60, receiptIds = null } = {}) {
+  const db = getDb();
+  const shopId = requireShopId();
+
+  const rows = receiptIds?.length
+    ? db.prepare(`SELECT receipt_id FROM receipts WHERE shop_id IS ? AND receipt_id IN (${
+      receiptIds.map(() => '?').join(',')})`).all(shopId, ...receiptIds)
+    : db.prepare(`
+        SELECT receipt_id FROM receipts
+        WHERE shop_id IS ?
+          AND COALESCE(buyer_email, '') = ''
+          AND COALESCE(payment_email, '') = ''
+        ORDER BY created_ts DESC LIMIT ?`).all(shopId, limit);
+
+  if (!rows.length) return { checked: 0, found: 0, stillMissing: 0, receipts: [] };
+
+  const found = [];
+  const missing = [];
+
+  for (const { receipt_id: receiptId } of rows) {
+    try {
+      // The single-receipt endpoint, which returns the fuller record.
+      const r = await call('getShopReceipt', { shop_id: shopId, receipt_id: receiptId });
+      const email = r?.buyer_email || r?.payment_email || null;
+
+      if (email) {
+        db.prepare(`
+          UPDATE receipts SET
+            buyer_email = COALESCE(?, buyer_email),
+            payment_email = COALESCE(?, payment_email),
+            synced_at = datetime('now')
+          WHERE receipt_id = ? AND shop_id IS ?`)
+          .run(r.buyer_email ?? null, r.payment_email ?? null, receiptId, shopId);
+        found.push({ receiptId, email, source: r.buyer_email ? 'buyer' : 'payment' });
+        continue;
+      }
+
+      // Still nothing on the receipt: the payment record carries the payer's
+      // address on some orders even when the receipt does not.
+      try {
+        const pay = await call('getShopPaymentByReceiptId', { shop_id: shopId, receipt_id: receiptId });
+        const payEmail = pay?.results?.[0]?.buyer_email || null;
+        if (payEmail) {
+          db.prepare("UPDATE receipts SET payment_email = ?, synced_at = datetime('now') WHERE receipt_id = ? AND shop_id IS ?")
+            .run(payEmail, receiptId, shopId);
+          found.push({ receiptId, email: payEmail, source: 'payment record' });
+          continue;
+        }
+      } catch { /* the payment record is optional */ }
+
+      missing.push(receiptId);
+    } catch (err) {
+      log.warn(`receipt ${receiptId}: ${err.message}`);
+      missing.push(receiptId);
+    }
+  }
+
+  audit('orders.enrich_contacts', { detail: { checked: rows.length, found: found.length } });
+  return {
+    checked: rows.length,
+    found: found.length,
+    stillMissing: missing.length,
+    receipts: found,
+    missingIds: missing,
+    note: missing.length
+      ? 'Etsy returned no email for these orders. It withholds the address on some sales; there is nowhere else to read it from.'
+      : null,
+  };
+}

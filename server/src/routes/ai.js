@@ -36,6 +36,11 @@ router.post('/prompts/:id/default', asyncRoute(async (req, res) => res.json(ai.s
 
 router.delete('/prompts/:id', asyncRoute(async (req, res) => res.json(ai.deletePrompt(Number(req.params.id)))));
 
+/** Which providers are set up, and which model versions each one offers. */
+router.get('/models', asyncRoute(async (req, res) => {
+  res.json({ providers: ai.modelOptions() });
+}));
+
 // ------------------------------------------------------------- attachments
 
 /** Screenshots of buyer messages, or source photos for listing generation. */

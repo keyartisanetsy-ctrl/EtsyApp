@@ -15,6 +15,7 @@ import { toMajor, discounted, listPriceForTarget } from '../lib/money.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { getDiscountPercent } from './settings.js';
 import { createLogger } from '../lib/logger.js';
+import * as undo from './undo.js';
 
 const log = createLogger('inventory');
 
@@ -264,6 +265,12 @@ export function setSkuMeta(sku, meta = {}) {
   if (!sku) throw badRequest('A SKU is required to attach supply information.');
   const db = getDb();
   const shopId = activeShopId();
+  // Keep the previous supply record so a pasted-over link can be taken back.
+  const handle = undo.begin({
+    label: `Supply record for ${sku}`,
+    kind: 'sku.meta',
+    targets: [{ table: 'sku_meta', where: 'shop_id IS ? AND sku = ?', params: [shopId, sku] }],
+  });
   const existing = db.prepare('SELECT * FROM sku_meta WHERE shop_id IS ? AND sku = ?').get(shopId, sku) || {};
   const merged = {
     supply_link: meta.supplyLink ?? existing.supply_link ?? '',
@@ -289,7 +296,8 @@ export function setSkuMeta(sku, meta = {}) {
     .run(shopId, sku, merged.supply_link, merged.variant_supply_link, merged.supplier_name,
          merged.variant_image_url, merged.supply_cost,
          merged.supply_currency, merged.lead_time_days, merged.notes);
-  return { sku, ...merged };
+  const undoId = undo.commit(handle, { affected: 1 });
+  return { sku, ...merged, undoId };
 }
 
 export const getSkuMeta = (sku) =>

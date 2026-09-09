@@ -370,6 +370,125 @@ function OrderTotalsInUsd({ totals }) {
   );
 }
 
+/**
+ * Reading an address before the parcel goes.
+ *
+ * The offline rules run every time and cost nothing. The AI is a button,
+ * because it costs a call - and you pick which model reads it, since a careful
+ * model is worth it on a $200 order and overkill on a $12 one.
+ *
+ * A proposed correction is never applied on its own. Etsy's record keeps what
+ * the buyer typed; the accepted version sits beside it.
+ */
+function AddressCheck({ receiptId, onChanged }) {
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [model, setModel] = useState('');
+  const toast = useToast();
+  const showError = useErrorToast();
+
+  const { data: existing } = useAsync(
+    () => (receiptId ? api.get(`/orders/${receiptId}/address-check`) : null), [receiptId], { immediate: !!receiptId });
+  const { data: models } = useAsync(() => api.get('/ai/models').catch(() => null), []);
+
+  const shown = result ?? existing;
+
+  const check = async () => {
+    setBusy(true);
+    try {
+      const [provider, version] = model ? model.split('|') : [undefined, undefined];
+      const r = await api.post(`/orders/${receiptId}/address-check`, { provider, model: version });
+      setResult(r);
+      toast({
+        kind: r.verdict === 'ok' ? 'ok' : 'warn',
+        title: r.verdict === 'ok' ? 'Address looks fine' : `Address looks ${r.verdict}`,
+        body: r.summary,
+      });
+    } catch (err) { showError(err, 'Could not check that'); } finally { setBusy(false); }
+  };
+
+  const accept = async () => {
+    try {
+      const r = await api.post(`/orders/${receiptId}/address-accept`, {});
+      toast({ kind: 'ok', title: 'Correction accepted', body: `Changed: ${r.changed.join(', ')}. Etsy's own record is untouched.` });
+      setResult(null); onChanged();
+    } catch (err) { showError(err); }
+  };
+
+  const findings = [...(shown?.rules ?? []), ...(shown?.ai?.findings ?? shown?.findings ?? [])];
+
+  return (
+    <>
+      <div className="section-title">Address check</div>
+      <div className="flex gap4 mb8" style={{ flexWrap: 'wrap' }}>
+        <select className="select sm" value={model} onChange={(e) => setModel(e.target.value)} style={{ maxWidth: 260 }}>
+          <option value="">Whichever AI is set as default</option>
+          {(models?.providers ?? []).filter((p) => p.configured).flatMap((p) =>
+            p.models.map((m) => (
+              <option key={`${p.provider}|${m.id}`} value={`${p.provider}|${m.id}`}>{m.label}</option>
+            )))}
+        </select>
+        <button className="btn sm" onClick={check} disabled={busy}>
+          {busy ? <Spinner /> : '🔍'} Check this address
+        </button>
+      </div>
+
+      {!shown ? (
+        <div className="small dim">
+          Not checked yet. The shape checks (post code, state, missing house number) run instantly;
+          the AI reads the rest.
+        </div>
+      ) : (
+        <>
+          <Banner kind={shown.verdict === 'ok' ? 'ok' : shown.verdict === 'undeliverable' ? 'err' : 'warn'}>
+            {shown.summary}
+            {shown.ai?.model && <div className="small dim">Read by {shown.ai.model}.</div>}
+            {shown.ai?.error && <div className="small dim">The AI could not be reached: {shown.ai.error}. The shape checks above still ran.</div>}
+          </Banner>
+
+          {findings.length > 0 && (
+            <table className="data">
+              <thead><tr><th>Field</th><th>What is wrong</th></tr></thead>
+              <tbody>
+                {findings.map((f, i) => (
+                  <tr key={`${f.field}-${i}`}>
+                    <td className="small mono">{f.field}</td>
+                    <td className="small">
+                      <span className={`badge ${f.level === 'error' ? 'red' : f.level === 'warn' ? 'amber' : 'grey'}`}>
+                        {f.level}
+                      </span>{' '}
+                      {f.says}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {shown.suggestion?.changes && (
+            <div className="card mt8" style={{ padding: 10 }}>
+              <div className="section-title">Suggested correction</div>
+              <dl className="kv">
+                {Object.entries(shown.suggestion.changes).map(([k, v]) => (
+                  <React.Fragment key={k}>
+                    <dt>{k}</dt>
+                    <dd>{v}</dd>
+                  </React.Fragment>
+                ))}
+              </dl>
+              {shown.suggestion.reason && <div className="small dim">{shown.suggestion.reason}</div>}
+              <button className="btn sm primary mt8" onClick={accept}>Use this instead</button>
+              <div className="hint">
+                Etsy&rsquo;s record keeps what the buyer typed. This is stored beside it and is what the label uses.
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 function OrderDetail({ id, onClose, onChanged }) {
   const [tab, setTab] = useState('summary');
   const { data: order, loading, reload } = useAsync(() => (id ? api.get(`/orders/${id}`) : null), [id], { immediate: !!id });
@@ -443,6 +562,8 @@ function OrderDetail({ id, onClose, onChanged }) {
                 Shipping address <CopyButton text={copy?.address} label="Copy address" className="btn xs" />
               </div>
               <div className="copy-block mb16">{copy?.address || order.address.formatted || '—'}</div>
+
+              <AddressCheck receiptId={id} onChanged={onChanged} />
 
               <div className="section-title">Totals</div>
               <dl className="kv mb16">

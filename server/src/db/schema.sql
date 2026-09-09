@@ -550,3 +550,89 @@ CREATE TABLE IF NOT EXISTS ad_costs (
   PRIMARY KEY (shop_id, month, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_adcosts_month ON ad_costs(shop_id, month DESC);
+
+-- What we decided about an order's shipping address, and any correction the
+-- seller accepted. Etsy's own address is never overwritten - what the buyer
+-- typed stays on the receipt, and the accepted version lives here beside it,
+-- so both are always visible.
+CREATE TABLE IF NOT EXISTS address_checks (
+  receipt_id       INTEGER PRIMARY KEY,
+  shop_id          INTEGER,
+  verdict          TEXT,          -- ok | suspect | undeliverable
+  summary          TEXT,
+  findings         TEXT,          -- JSON array
+  suggestion       TEXT,          -- JSON {changes, reason}
+  accepted         INTEGER DEFAULT 0,
+  accepted_address TEXT,          -- JSON, the version to actually ship to
+  accepted_at      TEXT,
+  provider         TEXT,
+  model            TEXT,
+  checked_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_addrcheck_shop ON address_checks(shop_id, verdict);
+
+-- One row per undoable change: the rows as they were before it, so pressing
+-- Ctrl+Z can put them back. Changes that went to Etsy or Airtable are recorded
+-- too, marked as not undoable, so the history is complete and an undo never
+-- silently skips past one of them.
+CREATE TABLE IF NOT EXISTS undo_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  shop_id    INTEGER,
+  label      TEXT NOT NULL,     -- what the user sees, e.g. "Set 12 SKUs"
+  kind       TEXT,              -- sku.generate, orders.flags, tracking.status, ...
+  undoable   INTEGER DEFAULT 1,
+  undone     INTEGER DEFAULT 0,
+  note       TEXT,              -- when it cannot be undone, what to do instead
+  snapshots  TEXT,              -- JSON [{table, where, params, rows}]
+  affected   INTEGER,
+  detail     TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  undone_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_undo_shop ON undo_log(shop_id, id DESC);
+
+-- The draft desk. A listing started on Etsy is pulled down here, edited across
+-- as many sittings as needed, and pushed back only when it is ready.
+--
+-- Etsy's version and your edits are kept apart on purpose: the screen can then
+-- show both, and an edit you abandon never quietly becomes the truth. A
+-- negative listing_id means a draft that exists only here and has never been
+-- to Etsy.
+CREATE TABLE IF NOT EXISTS listing_drafts (
+  listing_id    INTEGER PRIMARY KEY,
+  shop_id       INTEGER,
+  source        TEXT,            -- etsy | local
+  etsy_state    TEXT,
+  etsy_snapshot TEXT,            -- JSON, the listing as Etsy last gave it
+  staged        TEXT,            -- JSON, only the fields you changed
+  pushed_at     TEXT,
+  push_error    TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_drafts_shop ON listing_drafts(shop_id, updated_at DESC);
+
+-- The supply book: what you buy, from whom, for how much. This is the Taobao
+-- side of the business folded into the same database, keyed by SKU so it lines
+-- up with everything else rather than living in a second app.
+--
+-- Private. Never sent to Etsy, and only in an Airtable push if you map it.
+CREATE TABLE IF NOT EXISTS supply_items (
+  shop_id       INTEGER,
+  sku           TEXT NOT NULL,
+  supplier      TEXT,            -- taobao | tmall | 1688 | aliexpress | alibaba | other
+  item_id       TEXT,            -- the supplier's own item number, from the URL
+  url           TEXT,            -- the product page, tidied of tracking parameters
+  variant_url   TEXT,            -- the page for this exact colour/size
+  variant_label TEXT,
+  title         TEXT,
+  price         REAL,
+  currency      TEXT DEFAULT 'CNY',
+  moq           INTEGER,         -- minimum order quantity
+  shipping_cost REAL,            -- to your forwarder, per unit
+  notes         TEXT,
+  images        TEXT,            -- JSON array of URLs
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (shop_id, sku)
+);
+CREATE INDEX IF NOT EXISTS idx_supply_supplier ON supply_items(shop_id, supplier);
