@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import api from '../lib/api.js';
 import { TablePage } from '../components/Page.jsx';
@@ -136,7 +136,7 @@ export default function Drafts() {
           </table>
         )}
 
-      <DraftEditor id={open} onClose={() => setOpen(null)} onChanged={reload} />
+      <DraftEditor key={open} id={open} onClose={() => setOpen(null)} onChanged={reload} />
       <ConnectProductStudio open={connectOpen} onClose={() => setConnectOpen(false)} onImported={reload} />
     </TablePage>
   );
@@ -144,6 +144,7 @@ export default function Drafts() {
 
 function DraftEditor({ id, onClose, onChanged }) {
   const [busy, setBusy] = useState(false);
+  const [revertTick, setRevertTick] = useState(0);
   const toast = useToast();
   const showError = useErrorToast();
 
@@ -196,28 +197,16 @@ function DraftEditor({ id, onClose, onChanged }) {
   );
 
   const field = (name, label, props = {}) => (
-    <div className="field">
-      <label>
-        {label}
-        {isChanged(name) && (
-          <span className="badge amber" style={{ marginLeft: 6 }} title={`Etsy still has: ${draft.etsy[name] ?? '(empty)'}`}>
-            changed
-          </span>
-        )}
-      </label>
-      {props.textarea
-        ? <textarea className="textarea" rows={props.rows ?? 6} value={merged[name] ?? ''}
-                    onChange={(e) => save({ [name]: e.target.value })} />
-        : props.options
-          ? <select className="select" value={merged[name] ?? ''} onChange={(e) => save({ [name]: e.target.value })}>
-              <option value="">—</option>
-              {props.options.map((o) => <option key={o} value={o}>{String(o).replace(/_/g, ' ')}</option>)}
-            </select>
-          : <input className="input" type={props.type ?? 'text'} step={props.step}
-                   value={Array.isArray(merged[name]) ? merged[name].join(', ') : merged[name] ?? ''}
-                   onChange={(e) => save({ [name]: e.target.value })} />}
-      {props.hint && <div className="hint">{props.hint}</div>}
-    </div>
+    <Field
+      key={name}
+      name={name}
+      label={label}
+      value={merged[name]}
+      changed={isChanged(name)}
+      etsyValue={draft.etsy[name]}
+      save={save}
+      {...props}
+    />
   );
 
   return (
@@ -226,7 +215,14 @@ function DraftEditor({ id, onClose, onChanged }) {
       title={draft ? (draft.isLocalOnly ? 'New draft' : `Draft ${draft.listingId}`) : 'Draft'}
       footer={draft && (
         <>
-          <button className="btn" onClick={async () => { await api.post(`/drafts/${id}/revert`, {}); reload(); replan(); onChanged(); }}>
+          <button className="btn" onClick={async () => {
+            await api.post(`/drafts/${id}/revert`, {});
+            await reload(); await replan(); onChanged();
+            // Every field below keeps its own typed-but-not-yet-saved buffer,
+            // so a plain reload() would not visibly undo anything on screen.
+            // Bumping this remounts them all, reseeded from what Etsy has.
+            setRevertTick((t) => t + 1);
+          }}>
             Drop my edits
           </button>
           <div className="spacer" />
@@ -240,7 +236,9 @@ function DraftEditor({ id, onClose, onChanged }) {
       )}
     >
       {!draft ? <Spinner /> : (
-        <>
+        // Keyed so "Drop my edits" can force every field below to forget
+        // whatever was typed and reseed from what Etsy actually has.
+        <div key={revertTick}>
           {plan?.problems?.length > 0 && (
             <Banner kind="warn">
               <div>Etsy will refuse this until these are sorted:</div>
@@ -263,15 +261,7 @@ function DraftEditor({ id, onClose, onChanged }) {
           {field('description', 'Description', { textarea: true, rows: 8 })}
           <div className="split">
             {field('price', 'Price', { type: 'number', step: '0.01' })}
-            <div className="field">
-              <label>
-                Stock
-                {isChanged('quantity') && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
-              </label>
-              <input className="input" type="number" min="1" max="999" value={merged.quantity ?? ''}
-                     onChange={(e) => save({ quantity: e.target.value })} />
-              <div className="hint">Etsy allows a quantity from 1 to 999.</div>
-            </div>
+            {field('quantity', 'Stock', { type: 'number', min: 1, max: 999, hint: 'Etsy allows a quantity from 1 to 999.' })}
           </div>
           {field('tags', 'Tags', { hint: 'Comma separated, up to 13, each at most 20 characters' })}
           <MaterialsPicker value={merged.materials ?? []} changed={isChanged('materials')}
@@ -352,17 +342,10 @@ function DraftEditor({ id, onClose, onChanged }) {
               </label>
             </div>
           </div>
-          {!draft.isLocalOnly && (
-            <div className="field">
-              <label>
-                Feature this listing
-                {isChanged('featured_rank') && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
-              </label>
-              <input className="input" type="number" min="1" value={merged.featured_rank ?? ''}
-                     onChange={(e) => save({ featured_rank: e.target.value || null })} />
-              <div className="hint">Optional. Position in your shop&rsquo;s featured row — 1 is left-most.</div>
-            </div>
-          )}
+          {!draft.isLocalOnly && field('featured_rank', 'Feature this listing', {
+            type: 'number', min: 1, clearAs: null,
+            hint: 'Optional. Position in your shop’s featured row — 1 is left-most.',
+          })}
 
           <div className="section-title">What Etsy has right now</div>
           <dl className="kv">
@@ -370,9 +353,61 @@ function DraftEditor({ id, onClose, onChanged }) {
             <dt>Price</dt><dd className="small dim">{draft.etsy.price != null ? fmtMoney(draft.etsy.price, 'USD') : '—'}</dd>
             <dt>State</dt><dd className="small dim">{draft.etsyState}</dd>
           </dl>
-        </>
+        </div>
       )}
     </Drawer>
+  );
+}
+
+/**
+ * One text/number/textarea field on the desk.
+ *
+ * Every keystroke used to save straight to the server and reload the whole
+ * draft, so two overlapping round trips could land out of order and shove an
+ * older value back into the box mid-type — the "can't add or remove the
+ * numbers" bug. Typing now only ever touches local state; the network save
+ * is debounced and fires once, well after you stop.
+ */
+function Field({ name, label, value, changed, etsyValue, save, textarea, rows, options, type, step, min, max, hint, clearAs }) {
+  const [local, setLocal] = useState(() => (Array.isArray(value) ? value.join(', ') : value ?? ''));
+  const timer = useRef(null);
+  useEffect(() => () => clearTimeout(timer.current), []);
+
+  const toSave = (v) => (v === '' && clearAs !== undefined ? clearAs : v);
+
+  const onType = (v) => {
+    setLocal(v);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => save({ [name]: toSave(v) }), 500);
+  };
+
+  const onSelect = (v) => {
+    setLocal(v);
+    clearTimeout(timer.current);
+    save({ [name]: toSave(v) });
+  };
+
+  return (
+    <div className="field">
+      <label>
+        {label}
+        {changed && (
+          <span className="badge amber" style={{ marginLeft: 6 }} title={`Etsy still has: ${etsyValue ?? '(empty)'}`}>
+            changed
+          </span>
+        )}
+      </label>
+      {textarea
+        ? <textarea className="textarea" rows={rows ?? 6} value={local} onChange={(e) => onType(e.target.value)} />
+        : options
+          ? <select className="select" value={local} onChange={(e) => onSelect(e.target.value)}>
+              <option value="">—</option>
+              {options.map((o) => <option key={o} value={o}>{String(o).replace(/_/g, ' ')}</option>)}
+            </select>
+          : <input className="input" type={type ?? 'text'} step={step} min={min} max={max}
+                   value={local} onChange={(e) => onType(e.target.value)} />}
+      {hint && <div className="hint">{hint}</div>}
+    </div>
   );
 }
 
