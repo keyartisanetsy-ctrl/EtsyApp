@@ -120,6 +120,13 @@ function Invoke-Quiet($exe, [string[]]$callArgs) {
   finally { $ErrorActionPreference = $prev }
 }
 
+$LogDir = Join-Path $ToolsDir 'logs'
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+# NSSM discards a service's stdout/stderr by default, which makes a crash
+# invisible -- Get-Service still says "Running" while the process is stuck
+# in a restart loop. Every service gets a real log file so that is never a
+# dead end again.
 function Install-OrRestart-Service($name, $exe, $argString, $workDir) {
   $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
   if (-not $svc) {
@@ -127,13 +134,15 @@ function Install-OrRestart-Service($name, $exe, $argString, $workDir) {
     Invoke-Quiet $nssmExe @('set', $name, 'AppParameters', $argString)
     Invoke-Quiet $nssmExe @('set', $name, 'AppDirectory', $workDir)
     Invoke-Quiet $nssmExe @('set', $name, 'Start', 'SERVICE_AUTO_START')
-    Invoke-Quiet $nssmExe @('start', $name)
-  } else {
-    Invoke-Quiet $nssmExe @('restart', $name)
   }
-  Start-Sleep -Seconds 2
+  Invoke-Quiet $nssmExe @('set', $name, 'AppStdout', (Join-Path $LogDir "$name-out.log"))
+  Invoke-Quiet $nssmExe @('set', $name, 'AppStderr', (Join-Path $LogDir "$name-err.log"))
+  if (-not $svc) { Invoke-Quiet $nssmExe @('start', $name) }
+  else { Invoke-Quiet $nssmExe @('restart', $name) }
+
+  Start-Sleep -Seconds 5
   $status = (Get-Service -Name $name -ErrorAction SilentlyContinue).Status
-  Write-Host "  $name status: $status"
+  Write-Host "  $name status: $status (log: $LogDir\$name-*.log)"
 }
 
 Section "Registering the app as a Windows service..."
@@ -175,4 +184,5 @@ Write-Host "   $EnvFile"
 Write-Host ""
 Write-Host " Both services restart automatically when the server reboots."
 Write-Host " Check status any time with:  Get-Service EtsyCommandCenter, EtsyCaddy"
+Write-Host " If something is not working, the real error is in:  $LogDir"
 Write-Host "================================================================"
