@@ -1,25 +1,27 @@
-# One-shot setup: gets Etsy Command Center running on a fresh Windows Server
-# VDS, reachable over real HTTPS from any browser, with no domain purchase,
-# no DNS setup, and no GitHub login (the repo is public, downloaded as a
-# plain zip).
+# One-shot setup: gets Etsy Command Center running on a Windows Server VDS,
+# reachable over real HTTPS from any browser -- with no domain, no DNS step,
+# no GitHub login (the repo is public, downloaded as a plain zip), and no
+# access to the VDS provider's own network firewall.
+#
+# That last part matters: an earlier version of this script fronted the app
+# with Caddy and a public IP, which needs inbound 80/443 open on whatever
+# firewall/security-group sits in front of the VDS at the provider level --
+# something you often cannot reach or change from inside the machine itself.
+# Cloudflare's tunnel sidesteps that entirely: cloudflared makes only an
+# OUTBOUND connection out to Cloudflare, which is essentially never
+# blocked, and Cloudflare hands back a public HTTPS address for it. No
+# inbound port, no provider panel, no IP needed at all.
 #
 # Run this ON THE VDS, in a PowerShell window running as Administrator:
 #
 #   irm https://raw.githubusercontent.com/keyartisanetsy-ctrl/EtsyApp/claude/etsy-bulk-management-app-q3enu5/deploy/setup-vds.ps1 -OutFile setup-vds.ps1
-#   powershell -ExecutionPolicy Bypass -File .\setup-vds.ps1 -PublicIP 84.55.17.145
-#
-# (Replace 84.55.17.145 with this VDS's own public IP.)
+#   powershell -ExecutionPolicy Bypass -File .\setup-vds.ps1
 #
 # What it does: installs Node.js if missing, downloads the app (no git
-# needed), builds it, generates a random app password, installs Caddy for
-# automatic HTTPS (via a free nip.io hostname that maps straight back to
-# this VDS's IP), and registers both the app and Caddy as Windows services
-# (via NSSM) so they survive reboots. Safe to re-run.
-
-param(
-  [Parameter(Mandatory = $true)]
-  [string]$PublicIP
-)
+# needed), builds it, generates a random app password, and registers both
+# the app and a Cloudflare tunnel as Windows services (via NSSM) so they
+# survive reboots. Safe to re-run. Prints the public URL and the password
+# at the end.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is much faster without a progress bar.
@@ -57,12 +59,9 @@ if (-not $isAdmin) {
   exit 1
 }
 
-$Hostname = ($PublicIP -replace '\.', '-') + '.nip.io'
 $AppDir   = 'C:\EtsyApp'
 $ToolsDir = 'C:\EtsyAppTools'
 New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
-
-Section "Public URL will be: https://$Hostname"
 
 # --- Node.js ----------------------------------------------------------------
 $node = Get-Command node -ErrorAction SilentlyContinue
@@ -166,41 +165,47 @@ function Install-OrRestart-Service($name, $exe, $argString, $workDir) {
 Section "Registering the app as a Windows service..."
 Install-OrRestart-Service -name 'EtsyCommandCenter' -exe $nodeExe -argString 'scripts\start.mjs' -workDir $AppDir
 
-# --- Caddy (automatic HTTPS) --------------------------------------------------
-$caddyExe = Join-Path $ToolsDir 'caddy.exe'
-if (-not (Test-Path $caddyExe)) {
-  Section "Installing Caddy (automatic HTTPS)..."
-  Invoke-WebRequest -Uri 'https://caddyserver.com/api/download?os=windows&arch=amd64' -OutFile $caddyExe
+# --- Cloudflare Tunnel (public HTTPS, no inbound port needed at all) ---------
+$cloudflaredExe = Join-Path $ToolsDir 'cloudflared.exe'
+if (-not (Test-Path $cloudflaredExe)) {
+  Section "Installing cloudflared (public HTTPS with no inbound port)..."
+  Invoke-WebRequest -Uri 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' -OutFile $cloudflaredExe
 }
-$CaddyDir = Join-Path $ToolsDir 'caddy-data'
-New-Item -ItemType Directory -Force -Path $CaddyDir | Out-Null
-$Caddyfile = Join-Path $ToolsDir 'Caddyfile'
-Set-Content -Path $Caddyfile -Value "$Hostname {`n`treverse_proxy 127.0.0.1:4317`n}`n"
 
-Section "Registering Caddy as a Windows service..."
-Install-OrRestart-Service -name 'EtsyCaddy' -exe $caddyExe -argString "run --config $Caddyfile --adapter caddyfile" -workDir $ToolsDir
+Section "Registering the tunnel as a Windows service..."
+Install-OrRestart-Service -name 'EtsyTunnel' -exe $cloudflaredExe -argString 'tunnel --url http://127.0.0.1:4317' -workDir $ToolsDir
 
-# --- Firewall ------------------------------------------------------------------
-# 443 is what a browser uses; 80 is kept open too because Caddy's automatic
-# certificate step tries it first and only falls back to doing everything
-# over 443 alone if it is not reachable.
-if (-not (Get-NetFirewallRule -DisplayName 'Etsy Command Center HTTPS' -ErrorAction SilentlyContinue)) {
-  New-NetFirewallRule -DisplayName 'Etsy Command Center HTTPS' -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow | Out-Null
-}
-if (-not (Get-NetFirewallRule -DisplayName 'Etsy Command Center HTTP (cert issuance)' -ErrorAction SilentlyContinue)) {
-  New-NetFirewallRule -DisplayName 'Etsy Command Center HTTP (cert issuance)' -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow | Out-Null
+# A "quick tunnel" like this one gets a fresh, randomly-named
+# *.trycloudflare.com address every time cloudflared starts -- it is
+# printed to its own log once the connection is up, not returned by nssm,
+# so it has to be read back out.
+Section "Waiting for the tunnel address..."
+$TunnelUrl = $null
+$errLog = Join-Path $LogDir 'EtsyTunnel-err.log'
+$outLog = Join-Path $LogDir 'EtsyTunnel-out.log'
+for ($i = 0; $i -lt 20 -and -not $TunnelUrl; $i++) {
+  Start-Sleep -Seconds 2
+  $line = Select-String -Path @($errLog, $outLog) -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -ErrorAction SilentlyContinue | Select-Object -Last 1
+  if ($line) { $TunnelUrl = $line.Matches[0].Value }
 }
 
 Write-Host "`n================================================================"
 Write-Host " Ready."
 Write-Host ""
-Write-Host " Open:      https://$Hostname"
+if ($TunnelUrl) {
+  Write-Host " Open:      $TunnelUrl"
+} else {
+  Write-Host " The tunnel address was not found yet -- give it a moment, then run:"
+  Write-Host "   Select-String -Path `"$errLog`",`"$outLog`" -Pattern 'trycloudflare.com'"
+}
 Write-Host " Password:  $AppPassword"
 Write-Host ""
 Write-Host " Write these two down -- the password is also saved in:"
 Write-Host "   $EnvFile"
 Write-Host ""
-Write-Host " Both services restart automatically when the server reboots."
-Write-Host " Check status any time with:  Get-Service EtsyCommandCenter, EtsyCaddy"
+Write-Host " Both services restart automatically when the server reboots. A restart"
+Write-Host " of EtsyTunnel gets a NEW trycloudflare.com address -- re-check the log"
+Write-Host " above if the old link stops working."
+Write-Host " Check status any time with:  Get-Service EtsyCommandCenter, EtsyTunnel"
 Write-Host " If something is not working, the real error is in:  $LogDir"
 Write-Host "================================================================"

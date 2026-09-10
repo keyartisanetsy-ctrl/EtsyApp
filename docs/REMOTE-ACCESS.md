@@ -31,19 +31,34 @@ Safe to re-run later to pick up new code: it reuses what is already
 installed and just rebuilds the app.
 
 **On a Windows Server VDS**, use `deploy/setup-vds.ps1` instead -- it does
-the exact same thing with Windows-native tools (an MSI install of Node, a
-plain zip download of the app so no Git installation is needed, Caddy and
-the app registered as real Windows services via NSSM so both restart on
+the same job with Windows-native tools (an MSI install of Node, a plain zip
+download of the app so no Git installation is needed, the app and a
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+both registered as real Windows services via NSSM so they restart on
 reboot). Open PowerShell **as Administrator** on the VDS, then:
 
 ```powershell
 irm https://raw.githubusercontent.com/keyartisanetsy-ctrl/EtsyApp/claude/etsy-bulk-management-app-q3enu5/deploy/setup-vds.ps1 -OutFile setup-vds.ps1
-powershell -ExecutionPolicy Bypass -File .\setup-vds.ps1 -PublicIP <VDS_PUBLIC_IP>
+powershell -ExecutionPolicy Bypass -File .\setup-vds.ps1
 ```
+
+No public IP to pass in and no inbound port to open, on Windows or at the
+VDS provider's own level: `cloudflared` makes only an *outbound* connection
+to Cloudflare, which hands back a public `https://<random-words>.trycloudflare.com`
+address (printed at the end, along with the password). That address changes
+every time the tunnel service restarts -- check the log
+(`C:\EtsyAppTools\logs\EtsyTunnel-err.log`) if it stops responding.
 
 The `-ExecutionPolicy Bypass` only applies to this one run; it does not
 change anything system-wide. Check the services any time with
-`Get-Service EtsyCommandCenter, EtsyCaddy`.
+`Get-Service EtsyCommandCenter, EtsyTunnel`.
+
+(The Linux script still uses Caddy with your own IP/hostname and needs
+inbound 80/443 open, at the OS and at whatever sits in front of the VDS. If
+that is not something you can open -- some providers don't give you access
+to their side of it at all -- `cloudflared` works the same way on Linux:
+`cloudflared tunnel --url http://127.0.0.1:4317` needs nothing inbound
+either.)
 
 The rest of this document explains the same steps by hand, for anyone who
 wants to customize something the script assumes (a real domain instead of
