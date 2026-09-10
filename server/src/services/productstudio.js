@@ -559,7 +559,7 @@ export function contract() {
       tags: ['keycap', 'artisan', 'anime'],
     },
     snippets: {
-      javascript: `// Product Studio: the "Etsy'e ekle" button
+      javascript: `// The "send to Etsy" button, wherever it lives
 await fetch('${url}', {
   method: 'POST',
   headers: {

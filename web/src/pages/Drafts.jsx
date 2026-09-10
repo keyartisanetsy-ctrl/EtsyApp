@@ -83,7 +83,7 @@ export default function Drafts() {
       subtitle={drafts.length ? `${drafts.length} draft(s) — nothing here is on Etsy until you send it` : ''}
       actions={
         <>
-          <button className="btn sm" onClick={() => setConnectOpen(true)}>🔗 Connect Product Studio</button>
+          <button className="btn sm" onClick={() => setConnectOpen(true)}>🔗 Connect an outside app</button>
           <button className="btn sm" onClick={startNew}>＋ Start one here</button>
           <button className="btn sm primary" disabled={busy} onClick={pull}>
             {busy ? <Spinner /> : '↧'} Get drafts from Etsy
@@ -568,7 +568,7 @@ function ConnectProductStudio({ open, onClose, onImported }) {
   if (!open) return null;
 
   const newKey = async () => {
-    if (!confirm('Make a new key? Product Studio will stop working until you paste the new one in.')) return;
+    if (!confirm('Make a new key? Every app using the old one will stop working until you paste the new one in.')) return;
     try { await api.post('/integrations/product-studio/key', {}); reload(); toast({ kind: 'ok', title: 'New key made' }); }
     catch (err) { showError(err); }
   };
@@ -608,7 +608,7 @@ function ConnectProductStudio({ open, onClose, onImported }) {
   );
 
   return (
-    <Modal open={open} onClose={onClose} lg title="Connect Product Studio">
+    <Modal open={open} onClose={onClose} lg title="Connect an outside app">
       <Tabs
         active={tab} onChange={setTab}
         tabs={[
@@ -624,17 +624,18 @@ function ConnectProductStudio({ open, onClose, onImported }) {
           {tab === 'setup' && (
             <>
               <Banner kind="info">
-                Make the &ldquo;Etsy&rsquo;e ekle&rdquo; button post the product to the address below. It arrives
-                here as a draft — it never goes to Etsy on its own, you finish it and press Send.
+                Any app you have — Product Studio, a Shopify tool, anything else — can use this same address. Give
+                its &ldquo;send to Etsy&rdquo; button this URL and key; every product it posts arrives here as a
+                draft. It never goes to Etsy on its own, you finish it and press Send.
               </Banner>
               <Line label="Post to this address" value={contract.url} />
               <Line label="Send this header" value={`X-Product-Studio-Key: ${contract.key}`} />
               <div className="flex gap4 mb16">
                 <button className="btn xs ghost" onClick={newKey}>Make a new key</button>
-                <span className="small dim">Only needed if the key has leaked.</span>
+                <span className="small dim">Only needed if the key has leaked. One key works for every app.</span>
               </div>
 
-              <div className="section-title">Paste this into Product Studio</div>
+              <div className="section-title">Paste this into the other app (or hand it to whoever is building it)</div>
               {Object.entries(contract.snippets).map(([lang, code]) => (
                 <div className="field" key={lang}>
                   <label>{lang}<CopyButton text={code} label="Copy" className="btn xs ghost" /></label>
@@ -652,7 +653,7 @@ function ConnectProductStudio({ open, onClose, onImported }) {
           {tab === 'fields' && (
             <>
               <p className="dim small">
-                Send the product in whatever shape Product Studio already uses. For each row below, the first
+                Send the product in whatever shape the other app already uses. For each row below, the first
                 name it finds with a value wins — so you probably do not have to change anything over there.
               </p>
               <table className="data">
@@ -675,7 +676,7 @@ function ConnectProductStudio({ open, onClose, onImported }) {
           {tab === 'test' && (
             <>
               <p className="dim small">
-                Paste one real product exactly as Product Studio would send it. This shows how each field was
+                Paste one real product exactly as the other app would send it. This shows how each field was
                 understood and creates nothing, so it is safe to try as often as you like.
               </p>
               <div className="flex gap4 mb8">
