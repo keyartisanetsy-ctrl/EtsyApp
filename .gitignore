@@ -1,0 +1,20 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+*.log
+
+# Local database, encryption key, uploads and generated workbooks.
+data/
+!data/.gitkeep
+
+# Packaged distributions
+release/
+*.zip
+
+.DS_Store
+.vscode/
+.idea/
+coverage/
+*.tsbuildinfo
