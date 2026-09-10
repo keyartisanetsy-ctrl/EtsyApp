@@ -35,7 +35,7 @@ archive.pipe(output);
 
 // Source and build output. `data/` is deliberately excluded: it holds the
 // local database, the encryption key and generated workbooks.
-for (const dir of ['server', 'web/src', 'web/dist', 'scripts', 'docs']) {
+for (const dir of ['server', 'web/src', 'web/dist', 'scripts', 'docs', 'deploy']) {
   archive.directory(path.join(root, dir), dir);
 }
 for (const file of ['package.json', 'package-lock.json', 'README.md', '.env.example', '.gitignore',
