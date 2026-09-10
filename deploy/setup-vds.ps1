@@ -26,6 +26,31 @@ $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is much faster wi
 
 function Section($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 
+# Any external program (npm, node, msiexec, nssm...) can write ordinary
+# status text to its error stream -- npm's own deprecation warnings do this
+# on some versions, nssm does it on every restart of a service that was not
+# already running. PowerShell turns each such line into an ErrorRecord, and
+# with $ErrorActionPreference set to Stop (below) that is fatal, killing the
+# script over output that was never actually an error. Every native command
+# in this script goes through here instead of being called bare: the output
+# is shown as it normally would be, but stderr text alone cannot abort the
+# script -- only a real (non-zero) exit code can, and only when asked to
+# check for one.
+function Invoke-Native {
+  param(
+    [Parameter(Mandatory = $true)][string]$Exe,
+    [string[]]$CallArgs = @(),
+    [switch]$IgnoreExitCode
+  )
+  $prevEAP = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { & $Exe @CallArgs 2>&1 | ForEach-Object { Write-Host "  $_" } }
+  finally { $ErrorActionPreference = $prevEAP }
+  if (-not $IgnoreExitCode -and $LASTEXITCODE -ne 0) {
+    throw "$Exe $($CallArgs -join ' ') failed with exit code $LASTEXITCODE"
+  }
+}
+
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
   Write-Host "Run this from a PowerShell window opened as Administrator (right-click -> Run as administrator)." -ForegroundColor Red
@@ -53,7 +78,7 @@ if (-not $node) {
   if (-not $node) { throw 'Node.js installed but "node" is still not found. Close this window, open a new Administrator PowerShell, and run this script again.' }
 }
 $nodeExe = $node.Source
-& $nodeExe --version
+Invoke-Native -Exe $nodeExe -CallArgs @('--version')
 
 # --- App code (a plain zip download, no git needed) --------------------------
 if (-not (Test-Path $AppDir)) {
@@ -71,8 +96,8 @@ if (-not (Test-Path $AppDir)) {
 Set-Location $AppDir
 
 Section "Installing and building the app (first run downloads dependencies - a few minutes)..."
-& npm run setup
-& npm run build
+Invoke-Native -Exe 'npm' -CallArgs @('run', 'setup')
+Invoke-Native -Exe 'npm' -CallArgs @('run', 'build')
 
 # --- .env / app password -----------------------------------------------------
 $EnvFile = Join-Path $AppDir '.env'
@@ -107,38 +132,31 @@ if (-not (Test-Path $nssmExe)) {
   Copy-Item (Join-Path $nssmExtract 'nssm-2.24\win64\nssm.exe') $nssmExe
 }
 
-# nssm routinely writes ordinary status lines to stderr (e.g. "STOP: The
-# service has not been started" the first time you restart something that
-# was never running yet) -- harmless, but PowerShell turns any stderr line
-# from a native program into an error, and with $ErrorActionPreference set
-# to Stop that error becomes fatal and kills the whole script. Every nssm
-# call is run through this so that chatter cannot do that.
-function Invoke-Quiet($exe, [string[]]$callArgs) {
-  $prev = $ErrorActionPreference
-  $ErrorActionPreference = 'Continue'
-  try { & $exe @callArgs 2>&1 | Out-Null }
-  finally { $ErrorActionPreference = $prev }
-}
-
 $LogDir = Join-Path $ToolsDir 'logs'
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-# NSSM discards a service's stdout/stderr by default, which makes a crash
-# invisible -- Get-Service still says "Running" while the process is stuck
-# in a restart loop. Every service gets a real log file so that is never a
-# dead end again.
+# nssm's exit code is not a reliable success/failure signal for "set" and
+# "restart" (e.g. it can be non-zero just because a freshly-installed
+# service had never been started before), so those go through
+# Invoke-Native with -IgnoreExitCode; Get-Service and the log files below
+# are what actually says whether it worked.
+#
+# NSSM also discards a service's stdout/stderr by default, which makes a
+# crash invisible -- Get-Service still says "Running" while the process is
+# stuck in a restart loop. Every service gets a real log file so that is
+# never a dead end again.
 function Install-OrRestart-Service($name, $exe, $argString, $workDir) {
   $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
   if (-not $svc) {
-    Invoke-Quiet $nssmExe @('install', $name, $exe)
-    Invoke-Quiet $nssmExe @('set', $name, 'AppParameters', $argString)
-    Invoke-Quiet $nssmExe @('set', $name, 'AppDirectory', $workDir)
-    Invoke-Quiet $nssmExe @('set', $name, 'Start', 'SERVICE_AUTO_START')
+    Invoke-Native -Exe $nssmExe -CallArgs @('install', $name, $exe) -IgnoreExitCode
+    Invoke-Native -Exe $nssmExe -CallArgs @('set', $name, 'AppParameters', $argString) -IgnoreExitCode
+    Invoke-Native -Exe $nssmExe -CallArgs @('set', $name, 'AppDirectory', $workDir) -IgnoreExitCode
+    Invoke-Native -Exe $nssmExe -CallArgs @('set', $name, 'Start', 'SERVICE_AUTO_START') -IgnoreExitCode
   }
-  Invoke-Quiet $nssmExe @('set', $name, 'AppStdout', (Join-Path $LogDir "$name-out.log"))
-  Invoke-Quiet $nssmExe @('set', $name, 'AppStderr', (Join-Path $LogDir "$name-err.log"))
-  if (-not $svc) { Invoke-Quiet $nssmExe @('start', $name) }
-  else { Invoke-Quiet $nssmExe @('restart', $name) }
+  Invoke-Native -Exe $nssmExe -CallArgs @('set', $name, 'AppStdout', (Join-Path $LogDir "$name-out.log")) -IgnoreExitCode
+  Invoke-Native -Exe $nssmExe -CallArgs @('set', $name, 'AppStderr', (Join-Path $LogDir "$name-err.log")) -IgnoreExitCode
+  if (-not $svc) { Invoke-Native -Exe $nssmExe -CallArgs @('start', $name) -IgnoreExitCode }
+  else { Invoke-Native -Exe $nssmExe -CallArgs @('restart', $name) -IgnoreExitCode }
 
   Start-Sleep -Seconds 5
   $status = (Get-Service -Name $name -ErrorAction SilentlyContinue).Status
