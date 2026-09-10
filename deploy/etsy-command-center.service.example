@@ -1,0 +1,22 @@
+# Keeps the app running on a VDS across reboots and crashes.
+#
+# 1. Copy to /etc/systemd/system/etsy-command-center.service
+# 2. Fill in User=, WorkingDirectory= and the node path for your VDS.
+# 3. sudo systemctl daemon-reload
+# 4. sudo systemctl enable --now etsy-command-center
+
+[Unit]
+Description=Etsy Command Center
+After=network.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+WorkingDirectory=/home/CHANGE_ME/EtsyApp
+ExecStart=/usr/bin/node scripts/start.mjs
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/home/CHANGE_ME/EtsyApp/.env
+
+[Install]
+WantedBy=multi-user.target

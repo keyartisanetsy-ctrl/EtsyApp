@@ -1,0 +1,15 @@
+# Reverse proxy for running Etsy Command Center on a VDS with automatic HTTPS.
+#
+# 1. Point a DNS hostname at your VDS's IP (Etsy's own OAuth dashboard
+#    rejects raw IP addresses as a redirect URI, so you need a hostname
+#    anyway -- any subdomain you control works, it does not need to be a
+#    paid domain if you already have one for something else).
+# 2. Replace shop.example.com below with that hostname.
+# 3. Copy this file to /etc/caddy/Caddyfile (or wherever your Caddy install
+#    reads from) and reload: `sudo systemctl reload caddy`.
+#
+# Caddy gets and renews the certificate itself -- nothing else to configure.
+
+shop.example.com {
+	reverse_proxy 127.0.0.1:4317
+}
