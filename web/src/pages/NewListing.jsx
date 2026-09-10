@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import api from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import { Spinner, Banner, useAsync, useToast, useErrorToast, useDebounced } from '../components/ui.jsx';
+import { MakeProcessingProfile } from './Drafts.jsx';
 
 const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007', '2000_2006',
   '1990s', '1980s', '1970s', '1960s', '1950s', '1940s', '1930s', '1920s', '1910s', '1900s', '1800s', '1700s', 'before_1700'];
@@ -16,7 +17,7 @@ export default function NewListing() {
     title: '', description: '', price: '', quantity: 1,
     who_made: 'i_did', when_made: 'made_to_order', taxonomy_id: '',
     tags: '', materials: '', type: 'physical', is_supply: false,
-    shipping_profile_id: '', return_policy_id: '', shop_section_id: '',
+    shipping_profile_id: '', return_policy_id: '', shop_section_id: '', readiness_state_id: '',
   });
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState(null);
@@ -27,8 +28,9 @@ export default function NewListing() {
   const toast = useToast();
   const showError = useErrorToast();
 
-  const { data: profiles } = useAsync(() => api.get('/shop/shipping-profiles').catch(() => null), []);
-  const { data: sections } = useAsync(() => api.get('/shop/sections').catch(() => null), []);
+  // Shared with the Draft desk: shipping/processing profiles, sections and
+  // return policies, fetched from the shop rather than typed in as ids.
+  const { data: choices, reload: reloadChoices } = useAsync(() => api.get('/drafts/choices').catch(() => null), []);
 
   // Pick up a draft handed over from the AI listing writer.
   useEffect(() => {
@@ -54,6 +56,7 @@ export default function NewListing() {
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
   const tagList = form.tags.split(',').map((t) => t.trim()).filter(Boolean);
+  const isPhysical = form.type === 'physical';
   const problems = [
     !form.title.trim() && 'Title is required',
     form.title.length > 140 && `Title is ${form.title.length} characters (max 140)`,
@@ -62,6 +65,10 @@ export default function NewListing() {
     !form.taxonomy_id && 'Pick a category',
     tagList.length > 13 && `${tagList.length} tags (max 13)`,
     tagList.some((t) => t.length > 20) && 'One or more tags is over 20 characters',
+    // Etsy's spec calls both of these optional; the live API refuses a
+    // physical listing without either one.
+    isPhysical && !form.shipping_profile_id && 'A physical listing needs a shipping profile',
+    isPhysical && !form.readiness_state_id && 'A physical listing needs a processing profile',
   ].filter(Boolean);
 
   const create = async () => {
@@ -75,7 +82,7 @@ export default function NewListing() {
         tags: tagList,
         materials: form.materials.split(',').map((t) => t.trim()).filter(Boolean),
       };
-      for (const k of ['shipping_profile_id', 'return_policy_id', 'shop_section_id']) {
+      for (const k of ['shipping_profile_id', 'return_policy_id', 'shop_section_id', 'readiness_state_id']) {
         if (body[k] === '' || body[k] == null) delete body[k]; else body[k] = Number(body[k]);
       }
       const listing = await api.post('/listings', body);
@@ -217,19 +224,56 @@ export default function NewListing() {
             <label>Shipping profile</label>
             <select className="select" value={form.shipping_profile_id} onChange={(e) => set('shipping_profile_id', e.target.value)}>
               <option value="">— none —</option>
-              {(profiles?.results ?? []).map((p) => (
-                <option key={p.shipping_profile_id} value={p.shipping_profile_id}>{p.title}</option>
+              {(choices?.shippingProfiles ?? []).map((p) => (
+                <option key={p.id} value={p.id}>{p.title}{p.processing ? ` · ${p.processing}` : ''}</option>
               ))}
             </select>
-            <div className="hint">Physical listings need one before Etsy will let you activate.</div>
+            <div className="hint">Physical listings need one before Etsy will take the draft.</div>
           </div>
+
+          {isPhysical && (
+            <div className="field">
+              <label>Processing profile</label>
+              {choices?.needsProcessingProfile ? (
+                <>
+                  <Banner kind="warn">{choices.note}</Banner>
+                  <MakeProcessingProfile onMade={(id) => { set('readiness_state_id', String(id)); reloadChoices(); }} />
+                </>
+              ) : (
+                <>
+                  <select className="select" value={form.readiness_state_id} onChange={(e) => set('readiness_state_id', e.target.value)}>
+                    <option value="">—</option>
+                    {(choices?.processingProfiles ?? []).map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.label ? `${p.label} · ` : ''}{String(p.readinessState ?? '').replace(/_/g, ' ')}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="hint">
+                    How long before you dispatch. Etsy refuses a physical listing without one, even though its
+                    own documentation calls this optional.
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           <div className="field">
             <label>Shop section</label>
             <select className="select" value={form.shop_section_id} onChange={(e) => set('shop_section_id', e.target.value)}>
               <option value="">— none —</option>
-              {(sections?.results ?? []).map((s) => (
-                <option key={s.shop_section_id} value={s.shop_section_id}>{s.title}</option>
+              {(choices?.sections ?? []).map((s) => (
+                <option key={s.id} value={s.id}>{s.title}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="field">
+            <label>Return policy</label>
+            <select className="select" value={form.return_policy_id} onChange={(e) => set('return_policy_id', e.target.value)}>
+              <option value="">— none —</option>
+              {(choices?.returnPolicies ?? []).map((p) => (
+                <option key={p.id} value={p.id}>{p.accepts ? `Accepts returns${p.days ? ` within ${p.days} days` : ''}` : 'No returns'}</option>
               ))}
             </select>
           </div>

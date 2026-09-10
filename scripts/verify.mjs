@@ -2064,6 +2064,47 @@ await check('a physical draft is refused without a processing profile', async ()
   }
 });
 
+await check('the "Create listing" page is checked against the same live-API rules as the desk', async () => {
+  // The desk (drafts.js) already learned that Etsy refuses a physical
+  // listing without a processing profile, live API vs its own "optional"
+  // docs -- but "Create listing" goes through listings.createDraft()
+  // instead, a separate code path that never got the same check, so it
+  // still let a physical listing through with nothing to dispatch with.
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const listings = await import('../server/src/services/listings.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960116').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960116,'New Listing Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960116);
+
+  try {
+    const base = {
+      title: 'Keycap Set', description: 'A set.', price: 39.99, quantity: 5,
+      taxonomy_id: 1000, who_made: 'i_did', when_made: 'made_to_order',
+    };
+
+    let err = null;
+    try { await listings.createDraft(base); } catch (e) { err = e; }
+    assert(err && /shipping profile/i.test(err.message), `no shipping profile should be refused locally, got: ${err?.message}`);
+
+    err = null;
+    try { await listings.createDraft({ ...base, shipping_profile_id: 5 }); } catch (e) { err = e; }
+    assert(err && /processing profile/i.test(err.message), `no processing profile should be refused locally, got: ${err?.message}`);
+
+    // A digital listing needs neither.
+    err = null;
+    try { await listings.createDraft({ ...base, type: 'download' }); } catch (e) { err = e; }
+    assert(!err || !/shipping profile|processing profile/i.test(err.message),
+      `a download listing should not need either, got: ${err?.message}`);
+  } finally {
+    client.removeAccount(960116);
+  }
+});
+
 await check("Product Studio's own shapes are read exactly, not guessed at", async () => {
   const ps = await import('../server/src/services/productstudio.js');
 

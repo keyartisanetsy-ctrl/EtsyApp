@@ -751,7 +751,7 @@ function ConnectProductStudio({ open, onClose, onImported }) {
  * Etsy's rejection names the missing field but not how to get one, which is the
  * kind of error that costs half an hour. Two numbers is all it needs.
  */
-function MakeProcessingProfile({ onMade }) {
+export function MakeProcessingProfile({ onMade }) {
   const [minDays, setMinDays] = useState(1);
   const [maxDays, setMaxDays] = useState(3);
   const [state, setState] = useState('made_to_order');

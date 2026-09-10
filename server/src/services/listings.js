@@ -224,6 +224,18 @@ export async function createDraft(fields) {
   const missing = required.filter((k) => fields[k] === undefined || fields[k] === '' || fields[k] === null);
   if (missing.length) throw badRequest(`Etsy needs these to create a draft: ${missing.join(', ')}`);
 
+  // Etsy's spec marks shipping_profile_id "required when physical" and
+  // readiness_state_id optional -- the live API refuses a physical listing
+  // without either. Caught here so it is a clear local message instead of
+  // Etsy's 400 arriving as the first anyone hears of it.
+  const isPhysical = (fields.type ?? 'physical') === 'physical';
+  if (isPhysical && !fields.shipping_profile_id) {
+    throw badRequest('A physical listing needs a shipping profile before Etsy will take it.');
+  }
+  if (isPhysical && !fields.readiness_state_id) {
+    throw badRequest('A physical listing needs a processing profile (how long it takes you to dispatch) before Etsy will take it, even though Etsy\'s own documentation calls this optional.');
+  }
+
   const body = { ...fields };
   body.quantity = Number(body.quantity);
   body.price = Number(body.price);
