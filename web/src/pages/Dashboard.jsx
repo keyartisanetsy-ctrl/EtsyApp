@@ -15,7 +15,14 @@ export default function Dashboard({ summary, onRefresh }) {
     try {
       if (kind === 'all') {
         const r = await api.syncAll({ withInventory: true });
-        toast({ kind: 'ok', title: 'Sync complete', body: `${r.listings.listings} listings, ${r.listings.products} variations, ${r.receipts.receipts} orders` });
+        const failed = r.listings.errors?.length ?? 0;
+        toast({
+          kind: failed ? 'warn' : 'ok',
+          title: 'Sync complete',
+          body: failed
+            ? `${r.listings.listings} listings, ${r.listings.products} variations, ${r.receipts.receipts} orders — ${failed} listing(s) could not be read (photos/variants may be missing for those); see Listings > Sync for details`
+            : `${r.listings.listings} listings, ${r.listings.products} variations, ${r.receipts.receipts} orders`,
+        });
       } else if (kind === 'orders') {
         const r = await api.post('/orders/sync', {});
         toast({ kind: 'ok', title: 'Orders synced', body: `${r.receipts} receipts updated` });

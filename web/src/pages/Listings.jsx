@@ -44,7 +44,14 @@ export default function Listings() {
     setSyncing(true);
     try {
       const r = await api.syncListings({ withInventory: true });
-      toast({ kind: 'ok', title: 'Listings synced', body: `${r.listings} listings, ${r.products} variations` });
+      const failed = r.errors?.length ?? 0;
+      toast({
+        kind: failed ? 'warn' : 'ok',
+        title: 'Listings synced',
+        body: failed
+          ? `${r.listings} listings, ${r.products} variations — ${failed} listing(s) could not be read, so their photos/variants may be missing: ${r.errors.slice(0, 3).map((e) => `#${e.listingId} (${e.message})`).join('; ')}${failed > 3 ? '…' : ''}`
+          : `${r.listings} listings, ${r.products} variations`,
+      });
       reload();
     } catch (err) { showError(err, 'Sync failed'); } finally { setSyncing(false); }
   };

@@ -241,7 +241,11 @@ export async function syncListings({
   }
 
   if (withInventory) {
-    const ids = getDb().prepare('SELECT listing_id FROM listings').all().map((r) => r.listing_id);
+    // Scoped to this shop: the app can hold more than one shop's listings at
+    // once, and asking Etsy for another shop's inventory under this shop_id
+    // just 404s, wasting calls and (until this shop's own listings happen to
+    // come after them in the loop) never getting to variation images at all.
+    const ids = getDb().prepare('SELECT listing_id FROM listings WHERE shop_id IS ?').all(shopId).map((r) => r.listing_id);
     for (const listingId of ids) {
       try {
         const inv = await call('getListingInventory', { listing_id: listingId });
