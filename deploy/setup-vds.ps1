@@ -107,19 +107,37 @@ if (-not (Test-Path $nssmExe)) {
   Copy-Item (Join-Path $nssmExtract 'nssm-2.24\win64\nssm.exe') $nssmExe
 }
 
-function Install-OrRestart-Service($name, $exe, $args, $workDir) {
+# nssm routinely writes ordinary status lines to stderr (e.g. "STOP: The
+# service has not been started" the first time you restart something that
+# was never running yet) -- harmless, but PowerShell turns any stderr line
+# from a native program into an error, and with $ErrorActionPreference set
+# to Stop that error becomes fatal and kills the whole script. Every nssm
+# call is run through this so that chatter cannot do that.
+function Invoke-Quiet($exe, [string[]]$callArgs) {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { & $exe @callArgs 2>&1 | Out-Null }
+  finally { $ErrorActionPreference = $prev }
+}
+
+function Install-OrRestart-Service($name, $exe, $argString, $workDir) {
   $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
   if (-not $svc) {
-    & $nssmExe install $name $exe $args
-    & $nssmExe set $name AppDirectory $workDir
-    & $nssmExe set $name Start SERVICE_AUTO_START
+    Invoke-Quiet $nssmExe @('install', $name, $exe)
+    Invoke-Quiet $nssmExe @('set', $name, 'AppParameters', $argString)
+    Invoke-Quiet $nssmExe @('set', $name, 'AppDirectory', $workDir)
+    Invoke-Quiet $nssmExe @('set', $name, 'Start', 'SERVICE_AUTO_START')
+    Invoke-Quiet $nssmExe @('start', $name)
+  } else {
+    Invoke-Quiet $nssmExe @('restart', $name)
   }
-  & $nssmExe restart $name 2>$null
-  Start-Service -Name $name -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+  $status = (Get-Service -Name $name -ErrorAction SilentlyContinue).Status
+  Write-Host "  $name status: $status"
 }
 
 Section "Registering the app as a Windows service..."
-Install-OrRestart-Service -name 'EtsyCommandCenter' -exe $nodeExe -args 'scripts\start.mjs' -workDir $AppDir
+Install-OrRestart-Service -name 'EtsyCommandCenter' -exe $nodeExe -argString 'scripts\start.mjs' -workDir $AppDir
 
 # --- Caddy (automatic HTTPS) --------------------------------------------------
 $caddyExe = Join-Path $ToolsDir 'caddy.exe'
@@ -133,7 +151,7 @@ $Caddyfile = Join-Path $ToolsDir 'Caddyfile'
 Set-Content -Path $Caddyfile -Value "$Hostname {`n`treverse_proxy 127.0.0.1:4317`n}`n"
 
 Section "Registering Caddy as a Windows service..."
-Install-OrRestart-Service -name 'EtsyCaddy' -exe $caddyExe -args "run --config `"$Caddyfile`" --adapter caddyfile" -workDir $ToolsDir
+Install-OrRestart-Service -name 'EtsyCaddy' -exe $caddyExe -argString "run --config $Caddyfile --adapter caddyfile" -workDir $ToolsDir
 
 # --- Firewall ------------------------------------------------------------------
 # 443 is what a browser uses; 80 is kept open too because Caddy's automatic
