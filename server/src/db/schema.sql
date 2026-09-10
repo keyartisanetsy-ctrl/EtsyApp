@@ -652,3 +652,30 @@ CREATE TABLE IF NOT EXISTS product_studio_inbox (
   received_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_psinbox_shop ON product_studio_inbox(shop_id, received_at DESC);
+
+-- Photos and videos waiting to go up for a draft that is not on Etsy yet (a
+-- local-only draft has no listing_id Etsy will accept, and every upload
+-- endpoint Etsy has takes one). Kept here until the draft becomes a real
+-- listing, then uploaded in order and dropped -- from that point on
+-- listing_images / listing_videos are the source of truth, same as any other
+-- listing. Either source_url (an external photo, e.g. from Product Studio) or
+-- file_path (something added by hand here) is set, never both.
+-- Cascades on delete so removing a draft (or a test/tool deleting the row
+-- directly) can never leave orphaned media behind under an id that a later
+-- local draft might reuse -- local ids are negative and reassigned from
+-- whatever is free, so a stale row would otherwise resurface as someone
+-- else's photo.
+CREATE TABLE IF NOT EXISTS draft_media (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  listing_id  INTEGER NOT NULL,
+  kind        TEXT NOT NULL CHECK (kind IN ('image','video')),
+  rank        INTEGER NOT NULL DEFAULT 1,
+  source_url  TEXT,
+  file_path   TEXT,
+  filename    TEXT,
+  mime        TEXT,
+  alt_text    TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (listing_id) REFERENCES listing_drafts(listing_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_draft_media_listing ON draft_media(listing_id, kind, rank);

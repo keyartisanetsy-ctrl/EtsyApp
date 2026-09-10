@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import { call, callAll } from '../etsy/client.js';
 import { requireShopId, activeShopId } from '../etsy/shop.js';
 import { getDb, parse, json, audit } from '../db/index.js';
-import { saveListing, saveImages, syncVariationImages, LISTING_STATES } from './sync.js';
+import { saveListing, saveImages, saveVideos, syncVariationImages, LISTING_STATES } from './sync.js';
 import { getDiscountPercent } from './settings.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
@@ -185,13 +185,13 @@ export function validateListingFields(fields) {
   return out;
 }
 
-export async function updateListing(listingId, fields, { dryRun = false } = {}) {
+export async function updateListing(listingId, fields, { dryRun = false, caller = call } = {}) {
   const shopId = requireShopId();
   const body = validateListingFields(fields);
   if (!Object.keys(body).length) throw badRequest('Nothing to update.');
   if (dryRun) return { dryRun: true, listingId, body };
 
-  const res = await call('updateListing', { shop_id: shopId, listing_id: listingId }, { body });
+  const res = await caller('updateListing', { shop_id: shopId, listing_id: listingId }, { body });
   saveListing(res);
   audit('listing.update', { entity: 'listing', entityId: listingId, detail: Object.keys(body) });
   return res;
@@ -290,11 +290,24 @@ export async function uploadVideo(listingId, { buffer, filename, mime, name }) {
   const form = new FormData();
   form.append('video', new Blob([buffer], { type: mime || 'video/mp4' }), filename || 'video.mp4');
   if (name) form.append('name', name);
-  return call('uploadListingVideo', { shop_id: shopId, listing_id: listingId }, { formData: form });
+  const res = await call('uploadListingVideo', { shop_id: shopId, listing_id: listingId }, { formData: form });
+  await refreshVideos(listingId);
+  audit('listing.video.upload', { entity: 'listing', entityId: listingId, detail: { filename } });
+  return res;
 }
 
-export const deleteVideo = (listingId, videoId) =>
-  call('deleteListingVideo', { shop_id: requireShopId(), listing_id: listingId, video_id: videoId });
+export async function refreshVideos(listingId) {
+  const res = await call('getListingVideos', { listing_id: listingId });
+  saveVideos(listingId, res?.results || []);
+  return res?.results || [];
+}
+
+export async function deleteVideo(listingId, videoId) {
+  await call('deleteListingVideo', { shop_id: requireShopId(), listing_id: listingId, video_id: videoId });
+  getDb().prepare('DELETE FROM listing_videos WHERE video_id = ?').run(videoId);
+  audit('listing.video.delete', { entity: 'listing', entityId: listingId, detail: { videoId } });
+  return { deleted: videoId };
+}
 
 export async function uploadDigitalFile(listingId, { buffer, filename, name, rank = 1 }) {
   const shopId = requireShopId();

@@ -1,8 +1,12 @@
 import { Router } from 'express';
-import { asyncRoute, bool } from '../lib/http.js';
+import fs from 'node:fs';
+import multer from 'multer';
+import { asyncRoute, bool, required } from '../lib/http.js';
 import * as drafts from '../services/drafts.js';
+import * as draftmedia from '../services/draftmedia.js';
 
 const router = Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 /** Everything on the desk. */
 router.get('/', asyncRoute(async (req, res) => {
@@ -41,7 +45,49 @@ router.post('/:id/push', asyncRoute(async (req, res) => {
   res.json(await drafts.push(Number(req.params.id), { activate: bool(req.body?.activate) }));
 }));
 
+/** Pull this one draft's photos/video back in step, right after adding one from here. */
+router.post('/:id/resync', asyncRoute(async (req, res) => res.json(await drafts.refreshSnapshot(Number(req.params.id)))));
+
 router.post('/:id/revert', asyncRoute(async (req, res) => res.json(drafts.revert(Number(req.params.id)))));
 router.delete('/:id', asyncRoute(async (req, res) => res.json(drafts.remove(Number(req.params.id)))));
+
+// ------------------------------------------------------------------ media
+//
+// Only meaningful for a local-only draft (a negative id): Etsy's own upload
+// endpoints need a real listing_id, which does not exist until this draft is
+// pushed, so a photo/video added before that is staged here and uploaded the
+// moment it does. A draft that already is a real Etsy listing manages its
+// photos through /api/listings/:id/images and /videos instead, immediately.
+
+router.get('/:id/media', asyncRoute(async (req, res) => res.json(draftmedia.list(Number(req.params.id)))));
+
+/** Add by pasting a public URL (what Product Studio's own images arrive as). */
+router.post('/:id/media', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  required(b, ['kind', 'url']);
+  res.status(201).json(draftmedia.addUrl(Number(req.params.id), { kind: b.kind, url: b.url, altText: b.altText }));
+}));
+
+/** Add by uploading a file from this machine. */
+router.post('/:id/media/upload', upload.single('file'), asyncRoute(async (req, res) => {
+  if (!req.file) throw new Error('Attach a file as the "file" field.');
+  const kind = req.body?.kind === 'video' ? 'video' : 'image';
+  res.status(201).json(draftmedia.addUpload(Number(req.params.id), {
+    kind, buffer: req.file.buffer, filename: req.file.originalname, mime: req.file.mimetype, altText: req.body?.altText,
+  }));
+}));
+
+router.get('/:id/media/:mediaId/file', asyncRoute(async (req, res) => {
+  const { path, mime } = draftmedia.fileFor(Number(req.params.id), Number(req.params.mediaId));
+  res.type(mime).send(fs.readFileSync(path));
+}));
+
+router.post('/:id/media/:mediaId/move', asyncRoute(async (req, res) => {
+  res.json(draftmedia.move(Number(req.params.id), Number(req.params.mediaId), req.body?.direction === 'down' ? 'down' : 'up'));
+}));
+
+router.delete('/:id/media/:mediaId', asyncRoute(async (req, res) => {
+  res.json(draftmedia.remove(Number(req.params.id), Number(req.params.mediaId)));
+}));
 
 export default router;

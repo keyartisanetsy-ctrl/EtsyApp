@@ -9,6 +9,26 @@ import {
 
 const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007'];
 
+// A helpful starting list for the materials picker. Etsy's materials field is
+// free text (any string of letters/numbers/spaces is valid), not a fixed
+// vocabulary the API exposes, so this is a search aid, not a wall - typing
+// something not in it and adding it anyway works too.
+const MAX_MATERIALS = 5;
+const COMMON_MATERIALS = [
+  'Abacá', 'Abalone shell', 'ABS', 'Acacia', 'Acrylic', 'Alabaster', 'Alpaca', 'Aluminum',
+  'Amber', 'Amethyst', 'Bamboo', 'Bone', 'Brass', 'Bronze', 'Burlap', 'Canvas', 'Cardboard',
+  'Cashmere', 'Cedar', 'Ceramic', 'Chiffon', 'Clay', 'Concrete', 'Copper', 'Cork', 'Cotton',
+  'Crystal', 'Denim', 'Diamond', 'Ebony', 'Enamel', 'Faux fur', 'Faux leather', 'Felt', 'Fiberglass',
+  'Foam', 'Glass', 'Glitter', 'Gold', 'Gold filled', 'Gold plated', 'Granite', 'Hemp', 'Iron',
+  'Jute', 'Lace', 'Latex', 'Leather', 'Linen', 'Mahogany', 'Marble', 'Mesh', 'Metal', 'Mother of pearl',
+  'MDF', 'Mylar', 'Nylon', 'Oak', 'Onyx', 'Paint', 'Paper', 'Papier mâché', 'Pearl', 'Pewter',
+  'Pine', 'Plastic', 'Platinum', 'Plywood', 'Polyester', 'Porcelain', 'Quartz', 'Rattan', 'Rayon',
+  'Resin', 'Rhinestone', 'Rose gold', 'Rubber', 'Satin', 'Sequin', 'Silicone', 'Silk', 'Silver',
+  'Slate', 'Spandex', 'Sponge', 'Stainless steel', 'Stone', 'Suede', 'Sterling silver', 'Straw',
+  'Suede leather', 'Tin', 'Titanium', 'Tulle', 'Turquoise', 'Velvet', 'Vinyl', 'Walnut', 'Wax',
+  'Wicker', 'Wire', 'Wood', 'Wool', 'Yarn', 'Zinc',
+];
+
 /**
  * The draft desk.
  *
@@ -235,24 +255,27 @@ function DraftEditor({ id, onClose, onChanged }) {
             </Banner>
           )}
 
-          {draft.images?.length > 0 && (
-            <>
-              <div className="section-title">Photos on Etsy</div>
-              <div className="flex gap4 mb16" style={{ flexWrap: 'wrap' }}>
-                {draft.images.map((i) => <Thumb key={i.imageId} src={i.thumb || i.url} size="lg" />)}
-              </div>
-            </>
-          )}
+          <div className="section-title">Photos &amp; video</div>
+          <MediaManager draft={draft} onChanged={() => { reload(); replan(); onChanged(); }} />
 
           <div className="section-title">Listing</div>
           {field('title', 'Title', { hint: `${(merged.title ?? '').length} of 140 characters` })}
           {field('description', 'Description', { textarea: true, rows: 8 })}
           <div className="split">
             {field('price', 'Price', { type: 'number', step: '0.01' })}
-            {field('quantity', 'Stock', { type: 'number' })}
+            <div className="field">
+              <label>
+                Stock
+                {isChanged('quantity') && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
+              </label>
+              <input className="input" type="number" min="1" max="999" value={merged.quantity ?? ''}
+                     onChange={(e) => save({ quantity: e.target.value })} />
+              <div className="hint">Etsy allows a quantity from 1 to 999.</div>
+            </div>
           </div>
           {field('tags', 'Tags', { hint: 'Comma separated, up to 13, each at most 20 characters' })}
-          {field('materials', 'Materials', { hint: 'Comma separated' })}
+          <MaterialsPicker value={merged.materials ?? []} changed={isChanged('materials')}
+                           onChange={(materials) => save({ materials })} />
 
           <div className="section-title">Etsy needs these</div>
           <div className="split">
@@ -310,6 +333,37 @@ function DraftEditor({ id, onClose, onChanged }) {
               'Optional.')}
           </div>
 
+          <div className="section-title">Settings</div>
+          <div className="field">
+            <label>
+              Renewal
+              {isChanged('should_auto_renew') && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
+            </label>
+            <div className="flex gap12">
+              <label className="flex gap4" style={{ alignItems: 'center' }}>
+                <input type="radio" checked={merged.should_auto_renew !== false}
+                       onChange={() => save({ should_auto_renew: true })} />
+                Automatic — renews for $0.20 when it expires
+              </label>
+              <label className="flex gap4" style={{ alignItems: 'center' }}>
+                <input type="radio" checked={merged.should_auto_renew === false}
+                       onChange={() => save({ should_auto_renew: false })} />
+                Manual
+              </label>
+            </div>
+          </div>
+          {!draft.isLocalOnly && (
+            <div className="field">
+              <label>
+                Feature this listing
+                {isChanged('featured_rank') && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
+              </label>
+              <input className="input" type="number" min="1" value={merged.featured_rank ?? ''}
+                     onChange={(e) => save({ featured_rank: e.target.value || null })} />
+              <div className="hint">Optional. Position in your shop&rsquo;s featured row — 1 is left-most.</div>
+            </div>
+          )}
+
           <div className="section-title">What Etsy has right now</div>
           <dl className="kv">
             <dt>Title</dt><dd className="small dim">{draft.etsy.title || '—'}</dd>
@@ -319,6 +373,173 @@ function DraftEditor({ id, onClose, onChanged }) {
         </>
       )}
     </Drawer>
+  );
+}
+
+/**
+ * Etsy's own listing screen offers materials as a search-and-tick list capped
+ * at five. The field itself is free text on Etsy's side (any letters, numbers
+ * and spaces), not a fixed vocabulary the API hands back, so this ships a
+ * useful starting list and still lets you add something not on it.
+ */
+function MaterialsPicker({ value, changed, onChange }) {
+  const [q, setQ] = useState('');
+  const selected = value ?? [];
+  const atLimit = selected.length >= MAX_MATERIALS;
+
+  const matches = q.trim()
+    ? COMMON_MATERIALS.filter((m) => m.toLowerCase().includes(q.trim().toLowerCase()) && !selected.includes(m)).slice(0, 8)
+    : [];
+  const exact = COMMON_MATERIALS.some((m) => m.toLowerCase() === q.trim().toLowerCase());
+  const validCustom = /^[\p{L}\p{Nd}\s]+$/u.test(q.trim());
+
+  const add = (m) => {
+    if (atLimit || selected.includes(m)) return;
+    onChange([...selected, m]);
+    setQ('');
+  };
+  const removeAt = (m) => onChange(selected.filter((x) => x !== m));
+
+  return (
+    <div className="field">
+      <label>
+        Materials
+        {changed && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
+      </label>
+      <div className="flex gap4 mb4" style={{ flexWrap: 'wrap' }}>
+        {selected.map((m) => (
+          <span key={m} className="badge grey flex gap4" style={{ alignItems: 'center' }}>
+            {m}
+            <button type="button" className="btn xs ghost" style={{ padding: '0 3px' }}
+                    onClick={() => removeAt(m)} aria-label={`Remove ${m}`}>×</button>
+          </span>
+        ))}
+      </div>
+      {atLimit ? (
+        <div className="hint">Up to {MAX_MATERIALS} materials, same as Etsy&rsquo;s own listing form. Remove one to add another.</div>
+      ) : (
+        <>
+          <input className="input" placeholder="Type to search…" value={q} onChange={(e) => setQ(e.target.value)} />
+          {(matches.length > 0 || (q.trim() && !exact)) && (
+            <div className="card" style={{ marginTop: 4, padding: 4, maxHeight: 180, overflowY: 'auto' }}>
+              {matches.map((m) => (
+                <div key={m} onClick={() => add(m)} style={{ cursor: 'pointer', padding: '4px 6px', borderRadius: 4 }}>{m}</div>
+              ))}
+              {q.trim() && !exact && validCustom && (
+                <div className="small dim" onClick={() => add(q.trim())} style={{ cursor: 'pointer', padding: '4px 6px', borderRadius: 4 }}>
+                  Add &ldquo;{q.trim()}&rdquo;
+                </div>
+              )}
+            </div>
+          )}
+          <div className="hint">Select up to {MAX_MATERIALS}.</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Photos and a video for the draft. A local-only draft has no listing_id yet
+ * -- every Etsy image/video endpoint needs one -- so what is added here is
+ * staged and only goes up once the draft is sent; a draft that already is a
+ * real Etsy listing uploads straight away, same as anywhere else in the app.
+ */
+function MediaManager({ draft, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const showError = useErrorToast();
+  const local = draft.isLocalOnly;
+  const listingId = draft.listingId;
+
+  const images = local ? (draft.pendingMedia?.images ?? []) : draft.images.map((i) => ({ id: i.imageId, url: i.thumb || i.url }));
+  const videos = local ? (draft.pendingMedia?.videos ?? []) : draft.videos.map((v) => ({ id: v.videoId, url: v.thumb || v.url }));
+  const maxImages = draft.pendingMedia?.maxImages ?? 20;
+  const maxVideos = draft.pendingMedia?.maxVideos ?? 2;
+
+  const addUrl = async (kind) => {
+    const url = prompt(kind === 'image' ? 'Paste the image URL' : 'Paste the video URL');
+    if (!url) return;
+    setBusy(true);
+    try {
+      await api.post(`/drafts/${listingId}/media`, { kind, url });
+      onChanged();
+    } catch (err) { showError(err, 'Could not add that'); } finally { setBusy(false); }
+  };
+
+  const addFile = async (kind, file) => {
+    setBusy(true);
+    try {
+      const form = new FormData();
+      if (local) {
+        form.append('file', file);
+        form.append('kind', kind);
+        await api.upload(`/drafts/${listingId}/media/upload`, form);
+      } else {
+        // The general listing image/video endpoints name the field after
+        // what it is, not generically "file".
+        form.append(kind, file);
+        await api.upload(`/listings/${listingId}/${kind === 'image' ? 'images' : 'videos'}`, form);
+        await api.post(`/drafts/${listingId}/resync`, {});
+      }
+      onChanged();
+    } catch (err) { showError(err, 'Could not upload that'); } finally { setBusy(false); }
+  };
+
+  const remove = async (kind, mediaId) => {
+    setBusy(true);
+    try {
+      if (local) {
+        await api.del(`/drafts/${listingId}/media/${mediaId}`);
+      } else {
+        await api.del(`/listings/${listingId}/${kind === 'image' ? 'images' : 'videos'}/${mediaId}`);
+        await api.post(`/drafts/${listingId}/resync`, {});
+      }
+      onChanged();
+    } catch (err) { showError(err, 'Could not remove that'); } finally { setBusy(false); }
+  };
+
+  const Row = ({ kind, items, max }) => (
+    <div className="mb16">
+      <div className="flex gap4" style={{ alignItems: 'center', justifyContent: 'space-between' }}>
+        <span className="small dim">{kind === 'image' ? 'Images' : 'Video'} — {items.length} of {max}</span>
+        <div className="flex gap4">
+          <button className="btn xs ghost" disabled={busy || items.length >= max} onClick={() => addUrl(kind)}>+ By URL</button>
+          <label className="btn xs ghost" style={{ cursor: items.length >= max ? 'not-allowed' : 'pointer', opacity: items.length >= max ? 0.5 : 1 }}>
+            + Upload
+            <input type="file" accept={kind === 'image' ? 'image/*' : 'video/*'} style={{ display: 'none' }}
+                   disabled={busy || items.length >= max}
+                   onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) addFile(kind, f); }} />
+          </label>
+        </div>
+      </div>
+      {items.length > 0 && (
+        <div className="flex gap4 mt8" style={{ flexWrap: 'wrap' }}>
+          {items.map((it) => (
+            <div key={it.id} style={{ position: 'relative' }}>
+              {kind === 'image'
+                ? <Thumb src={it.url} size="lg" />
+                : <video src={it.url} muted style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 6, background: '#000' }} />}
+              <button type="button" className="btn xs" disabled={busy}
+                      style={{ position: 'absolute', top: -6, right: -6, borderRadius: '50%', padding: '0 6px' }}
+                      onClick={() => remove(kind, it.id)} aria-label="Remove">×</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="mb16">
+      {local && (
+        <div className="hint mb8">
+          Staged here — these upload to Etsy the moment this draft is sent. A second video slot is offered, but
+          Etsy&rsquo;s own listing page describes holding a single video, so it may refuse the second one.
+        </div>
+      )}
+      <Row kind="image" items={images} max={maxImages} />
+      <Row kind="video" items={videos} max={maxVideos} />
+    </div>
   );
 }
 

@@ -30,6 +30,7 @@ import { readSetting, writeSetting } from './settings.js';
 import { badRequest } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 import * as drafts from './drafts.js';
+import * as draftmedia from './draftmedia.js';
 import * as taobao from './taobao.js';
 
 const log = createLogger('product-studio');
@@ -386,8 +387,22 @@ export function receive(payload = {}, { dryRun = false } = {}) {
     ? drafts.stage(existing.draft_id, fields)
     : drafts.createLocal(fields);
 
-  // Keep what came in, so the draft screen can show the photos and options the
-  // other app found even though they are not Etsy fields yet.
+  // The photos (and video, if there is one) so the draft screen can actually
+  // show them and they go up to Etsy the moment this becomes a real listing.
+  // Resending the same product replaces what was staged rather than piling
+  // more on, since a second press means "here is the corrected version".
+  if (existing) draftmedia.clear(draft.listingId);
+  for (const url of p.images.slice(0, draftmedia.MAX_IMAGES)) {
+    try { draftmedia.addUrl(draft.listingId, { kind: 'image', url }); }
+    catch (err) { log.warn(`could not stage image for draft ${draft.listingId}: ${err.message}`); }
+  }
+  if (p.videoUrl) {
+    try { draftmedia.addUrl(draft.listingId, { kind: 'video', url: p.videoUrl }); }
+    catch (err) { log.warn(`could not stage video for draft ${draft.listingId}: ${err.message}`); }
+  }
+
+  // Keep what came in, so the setup screen can show the mapping even after
+  // the photos above have moved into draft_media.
   getDb().prepare(`
     INSERT INTO product_studio_inbox (draft_id, shop_id, sku, source, payload, images, variants, received_at)
     VALUES (?,?,?,?,?,?,?, datetime('now'))

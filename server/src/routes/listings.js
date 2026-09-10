@@ -83,6 +83,8 @@ router.post('/:id/variation-images', asyncRoute(async (req, res) => {
 
 // ---------------------------------------------------------- videos & files
 
+router.get('/:id/videos', asyncRoute(async (req, res) => res.json(await listings.refreshVideos(Number(req.params.id)))));
+
 router.post('/:id/videos', upload.single('video'), asyncRoute(async (req, res) => {
   res.status(201).json(await listings.uploadVideo(Number(req.params.id), {
     buffer: req.file.buffer, filename: req.file.originalname, mime: req.file.mimetype, name: req.body.name,

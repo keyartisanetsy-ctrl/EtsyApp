@@ -1769,7 +1769,10 @@ await check('every Etsy operation the spec publishes has a caller', async () => 
     .filter((f) => !f.endsWith('operations.generated.js'))
     .map((f) => readFileSync(f, 'utf8')).join('\n');
 
-  const called = new Set([...source.matchAll(/call(?:All)?\(\s*['"]([A-Za-z]+)['"]/g)].map((m) => m[1]));
+  // `caller(` is the same call, just under the name a few services (image
+  // pinning, listing updates, the draft push) take as an injectable param so
+  // tests can stand in for Etsy without a network call.
+  const called = new Set([...source.matchAll(/\b(?:call|callAll|caller)\(\s*['"]([A-Za-z]+)['"]/g)].map((m) => m[1]));
   const all = Object.keys(OPERATIONS);
   const unused = all.filter((op) => !called.has(op));
   assert(all.length === 105, `expected 105 operations, the spec has ${all.length}`);
@@ -2135,6 +2138,212 @@ await check("Product Studio's own shapes are read exactly, not guessed at", asyn
   // Anything else still goes through the forgiving reader.
   const generic = ps.readProduct({ title: 'x', url: 'https://item.taobao.com/item.htm?id=1', cost: 5 });
   assert(generic.source !== 'product-studio', 'a generic payload was read as Product Studio');
+});
+
+await check('draft media is staged, capped, and cleared on resend', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  const dm = await import('../server/src/services/draftmedia.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960112').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960112,'Media Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960112);
+
+  // draft_media has a foreign key onto listing_drafts, so a real local draft
+  // is needed to hang photos off, same as production.
+  const listingId = drafts.createLocal({ title: 'Media test' }).listingId;
+
+  try {
+    const a = dm.addUrl(listingId, { kind: 'image', url: 'https://img.example.com/a.jpg' });
+    const b = dm.addUrl(listingId, { kind: 'image', url: 'https://img.example.com/b.jpg' });
+    dm.addUrl(listingId, { kind: 'video', url: 'https://img.example.com/v.mp4' });
+
+    let staged = dm.list(listingId);
+    assert(staged.images.length === 2 && staged.videos.length === 1, `expected 2 images + 1 video, got ${JSON.stringify(staged)}`);
+    assert(staged.images[0].id === a.id && staged.images[1].id === b.id, 'images did not keep the order they were added in');
+    assert(staged.maxImages === dm.MAX_IMAGES && staged.maxVideos === dm.MAX_VIDEOS, 'the caps were not reported');
+
+    // Etsy's own spec text for image_ids: "can include up to 20 images".
+    for (let i = 0; i < dm.MAX_IMAGES - 2; i += 1) dm.addUrl(listingId, { kind: 'image', url: `https://img.example.com/${i}.jpg` });
+    assert(dm.list(listingId).images.length === dm.MAX_IMAGES, 'did not fill up to the cap');
+    let overCap = false;
+    try { dm.addUrl(listingId, { kind: 'image', url: 'https://img.example.com/one-too-many.jpg' }); }
+    catch (err) { overCap = /20 images|allows up to/i.test(err.message); }
+    assert(overCap, 'a 21st image was accepted, or refused without saying why');
+
+    // Reordering swaps neighbours rather than losing anything.
+    dm.move(listingId, b.id, 'up');
+    staged = dm.list(listingId);
+    assert(staged.images[0].id === b.id, 'moving up did not change the order');
+
+    dm.remove(listingId, a.id);
+    assert(dm.list(listingId).images.length === dm.MAX_IMAGES - 1, 'removing one did not reduce the count');
+
+    // Product Studio resending the same product replaces what was staged.
+    dm.clear(listingId);
+    const empty = dm.list(listingId);
+    assert(!empty.images.length && !empty.videos.length, 'clear() left something behind');
+  } finally {
+    db.prepare('DELETE FROM draft_media WHERE listing_id = ?').run(listingId);
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960112').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960112').run();
+    client.removeAccount(960112);
+  }
+});
+
+await check('a product from Product Studio has its photos on the desk before it is ever pushed', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const ps = await import('../server/src/services/productstudio.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960113').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960113,'PS Media Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960113);
+
+  try {
+    const payload = {
+      title: 'One Piece Theme Anime Artisan Keycap Set',
+      url: 'https://item.taobao.com/item.htm?id=1012415746554',
+      cost: 18.5, currency: 'CNY', price: 39.99,
+      images: ['https://img.alicdn.com/a.jpg', 'https://img.alicdn.com/b.jpg'],
+    };
+    const first = ps.receive(payload);
+    const staged = drafts.get(first.draftId);
+    assert(staged.isLocalOnly, 'this should still be a local-only draft');
+    assert(staged.pendingMedia?.images?.length === 2, `the photos never reached the desk: ${JSON.stringify(staged.pendingMedia)}`);
+    assert(staged.pendingMedia.images[0].url === payload.images[0], 'the photo url was not kept as-is');
+
+    // Sent again (a correction from the other app) replaces, not piles on.
+    ps.receive({ ...payload, images: ['https://img.alicdn.com/c.jpg'] });
+    const after = drafts.get(first.draftId);
+    assert(after.pendingMedia.images.length === 1 && after.pendingMedia.images[0].url === 'https://img.alicdn.com/c.jpg',
+      `resending should replace the staged photos, got ${JSON.stringify(after.pendingMedia.images)}`);
+  } finally {
+    db.prepare('DELETE FROM draft_media WHERE listing_id < 0 AND listing_id IN (SELECT listing_id FROM listing_drafts WHERE shop_id = 960113)').run();
+    db.prepare('DELETE FROM product_studio_inbox WHERE shop_id = 960113').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960113').run();
+    db.prepare('DELETE FROM supply_items WHERE shop_id = 960113').run();
+    db.prepare('DELETE FROM sku_meta WHERE shop_id = 960113').run();
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960113').run();
+    client.removeAccount(960113);
+  }
+});
+
+await check('pushing an edited draft does not erase the photos it already has on Etsy', async () => {
+  // This is the bug behind "I can't see any product or variant image in the
+  // app": updateListing's response is the bare ShopListing, which carries no
+  // images/videos field at all, and the snapshot used to be overwritten with
+  // it wholesale - so editing a title and sending it wiped every photo the
+  // draft screen knew about, even though Etsy itself still had them.
+  const { initDb, getDb, json } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+  const listingId = 960114;
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960114').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960114,'Snapshot Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960114);
+
+  try {
+    db.prepare(`INSERT INTO listing_drafts (listing_id, shop_id, source, etsy_state, etsy_snapshot, staged, created_at, updated_at)
+                VALUES (?, 960114, 'etsy', 'draft', ?, '{}', datetime('now'), datetime('now'))`)
+      .run(listingId, json({
+        listing_id: listingId, title: 'Keycap Set', description: 'A set.',
+        price: { amount: 3999, divisor: 100, currency_code: 'USD' }, quantity: 5,
+        who_made: 'i_did', when_made: 'made_to_order', taxonomy_id: 1000,
+        images: [{ listing_image_id: 1, rank: 1, url_570xN: 'https://img.example.com/1.jpg', url_75x75: 'https://img.example.com/1-thumb.jpg' }],
+        videos: [{ video_id: 1, video_url: 'https://img.example.com/v.mp4', thumbnail_url: 'https://img.example.com/v-thumb.jpg' }],
+      }));
+    drafts.stage(listingId, { title: 'One Piece Theme Anime Artisan Keycap Set' });
+
+    const before = drafts.get(listingId);
+    assert(before.images.length === 1, 'the fixture itself has no photo to lose');
+
+    // Stands in for Etsy: updateListing's real response shape, no images key.
+    const stubCaller = async (operationId, args, opts) => {
+      if (operationId === 'updateListing') {
+        return { listing_id: listingId, title: opts.body.title, state: 'draft' };
+      }
+      throw new Error(`unexpected operation in this test: ${operationId}`);
+    };
+
+    await drafts.push(listingId, { caller: stubCaller });
+
+    const after = drafts.get(listingId);
+    assert(after.merged.title === 'One Piece Theme Anime Artisan Keycap Set', 'the edit itself did not go through');
+    assert(after.images.length === 1 && after.images[0].url === 'https://img.example.com/1.jpg',
+      `the photo was lost after pushing an edit: ${JSON.stringify(after.images)}`);
+    assert(after.videos.length === 1 && after.videos[0].url === 'https://img.example.com/v.mp4',
+      `the video was lost after pushing an edit: ${JSON.stringify(after.videos)}`);
+  } finally {
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960114').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960114').run();
+    client.removeAccount(960114);
+  }
+});
+
+await check('a new listing created from a local draft picks up its uploaded photos in the same snapshot', async () => {
+  // The other half of the same fix: a brand-new listing's create response
+  // also carries no images (there are none yet at that instant), so the
+  // snapshot has to be re-fetched with includes after the upload step, or
+  // the draft screen shows nothing until the next full pull from Etsy.
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960115').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960115,'New Listing Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960115);
+
+  try {
+    const draft = drafts.createLocal({
+      title: 'Keycap Set', description: 'A set.', price: 39.99, quantity: 5,
+      who_made: 'i_did', when_made: 'made_to_order', taxonomy_id: 1000,
+      shipping_profile_id: 5, readiness_state_id: 77,
+    });
+    // No photos staged in this test (that path needs a real image fetch),
+    // so pushToEtsy has nothing to upload - only the re-fetch is exercised.
+    const newId = 5551234;
+    const stubCaller = async (operationId, args) => {
+      if (operationId === 'createDraftListing') return { listing_id: newId, state: 'draft' };
+      if (operationId === 'getListing') {
+        assert(args.listing_id === newId, 'getListing was called with the wrong id');
+        assert(args.includes?.includes('Images'), 'the re-fetch did not ask for Images');
+        return {
+          listing_id: newId, title: 'Keycap Set', state: 'draft',
+          images: [{ listing_image_id: 42, rank: 1, url_570xN: 'https://img.example.com/new.jpg' }],
+          videos: [],
+        };
+      }
+      throw new Error(`unexpected operation in this test: ${operationId}`);
+    };
+
+    const result = await drafts.push(draft.listingId, { caller: stubCaller });
+    assert(result.listingId === newId, `expected the new id ${newId}, got ${result.listingId}`);
+
+    const after = drafts.get(newId);
+    assert(!after.isLocalOnly, 'the draft should now belong to a real Etsy listing');
+    assert(after.images.length === 1 && after.images[0].url === 'https://img.example.com/new.jpg',
+      `the freshly created listing's photo was not picked up: ${JSON.stringify(after.images)}`);
+  } finally {
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960115').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960115').run();
+    client.removeAccount(960115);
+  }
 });
 
 console.log('\nGuards');

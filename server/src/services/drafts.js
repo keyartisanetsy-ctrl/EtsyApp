@@ -23,6 +23,7 @@ import { call } from '../etsy/client.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 import * as listings from './listings.js';
+import * as draftmedia from './draftmedia.js';
 import * as undo from './undo.js';
 
 const log = createLogger('drafts');
@@ -40,7 +41,17 @@ export const EDITABLE = [
   'styles', 'processing_min', 'processing_max', 'readiness_state_id',
   'item_weight_unit', 'item_dimensions_unit', 'production_partner_ids',
   'should_auto_renew', 'is_taxable', 'type', 'image_ids',
+  // Only takes effect once this exists on Etsy (updateListing, not
+  // createDraftListing) -- the editor gates the field accordingly.
+  'featured_rank',
 ];
+
+// Etsy's own create-listing screen caps materials at 5 and quantity at 999
+// (its client-side error reads "Enter a quantity from 1 and 999"); neither
+// limit is written down in the API spec text, but the live form enforces
+// both, so the desk does too rather than letting a push fail on them instead.
+export const MAX_MATERIALS = 5;
+export const MAX_QUANTITY = 999;
 
 /** Etsy refuses a draft without these. Its spec, not a guess. */
 export const REQUIRED = ['title', 'description', 'price', 'quantity', 'who_made', 'when_made', 'taxonomy_id'];
@@ -70,7 +81,7 @@ export async function pullFromEtsy({ includeInactive = false } = {}) {
     for (;;) {
       const res = await call('getListingsByShop', {
         shop_id: shopId, state, limit: 100, offset,
-        includes: ['Images', 'Inventory'],
+        includes: ['Images', 'Videos', 'Inventory'],
       });
       const rows = res?.results ?? [];
       if (!rows.length) break;
@@ -197,6 +208,13 @@ export function get(listingId) {
       imageId: i.listing_image_id, rank: i.rank,
       url: i.url_fullxfull || i.url_570xN, thumb: i.url_75x75,
     })),
+    videos: (etsy.videos ?? []).map((v) => ({
+      videoId: v.video_id, url: v.video_url, thumb: v.thumbnail_url,
+    })),
+    // What is staged locally, waiting for this draft to become a real Etsy
+    // listing. Empty for a draft that already is one -- from that point its
+    // photos/video are uploaded straight away and live in the fields above.
+    pendingMedia: row.listing_id < 0 ? draftmedia.list(row.listing_id) : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -220,7 +238,8 @@ export function list({ includePushed = false } = {}) {
       etsyState: r.etsy_state,
       title: staged.title || etsy.title || '(untitled)',
       price: staged.price ?? (etsy.price?.amount != null ? etsy.price.amount / (etsy.price.divisor || 100) : null),
-      imageUrl: etsy.images?.[0]?.url_570xN ?? etsy.images?.[0]?.url_fullxfull ?? null,
+      imageUrl: etsy.images?.[0]?.url_570xN ?? etsy.images?.[0]?.url_fullxfull
+        ?? (r.listing_id < 0 ? draftmedia.list(r.listing_id).images?.[0]?.url ?? null : null),
       stagedCount: Object.keys(staged).length,
       pushedAt: r.pushed_at,
       pushError: r.push_error,
@@ -267,6 +286,29 @@ export function revert(listingId) {
   return get(id);
 }
 
+/**
+ * Bring one draft's photos/video back in step with Etsy, without waiting for
+ * the next full "Get drafts from Etsy".
+ *
+ * A draft that is already a real listing manages its images/video through the
+ * ordinary listing endpoints, which upload straight away - but those write to
+ * listing_images/listing_videos, not to this desk's own mirror of the
+ * listing, so an upload made from here would otherwise not show up until the
+ * next pull. This closes that gap right after such a change.
+ */
+export async function refreshSnapshot(listingId) {
+  const id = Number(listingId);
+  if (id < 0) return get(id); // nothing on Etsy yet for a local-only draft
+
+  const db = getDb();
+  const snapshot = await call('getListing', { listing_id: id, includes: ['Images', 'Videos', 'Shipping', 'Inventory'] });
+  const prevRow = db.prepare('SELECT etsy_snapshot FROM listing_drafts WHERE listing_id = ?').get(id);
+  const prevSnapshot = parse(prevRow?.etsy_snapshot, {}) ?? {};
+  db.prepare("UPDATE listing_drafts SET etsy_snapshot = ?, updated_at = datetime('now') WHERE listing_id = ?")
+    .run(json({ ...prevSnapshot, ...snapshot }), id);
+  return get(id);
+}
+
 /** Take a draft off the desk. Etsy keeps whatever it has. */
 export function remove(listingId) {
   const id = Number(listingId);
@@ -275,6 +317,10 @@ export function remove(listingId) {
     kind: 'draft.remove',
     targets: [{ table: 'listing_drafts', where: 'listing_id = ?', params: [id] }],
   });
+  // Cleared explicitly (not just left to the ON DELETE CASCADE below) so a
+  // photo uploaded from this machine has its file removed too, not just its
+  // row -- the cascade only reaches the database.
+  draftmedia.clear(id);
   const n = getDb().prepare('DELETE FROM listing_drafts WHERE listing_id = ? AND shop_id IS ?')
     .run(id, activeShopId()).changes;
   undo.commit(handle, { affected: n });
@@ -297,6 +343,11 @@ export function preview(listingId) {
   // draft with no stock passed here and was refused by Etsy instead.
   if (merged.quantity == null || Number(merged.quantity) < 1) {
     problems.push('A quantity of at least 1 is required.');
+  } else if (Number(merged.quantity) > MAX_QUANTITY) {
+    problems.push(`Quantity is ${merged.quantity}; Etsy allows ${MAX_QUANTITY}.`);
+  }
+  if ((merged.materials ?? []).length > MAX_MATERIALS) {
+    problems.push(`${merged.materials.length} materials; Etsy allows ${MAX_MATERIALS}.`);
   }
   if (!merged.title?.trim()) problems.push('A title is required.');
   if (merged.title && merged.title.length > 140) problems.push(`The title is ${merged.title.length} characters; Etsy allows 140.`);
@@ -339,7 +390,7 @@ export function preview(listingId) {
  * A local-only draft is created there; one that came from Etsy is updated with
  * just the fields you changed. Both go through the write queue, one at a time.
  */
-export async function push(listingId, { activate = false } = {}) {
+export async function push(listingId, { activate = false, caller = call } = {}) {
   const db = getDb();
   const id = Number(listingId);
   const shopId = requireShopId();
@@ -354,24 +405,46 @@ export async function push(listingId, { activate = false } = {}) {
   const body = { ...draft.merged };
   delete body.state;
 
+  let media = null;
   try {
     let result;
     if (draft.isLocalOnly) {
-      result = await call('createDraftListing', { shop_id: shopId }, { body });
+      result = await caller('createDraftListing', { shop_id: shopId }, { body });
+      const newId = result.listing_id;
+
+      // Etsy hands out the listing_id only now, so photos/video staged before
+      // this point could not be uploaded until this moment - do that first,
+      // then ask Etsy for the whole listing back so the snapshot this app
+      // shows actually carries them, instead of the bare create response.
+      media = await draftmedia.pushToEtsy(id, newId);
+      let snapshot = result;
+      try {
+        snapshot = await caller('getListing', { listing_id: newId, includes: ['Images', 'Videos', 'Shipping', 'Inventory'] });
+      } catch (err) { log.warn(`could not re-fetch listing ${newId} with images/video after creating it: ${err.message}`); }
+
       // The desk row now belongs to a real Etsy listing.
       db.prepare(`UPDATE listing_drafts SET listing_id = ?, source = 'etsy', etsy_state = ?,
                   etsy_snapshot = ?, staged = '{}', pushed_at = datetime('now'), push_error = NULL
                   WHERE listing_id = ?`)
-        .run(result.listing_id, result.state ?? 'draft', json(result), id);
-      log.info(`draft ${id} became Etsy listing ${result.listing_id}`);
+        .run(newId, result.state ?? 'draft', json(snapshot), id);
+      log.info(`draft ${id} became Etsy listing ${newId}`);
     } else {
       const onlyChanged = {};
       for (const key of draft.changed) onlyChanged[key] = draft.merged[key];
-      result = await listings.updateListing(id, onlyChanged);
+      result = await listings.updateListing(id, onlyChanged, { caller });
+      // updateListing's response is the bare ShopListing - it carries none of
+      // the association fields (images, videos, inventory...) a pulled draft
+      // has, because none of those were asked for or changed. Overwriting the
+      // snapshot with it wholesale silently wiped them out; merge instead, so
+      // only the fields Etsy actually returned move, and photos already on
+      // the listing do not vanish from this screen just because the title
+      // was edited.
+      const prevRow = db.prepare('SELECT etsy_snapshot FROM listing_drafts WHERE listing_id = ?').get(id);
+      const prevSnapshot = parse(prevRow?.etsy_snapshot, {}) ?? {};
       db.prepare(`UPDATE listing_drafts SET etsy_snapshot = ?, staged = '{}',
                   pushed_at = datetime('now'), push_error = NULL, etsy_state = ?
                   WHERE listing_id = ?`)
-        .run(json(result), result.state ?? draft.etsyState, id);
+        .run(json({ ...prevSnapshot, ...result }), result.state ?? draft.etsyState, id);
     }
 
     if (activate) {
@@ -394,6 +467,7 @@ export async function push(listingId, { activate = false } = {}) {
       pushed: draft.changed,
       state: result.state ?? null,
       url: result.url ?? `https://www.etsy.com/listing/${result.listing_id ?? id}`,
+      media,
     };
   } catch (err) {
     db.prepare('UPDATE listing_drafts SET push_error = ? WHERE listing_id = ?').run(err.message, id);
