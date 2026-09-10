@@ -422,11 +422,23 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
         snapshot = await caller('getListing', { listing_id: newId, includes: ['Images', 'Videos', 'Shipping', 'Inventory'] });
       } catch (err) { log.warn(`could not re-fetch listing ${newId} with images/video after creating it: ${err.message}`); }
 
-      // The desk row now belongs to a real Etsy listing.
-      db.prepare(`UPDATE listing_drafts SET listing_id = ?, source = 'etsy', etsy_state = ?,
-                  etsy_snapshot = ?, staged = '{}', pushed_at = datetime('now'), push_error = NULL
-                  WHERE listing_id = ?`)
-        .run(newId, result.state ?? 'draft', json(snapshot), id);
+      // The desk row now belongs to a real Etsy listing. Any staged photo/video
+      // that failed to upload is still parented on the old id at this point
+      // (draftmedia leaves it there rather than guessing where it is going),
+      // so it and the listing_drafts row itself have to be re-keyed to newId
+      // together. Neither statement is valid on its own -- moving the media
+      // row first points it at a listing_drafts row that does not exist yet,
+      // and moving the parent first orphans whatever media is still on the
+      // old id -- so foreign key checks are deferred to the end of this one
+      // transaction, where both sides agree again.
+      db.transaction(() => {
+        db.pragma('defer_foreign_keys = ON');
+        db.prepare('UPDATE draft_media SET listing_id = ? WHERE listing_id = ?').run(newId, id);
+        db.prepare(`UPDATE listing_drafts SET listing_id = ?, source = 'etsy', etsy_state = ?,
+                    etsy_snapshot = ?, staged = '{}', pushed_at = datetime('now'), push_error = NULL
+                    WHERE listing_id = ?`)
+          .run(newId, result.state ?? 'draft', json(snapshot), id);
+      })();
       log.info(`draft ${id} became Etsy listing ${newId}`);
     } else {
       const onlyChanged = {};

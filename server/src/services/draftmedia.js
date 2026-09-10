@@ -197,9 +197,12 @@ export async function pushToEtsy(localListingId, realListingId) {
     } catch (err) {
       log.warn(`listing ${realListingId}: could not upload staged ${row.kind} ${row.id}: ${err.message}`);
       result.failed.push({ id: row.id, kind: row.kind, error: err.message });
-      // Re-key survivors onto the real listing so they are not orphaned under
-      // an id that no longer exists, and can be retried from the draft screen.
-      db.prepare('UPDATE draft_media SET listing_id = ? WHERE id = ?').run(realListingId, row.id);
+      // Left under localListingId, not re-keyed here: the listing_drafts row
+      // it points at only becomes realListingId once every upload has been
+      // attempted, and moving this row there first would reference a parent
+      // row that does not exist yet -- SQLite's foreign key rejects that
+      // immediately. The caller re-keys whatever survives here, together
+      // with the parent row, in one transaction once this function returns.
     }
   }
   return result;

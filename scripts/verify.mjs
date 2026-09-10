@@ -2388,6 +2388,65 @@ await check('a new listing created from a local draft picks up its uploaded phot
 });
 
 console.log('\nGuards');
+await check('a photo that fails to upload does not break the draft becoming a real listing', async () => {
+  // Regression: a local draft with a staged photo that could not be
+  // uploaded used to blow up the whole push with a raw SQLite
+  // "FOREIGN KEY constraint failed" instead of just reporting that one
+  // photo as failed. draftmedia.pushToEtsy used to re-key a failed row
+  // onto the new listing_id the instant the upload failed, but the
+  // listing_drafts row for that id did not exist yet at that point --
+  // it is only re-keyed afterwards, in drafts.push().
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  const draftmedia = await import('../server/src/services/draftmedia.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960117').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960117,'Flaky Photo Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960117);
+
+  try {
+    const draft = drafts.createLocal({
+      title: 'Enamel Pin', description: 'A pin.', price: 12.5, quantity: 10,
+      who_made: 'i_did', when_made: 'made_to_order', taxonomy_id: 1000,
+      shipping_profile_id: 5, readiness_state_id: 77,
+    });
+    // Nothing listens on this port, so the fetch inside pushToEtsy fails
+    // fast and deterministically, with no real network access needed.
+    draftmedia.addUrl(draft.listingId, { kind: 'image', url: 'http://127.0.0.1:1/nope.jpg' });
+
+    const newId = 5559876;
+    const stubCaller = async (operationId, args) => {
+      if (operationId === 'createDraftListing') return { listing_id: newId, state: 'draft' };
+      if (operationId === 'getListing') {
+        assert(args.listing_id === newId, 'getListing was called with the wrong id');
+        return { listing_id: newId, title: 'Enamel Pin', state: 'draft', images: [], videos: [] };
+      }
+      throw new Error(`unexpected operation in this test: ${operationId}`);
+    };
+
+    const result = await drafts.push(draft.listingId, { caller: stubCaller });
+    assert(result.listingId === newId, `expected the new id ${newId}, got ${result.listingId}`);
+    assert(result.media.failed.length === 1, `expected the photo to be reported as failed, got ${JSON.stringify(result.media)}`);
+
+    const after = drafts.get(newId);
+    assert(!after.isLocalOnly, 'the draft should now belong to a real Etsy listing despite the failed photo');
+
+    // The failed photo has to survive under the new id so it can be
+    // retried from the draft screen, not vanish with the old one.
+    const staged = draftmedia.list(newId);
+    assert(staged.images.length === 1, `the failed photo should still be staged under the new id, got ${JSON.stringify(staged)}`);
+  } finally {
+    // Cascades onto draft_media, whichever id it currently sits under.
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960117').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960117').run();
+    client.removeAccount(960117);
+  }
+});
+
 await check('unauthenticated Etsy write is refused with guidance', async () => {
   const { status, body } = await req('/api/listings', {
     method: 'POST',
