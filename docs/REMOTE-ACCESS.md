@@ -10,6 +10,30 @@ drift apart and would need real conflict resolution. Instead, run the app
 computer just open it in a browser. One database, always consistent,
 nothing to keep in sync.
 
+## The fast path: one script
+
+`deploy/setup-vds.sh` does everything below in one run -- installs Node if
+missing, installs and builds the app, generates a random app password,
+installs Caddy with automatic HTTPS (using a free `nip.io` hostname that
+maps straight back to your VDS's IP, so no domain purchase or DNS step is
+needed), and installs a systemd service so it survives reboots.
+
+SSH into the VDS, then:
+
+```bash
+git clone <this repo> EtsyApp
+cd EtsyApp
+bash deploy/setup-vds.sh <VDS_PUBLIC_IP>
+```
+
+It prints the URL and the generated password at the end -- write both down.
+Safe to re-run later to pick up new code: it reuses what is already
+installed and just rebuilds the app.
+
+The rest of this document explains the same steps by hand, for anyone who
+wants to customize something the script assumes (a real domain instead of
+`nip.io`, a non-Debian VDS, an existing Caddy/systemd setup, etc).
+
 ## 1. Get the app onto the VDS
 
 ```bash
