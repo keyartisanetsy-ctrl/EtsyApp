@@ -30,6 +30,21 @@ It prints the URL and the generated password at the end -- write both down.
 Safe to re-run later to pick up new code: it reuses what is already
 installed and just rebuilds the app.
 
+**On a Windows Server VDS**, use `deploy/setup-vds.ps1` instead -- it does
+the exact same thing with Windows-native tools (an MSI install of Node, a
+plain zip download of the app so no Git installation is needed, Caddy and
+the app registered as real Windows services via NSSM so both restart on
+reboot). Open PowerShell **as Administrator** on the VDS, then:
+
+```powershell
+irm https://raw.githubusercontent.com/keyartisanetsy-ctrl/EtsyApp/claude/etsy-bulk-management-app-q3enu5/deploy/setup-vds.ps1 -OutFile setup-vds.ps1
+powershell -ExecutionPolicy Bypass -File .\setup-vds.ps1 -PublicIP <VDS_PUBLIC_IP>
+```
+
+The `-ExecutionPolicy Bypass` only applies to this one run; it does not
+change anything system-wide. Check the services any time with
+`Get-Service EtsyCommandCenter, EtsyCaddy`.
+
 The rest of this document explains the same steps by hand, for anyone who
 wants to customize something the script assumes (a real domain instead of
 `nip.io`, a non-Debian VDS, an existing Caddy/systemd setup, etc).
