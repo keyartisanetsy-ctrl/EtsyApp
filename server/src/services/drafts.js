@@ -44,6 +44,12 @@ export const EDITABLE = [
   // Only takes effect once this exists on Etsy (updateListing, not
   // createDraftListing) -- the editor gates the field accordingly.
   'featured_rank',
+  // Category attributes (occasion, required specs...) picked in the same
+  // category box that sets taxonomy_id. Not a real ShopListing field --
+  // Etsy takes these one property at a time via updateListingProperty, so
+  // this is a staging area push() walks after the listing itself exists,
+  // never sent as part of the create/update body itself.
+  'attributes',
 ];
 
 // Etsy's own create-listing screen caps materials at 5 and quantity at 999
@@ -166,6 +172,14 @@ function cleanFields(fields = {}) {
     if (!(key in fields)) continue;
     let value = fields[key];
     if (value === '' || value === undefined) continue;
+    if (key === 'attributes') {
+      // An opaque { propertyId: [{valueId, name}] } map -- no list/number
+      // coercion applies. Nothing picked is the same as not staging it at
+      // all, or every category box opened without picking anything would
+      // show as a change with nothing to actually push.
+      if (value && typeof value === 'object' && Object.keys(value).length) out[key] = value;
+      continue;
+    }
     if (key === 'tags' || key === 'materials') value = asList(value);
     if (key === 'styles') value = asList(value).slice(0, 2);       // Etsy allows two
     if (key === 'image_ids' || key === 'production_partner_ids') {
@@ -207,6 +221,11 @@ export function get(listingId) {
     shipping_profile_id: etsy.shipping_profile_id ?? null,
     return_policy_id: etsy.return_policy_id ?? null,
     state: etsy.state ?? row.etsy_state,
+    // Etsy's own snapshot carries no structured attribute state (this app
+    // never mirrors getListingProperties into it), so there is nothing to
+    // diff against -- any staged attribute always counts as a change,
+    // exactly like a staged photo does.
+    attributes: {},
   };
 
   // Which fields you actually changed, so the screen can mark them and the
@@ -430,6 +449,25 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
   const draft = get(id);
   const body = { ...draft.merged };
   delete body.state;
+  // Not a real ShopListing field -- Etsy takes category attributes one
+  // property at a time via updateListingProperty, once the listing itself
+  // exists, never as part of the create/update body.
+  const pendingAttributes = body.attributes;
+  delete body.attributes;
+
+  /** One write per property; a failure on one names that property rather
+   *  than losing every attribute this push was carrying. */
+  const applyAttributes = async (targetId) => {
+    if (!pendingAttributes) return;
+    for (const [propertyId, picked] of Object.entries(pendingAttributes)) {
+      if (!picked?.length) continue;
+      try {
+        await caller('updateListingProperty', { shop_id: shopId, listing_id: targetId, property_id: Number(propertyId) }, {
+          body: { value_ids: picked.map((v) => v.valueId), values: picked.map((v) => v.name) },
+        });
+      } catch (err) { log.warn(`draft ${id}: could not set attribute ${propertyId} on ${targetId}: ${err.message}`); }
+    }
+  };
 
   let media = null;
   try {
@@ -437,6 +475,7 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
     if (draft.isLocalOnly) {
       result = await caller('createDraftListing', { shop_id: shopId }, { body });
       const newId = result.listing_id;
+      await applyAttributes(newId);
 
       // Etsy hands out the listing_id only now, so photos/video staged before
       // this point could not be uploaded until this moment - do that first,
@@ -468,8 +507,16 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
       log.info(`draft ${id} became Etsy listing ${newId}`);
     } else {
       const onlyChanged = {};
-      for (const key of draft.changed) onlyChanged[key] = draft.merged[key];
-      result = await listings.updateListing(id, onlyChanged, { caller });
+      // attributes is not a real ShopListing field -- validateListingFields
+      // would reject the whole update over it. Applied separately below,
+      // after Etsy has accepted everything else.
+      for (const key of draft.changed) if (key !== 'attributes') onlyChanged[key] = draft.merged[key];
+      if (Object.keys(onlyChanged).length) {
+        result = await listings.updateListing(id, onlyChanged, { caller });
+      } else {
+        result = { listing_id: id };
+      }
+      await applyAttributes(id);
       // updateListing's response is the bare ShopListing - it carries none of
       // the association fields (images, videos, inventory...) a pulled draft
       // has, because none of those were asked for or changed. Overwriting the

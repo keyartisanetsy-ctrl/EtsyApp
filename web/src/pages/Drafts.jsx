@@ -6,6 +6,7 @@ import {
   Spinner, Empty, Banner, Drawer, Modal, Thumb, CopyButton, Tabs,
   useAsync, useToast, useErrorToast, fmtMoney, fmtAgo,
 } from '../components/ui.jsx';
+import { CategoryPicker } from './NewListing.jsx';
 
 const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007'];
 
@@ -267,19 +268,26 @@ function DraftEditor({ id, onClose, onChanged }) {
           <MaterialsPicker value={merged.materials ?? []} changed={isChanged('materials')}
                            onChange={(materials) => save({ materials })} />
 
-          <div className="section-title">Etsy needs these</div>
+          <div className="section-title">
+            Etsy needs these
+            {isChanged('taxonomy_id') && <span className="badge amber" style={{ marginLeft: 6 }}>category changed</span>}
+            {isChanged('attributes') && <span className="badge amber" style={{ marginLeft: 6 }}>attributes changed</span>}
+          </div>
+          <CategoryPicker
+            value={merged.taxonomy_id ?? ''}
+            onPick={(taxonomy_id) => save({ taxonomy_id: taxonomy_id === '' ? null : Number(taxonomy_id) })}
+            attributes={merged.attributes ?? {}}
+            onAttributes={(attributes) => save({ attributes })}
+          />
           <div className="split">
-            {field('taxonomy_id', 'Category id', { type: 'number', hint: 'Find one on the Create listing screen' })}
             {field('who_made', 'Who made it', { options: ['i_did', 'someone_else', 'collective'] })}
-          </div>
-          <div className="split">
             {field('when_made', 'When was it made', { options: WHEN_MADE })}
-            {pick('shipping_profile_id', 'Shipping delivery profile',
-              (choices?.shippingProfiles ?? []).map((p) => ({
-                value: p.id, label: `${p.title}${p.processing ? ` · ${p.processing}` : ''}`,
-              })),
-              'Where you post from and what you charge.')}
           </div>
+          {pick('shipping_profile_id', 'Shipping delivery profile',
+            (choices?.shippingProfiles ?? []).map((p) => ({
+              value: p.id, label: `${p.title}${p.processing ? ` · ${p.processing}` : ''}`,
+            })),
+            'Where you post from and what you charge.')}
 
           <div className="field">
             <label>

@@ -325,7 +325,7 @@ export default function NewListing() {
  * ones that put a listing into the gift guides and get forgotten - given their
  * own section.
  */
-function CategoryPicker({ value, onPick, attributes, onAttributes }) {
+export function CategoryPicker({ value, onPick, attributes, onAttributes }) {
   const [search, setSearch] = useState('');
   const debounced = useDebounced(search);
   const [open, setOpen] = useState(false);
@@ -443,7 +443,7 @@ function CategoryPicker({ value, onPick, attributes, onAttributes }) {
             <>
               <div className="flex" style={{ alignItems: 'center' }}>
                 <div>
-                  <div><strong>{detail.name}</strong></div>
+                  <div><strong>{detail.name}</strong> <span className="small dim">(id {value})</span></div>
                   <div className="small dim">{detail.path}</div>
                 </div>
                 <div className="spacer" />

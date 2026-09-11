@@ -2391,6 +2391,111 @@ await check('a new listing created from a local draft picks up its uploaded phot
   }
 });
 
+await check('pushing a staged category attribute on an existing draft sets it via updateListingProperty, not the listing body', async () => {
+  // attributes is not a real ShopListing field. Etsy's own updateListing
+  // would reject the whole call over it (validateListingFields throws on any
+  // key it does not recognise), so push() must strip it out of onlyChanged
+  // and apply it with a separate updateListingProperty call instead.
+  const { initDb, getDb, json } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+  const listingId = 960120;
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960120').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960120,'Attribute Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960120);
+
+  try {
+    db.prepare(`INSERT INTO listing_drafts (listing_id, shop_id, source, etsy_state, etsy_snapshot, staged, created_at, updated_at)
+                VALUES (?, 960120, 'etsy', 'draft', ?, '{}', datetime('now'), datetime('now'))`)
+      .run(listingId, json({
+        listing_id: listingId, title: 'Keycap Set', description: 'A set.',
+        price: { amount: 3999, divisor: 100, currency_code: 'USD' }, quantity: 5,
+        who_made: 'i_did', when_made: 'made_to_order', taxonomy_id: 1000,
+      }));
+    drafts.stage(listingId, {
+      title: 'Anime Artisan Keycap Set',
+      attributes: { 216: [{ valueId: 3, name: 'Blue' }] },
+    });
+
+    let sawUpdateListingProperty = false;
+    const stubCaller = async (operationId, args, opts) => {
+      if (operationId === 'updateListing') {
+        assert(!('attributes' in opts.body), `attributes leaked into updateListing's body: ${JSON.stringify(opts.body)}`);
+        assert(opts.body.title === 'Anime Artisan Keycap Set', 'the real change did not go through alongside it');
+        return { listing_id: listingId, title: opts.body.title, state: 'draft' };
+      }
+      if (operationId === 'updateListingProperty') {
+        sawUpdateListingProperty = true;
+        assert(args.listing_id === listingId, 'wrong listing_id on the property write');
+        assert(args.property_id === 216, `wrong property_id: ${args.property_id}`);
+        assert(JSON.stringify(opts.body) === JSON.stringify({ value_ids: [3], values: ['Blue'] }), `wrong property body: ${JSON.stringify(opts.body)}`);
+        return {};
+      }
+      throw new Error(`unexpected operation in this test: ${operationId}`);
+    };
+
+    await drafts.push(listingId, { caller: stubCaller });
+    assert(sawUpdateListingProperty, 'updateListingProperty was never called');
+
+    const after = drafts.get(listingId);
+    assert(after.merged.title === 'Anime Artisan Keycap Set', 'the title edit did not stick');
+    assert(Object.keys(after.staged ?? {}).length === 0 || after.changed.length === 0, 'staged edits should be cleared after a successful push');
+  } finally {
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960120').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960120').run();
+    client.removeAccount(960120);
+  }
+});
+
+await check('creating a listing from a local draft applies its staged category attributes after the listing exists', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960121').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960121,'New Listing Attribute Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960121);
+
+  try {
+    const draft = drafts.createLocal({
+      title: 'Keycap Set', description: 'A set.', price: 39.99, quantity: 5,
+      who_made: 'i_did', when_made: 'made_to_order', taxonomy_id: 1000,
+      shipping_profile_id: 5, readiness_state_id: 77,
+      attributes: { 216: [{ valueId: 3, name: 'Blue' }] },
+    });
+    const newId = 5559999;
+    let propertyCallListingId = null;
+    const stubCaller = async (operationId, args, opts) => {
+      if (operationId === 'createDraftListing') {
+        assert(!('attributes' in opts.body), 'attributes leaked into createDraftListing\'s body');
+        return { listing_id: newId, state: 'draft' };
+      }
+      if (operationId === 'updateListingProperty') {
+        propertyCallListingId = args.listing_id;
+        assert(JSON.stringify(opts.body) === JSON.stringify({ value_ids: [3], values: ['Blue'] }), `wrong property body: ${JSON.stringify(opts.body)}`);
+        return {};
+      }
+      if (operationId === 'getListing') return { listing_id: newId, title: 'Keycap Set', state: 'draft', images: [], videos: [] };
+      throw new Error(`unexpected operation in this test: ${operationId}`);
+    };
+
+    const result = await drafts.push(draft.listingId, { caller: stubCaller });
+    assert(result.listingId === newId, `expected ${newId}, got ${result.listingId}`);
+    assert(propertyCallListingId === newId, `the attribute was set on ${propertyCallListingId}, not the new listing id ${newId}`);
+  } finally {
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960121').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960121').run();
+    client.removeAccount(960121);
+  }
+});
+
 console.log('\nGuards');
 await check('a photo that fails to upload does not break the draft becoming a real listing', async () => {
   // Regression: a local draft with a staged photo that could not be
