@@ -60,6 +60,68 @@ to their side of it at all -- `cloudflared` works the same way on Linux:
 `cloudflared tunnel --url http://127.0.0.1:4317` needs nothing inbound
 either.)
 
+## Even faster: a public link from your own one-click start
+
+If you just want to open the copy of the app already running on your own
+PC from somewhere else — no VDS at all — set one line in `.env`:
+
+```
+REMOTE_ACCESS=1
+```
+
+The next time you run `npm start` (or double-click the packaged app), it
+downloads `cloudflared` once (a few seconds, cached after that), opens a
+tunnel to itself, and prints a box like:
+
+```
+======================================================================
+  Open from anywhere:  https://some-random-words.trycloudflare.com
+  Password:            a9F3kLp2Qz...
+======================================================================
+```
+
+`APP_PASSWORD` is generated automatically the first time this runs if you
+had not already set one. That link works from any browser, anywhere, for as
+long as this "start" window stays open — closing it (or restarting the app)
+ends that link; the next start prints a new one. Keep the terminal window
+around if you want to read the link again later in the session.
+
+**This changes nothing about what Etsy sees.** Every Etsy API call this app
+makes happens from wherever this process is physically running — a browser
+opening the link from a different city, network or device never talks to
+Etsy directly, so no other location's IP ever reaches Etsy. Only the
+computer you pressed "start" on does.
+
+## Connecting an additional Etsy shop
+
+Two things trip people up here, and neither is about IP addresses:
+
+- **"Connect another shop" just re-shows the shop I already have.** Etsy
+  is re-approving whichever Etsy.com account your browser is already
+  signed into — it never had to ask you to log in again. Log out of
+  Etsy.com in that browser (or open a private/incognito window), then
+  press the button again; Etsy will prompt a fresh login, and whichever
+  account you sign in as is the shop that gets connected.
+- **Connecting a shop through a remote link does not complete.** The
+  one-time OAuth handshake ends with Etsy sending your browser back to
+  this app's own callback address (`ETSY_REDIRECT_URI`, normally
+  `http://localhost:4317/api/auth/callback`). That only resolves to
+  *this* app if the browser doing the connecting is on the same machine
+  the app is running on — "localhost" always means "wherever I am", not
+  a specific server. Browsing everything else (listings, orders, SKUs...)
+  through a public/tunnel link works from anywhere; do the one-time
+  "connect a shop" step directly on the computer or VDS the app itself
+  runs on (its own screen, or an RDP/SSH session into it), not through
+  the tunnel link from a different device.
+
+  `localhost` is not tied to any one computer, so once
+  `http://localhost:4317/api/auth/callback` is registered as your Etsy
+  app's callback URL, that same registration keeps working forever, on
+  any machine you ever run this app on — moving to a new VDS or a new PC
+  never requires touching Etsy's side of it again. (Etsy's own app
+  dashboard also outright rejects an IP-literal callback URL like
+  `http://127.0.0.1:4317/...` — always use `localhost`.)
+
 The rest of this document explains the same steps by hand, for anyone who
 wants to customize something the script assumes (a real domain instead of
 `nip.io`, a non-Debian VDS, an existing Caddy/systemd setup, etc).

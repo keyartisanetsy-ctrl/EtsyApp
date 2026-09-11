@@ -147,13 +147,32 @@ export default function Settings() {
               between shops.
               <div className="mt8">
                 The keystring and shared secret below register <strong>one Etsy app</strong> — you only enter them
-                once. Each shop connects to that same app through its own separate authorization. If the second
-                shop has a different Etsy login than the one already signed in in your browser, log out of Etsy
-                (or open a private/incognito window) before pressing <strong>Connect another shop</strong>, so Etsy
-                asks you to sign in as that shop's owner instead of re-authorizing the one you're already on.
+                once. Each shop connects to that same app through its own separate authorization.
               </div>
             </div>
           </Banner>
+
+          {auth?.accountCount > 0 && (
+            <Banner kind="warn">
+              <div>
+                <strong>Adding a shop and it just shows the one you already have connected, instead of asking you to log in?</strong>{' '}
+                That is not an IP or network problem — Etsy is simply re-approving whichever Etsy.com account your
+                browser is already signed into, because it never had to ask you to log in again.
+              </div>
+              <div className="mt8">
+                Before pressing <strong>Connect another shop</strong> below: log out of Etsy.com in this browser
+                (or open a private/incognito window), then press it again. Etsy will ask you to sign in — sign in
+                as the <em>other</em> shop's owner, and that shop is what gets connected.
+              </div>
+              <div className="mt8">
+                One more thing this depends on: the callback address Etsy sends you back to
+                (<code className="mono">{auth?.redirectUri}</code>) only reaches this app if the browser doing the
+                connecting is on the <strong>same machine</strong> this app is running on. Opening the app through a
+                remote/public link from a different computer works fine for everyday use, but do the one-time
+                "connect a shop" step directly on the computer or server the app itself runs on.
+              </div>
+            </Banner>
+          )}
 
           <div className="flex mb16">
             <button className="btn" onClick={testConnection} disabled={testing}>

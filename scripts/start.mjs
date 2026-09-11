@@ -33,6 +33,11 @@ if (!fs.existsSync(path.join(root, 'web/dist/index.html'))) {
   run('npm run build');
 }
 
+// .env is normally only read once the server module loads (server/src/config.js),
+// which is too late to know here whether a public link was asked for.
+const dotenv = await import('dotenv');
+dotenv.default.config({ path: path.join(root, '.env') });
+
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 // The server opens the browser from its listen callback, once the port is
 // really accepting connections. Opt out with OPEN_BROWSER=0.
@@ -40,3 +45,10 @@ process.env.OPEN_BROWSER = process.env.OPEN_BROWSER ?? '1';
 
 console.log('Starting the server...');
 await import('../server/src/index.js');
+
+// Started after the server import resolves, so cloudflared has something to
+// proxy to almost immediately -- opt in with REMOTE_ACCESS=1 in .env.
+if (/^(1|true|yes|on)$/i.test(process.env.REMOTE_ACCESS || '')) {
+  const { startRemoteAccess } = await import('./remote-access.mjs');
+  await startRemoteAccess({ root, port: Number(process.env.PORT) || 4317 });
+}

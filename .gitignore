@@ -13,6 +13,9 @@ data/
 release/
 *.zip
 
+# Downloaded helper binaries (cloudflared for the optional public link)
+.tools/
+
 .DS_Store
 .vscode/
 .idea/
