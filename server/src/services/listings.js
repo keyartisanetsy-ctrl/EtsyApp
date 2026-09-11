@@ -102,6 +102,11 @@ export function localListing(listingId) {
   if (!l) throw notFound(`Listing ${listingId} is not in the local mirror. Sync listings first.`);
   const pct = getDiscountPercent();
   const price = l.price_amount != null ? l.price_amount / (l.price_divisor || 100) : null;
+  // Everything below this line lives only in the full Etsy payload -- the
+  // listings table's own columns cover just what other screens filter/sort
+  // by. Rather than add a column per field the edit drawer wants, read them
+  // out of what Etsy already sent back on the last sync.
+  const raw = parse(l.raw, {}) ?? {};
   return {
     listingId: l.listing_id,
     title: l.title,
@@ -122,6 +127,23 @@ export function localListing(listingId) {
     favorers: l.num_favorers,
     createdTs: l.created_ts,
     updatedTs: l.updated_ts,
+    whoMade: raw.who_made ?? null,
+    whenMade: raw.when_made ?? null,
+    isSupply: raw.is_supply ?? null,
+    type: raw.listing_type ?? null,
+    isTaxable: raw.is_taxable ?? null,
+    isCustomizable: raw.is_customizable ?? null,
+    isPersonalizable: raw.is_personalizable ?? null,
+    shouldAutoRenew: raw.should_auto_renew ?? null,
+    featuredRank: raw.featured_rank ?? null,
+    readinessStateId: raw.readiness_state_id ?? null,
+    styles: raw.style ?? [],
+    itemWeight: raw.item_weight ?? null,
+    itemWeightUnit: raw.item_weight_unit ?? null,
+    itemLength: raw.item_length ?? null,
+    itemWidth: raw.item_width ?? null,
+    itemHeight: raw.item_height ?? null,
+    itemDimensionsUnit: raw.item_dimensions_unit ?? null,
     images: db.prepare('SELECT * FROM listing_images WHERE listing_id = ? ORDER BY rank').all(listingId)
       .map((i) => ({ id: i.listing_image_id, rank: i.rank, url: i.url_570xN || i.url_fullxfull, full: i.url_fullxfull, thumb: i.url_75x75, altText: i.alt_text })),
     videos: db.prepare('SELECT * FROM listing_videos WHERE listing_id = ?').all(listingId)
@@ -367,6 +389,9 @@ export const setPersonalization = (listingId, opts) => {
     },
   });
 };
+
+/** No shop_id in this one -- Etsy's own path for it is listing-only. */
+export const getPersonalization = (listingId) => call('getListingPersonalization', { listing_id: listingId });
 
 export const removePersonalization = (listingId) =>
   call('deleteListingPersonalization', { shop_id: requireShopId(), listing_id: listingId });

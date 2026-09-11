@@ -4,6 +4,7 @@ import multer from 'multer';
 import { asyncRoute, int, bool, list, tri, required } from '../lib/http.js';
 import * as listings from '../services/listings.js';
 import * as sync from '../services/sync.js';
+import * as inventory from '../services/inventory.js';
 import { call } from '../etsy/client.js';
 import { requireShopId } from '../etsy/shop.js';
 
@@ -47,6 +48,17 @@ router.patch('/:id', asyncRoute(async (req, res) => {
 router.post('/:id/state', asyncRoute(async (req, res) => {
   required(req.body ?? {}, ['state']);
   res.json(await listings.setState(Number(req.params.id), req.body.state));
+}));
+
+/**
+ * There is no readiness_state_id field on updateListing once a listing
+ * exists -- it lives on each inventory offering instead. Applied uniformly
+ * across every offering, since the edit drawer shows one processing-profile
+ * picker for the whole listing, not one per variation.
+ */
+router.post('/:id/readiness-state', asyncRoute(async (req, res) => {
+  required(req.body ?? {}, ['readinessStateId']);
+  res.json(await inventory.setReadinessStateForAll(Number(req.params.id), Number(req.body.readinessStateId)));
 }));
 
 router.delete('/:id', asyncRoute(async (req, res) => res.json(await listings.deleteListing(Number(req.params.id)))));
@@ -108,6 +120,10 @@ router.delete('/:id/files/:fileId', asyncRoute(async (req, res) => {
 }));
 
 // ------------------------------------------- personalisation / translations
+
+router.get('/:id/personalization', asyncRoute(async (req, res) => {
+  res.json(await listings.getPersonalization(Number(req.params.id)));
+}));
 
 router.post('/:id/personalization', asyncRoute(async (req, res) => {
   res.json(await listings.setPersonalization(Number(req.params.id), req.body ?? {}));

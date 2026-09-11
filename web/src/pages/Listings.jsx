@@ -7,9 +7,17 @@ import {
   Spinner, Empty, Banner, Checkbox, Pager, SortTh, Drawer, Modal, Thumb, CopyButton,
   useAsync, useDebounced, useToast, useErrorToast, fmtMoney, fmtDate, STATE_BADGE,
 } from '../components/ui.jsx';
+import { CategoryPicker } from './NewListing.jsx';
 
 const LIMIT = 50;
 const STATES = ['active', 'inactive', 'draft', 'expired', 'sold_out'];
+const WHO_MADE = ['i_did', 'someone_else', 'collective'];
+const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007',
+  '2000_2006', '1990s', '1980s', '1970s', '1960s', '1950s', '1940s', '1930s', '1920s', '1910s',
+  '1900s', '1800s', '1700s', 'before_1700'];
+const LISTING_TYPES = ['physical', 'download', 'both'];
+const WEIGHT_UNITS = ['oz', 'lb', 'g', 'kg'];
+const DIMENSION_UNITS = ['in', 'ft', 'mm', 'cm', 'm', 'yd', 'inches'];
 
 export default function Listings() {
   const [params, setParams] = useSearchParams();
@@ -183,23 +191,100 @@ export default function Listings() {
 
 function ListingDetail({ id, onClose, onChanged }) {
   const { data, loading, reload } = useAsync(() => (id ? api.get(`/listings/${id}`) : null), [id], { immediate: !!id });
+  // Etsy asks for these by numeric id; nobody knows them by heart -- same
+  // shop-wide picker list the draft desk uses.
+  const { data: choices } = useAsync(() => (id ? api.get('/drafts/choices') : null), [id], { immediate: !!id });
+  const { data: properties } = useAsync(
+    () => (id ? api.get(`/listings/${id}/properties`).catch(() => ({ results: [] })) : null), [id], { immediate: !!id });
+  const { data: personalizationData } = useAsync(
+    () => (id ? api.get(`/listings/${id}/personalization`).catch(() => ({ personalization_questions: [] })) : null),
+    [id], { immediate: !!id });
+
   const [edit, setEdit] = useState({});
+  // Category attributes, personalization and the processing profile are not
+  // real ShopListing fields (see server/src/services/listings.js) -- each
+  // has its own endpoint, applied only if actually touched here, alongside
+  // whatever plain fields changed.
+  const [attrPicked, setAttrPicked] = useState({});
+  const [attrTouched, setAttrTouched] = useState(false);
+  const [personalization, setPersonalization] = useState(null); // null = untouched
+  const [readinessStateId, setReadinessStateId] = useState(null); // null = untouched
+  const [confirm, setConfirm] = useState(null); // { body, extra } | null
   const [busy, setBusy] = useState(false);
   const toast = useToast();
   const showError = useErrorToast();
 
-  React.useEffect(() => { setEdit({}); }, [id]);
+  React.useEffect(() => {
+    setEdit({}); setAttrTouched(false); setPersonalization(null); setReadinessStateId(null); setConfirm(null);
+  }, [id]);
+
+  // Prefill the category attribute picker from what Etsy actually has, the
+  // moment it loads -- not touching it just shows the real values.
+  React.useEffect(() => {
+    if (!properties?.results) return;
+    const map = {};
+    for (const p of properties.results) {
+      map[p.property_id] = (p.value_ids ?? []).map((valueId, i) => ({ valueId, name: p.values?.[i] ?? '' }));
+    }
+    setAttrPicked(map);
+  }, [properties]);
+
   if (!id) return null;
 
-  const save = async () => {
+  const existingQuestion = personalizationData?.personalization_questions?.[0];
+  const pers = personalization ?? {
+    isPersonalizable: data?.isPersonalizable ?? false,
+    isRequired: existingQuestion?.required ?? false,
+    charCountMax: existingQuestion?.max_allowed_characters ?? 256,
+    instructions: existingQuestion?.instructions ?? '',
+    questionText: existingQuestion?.question_text ?? 'Personalization',
+  };
+
+  const nothingToSend = !Object.keys(edit).length && !attrTouched && !personalization && readinessStateId == null;
+
+  /** Etsy sees nothing yet -- this only asks the server to validate what
+   *  plain fields would be sent, so the confirm step shows the real thing. */
+  const reviewChanges = async () => {
     setBusy(true);
     try {
-      const body = { ...edit };
-      if (body.tags) body.tags = body.tags.split(',').map((t) => t.trim()).filter(Boolean);
-      if (body.materials) body.materials = body.materials.split(',').map((t) => t.trim()).filter(Boolean);
-      await api.patch(`/listings/${id}`, body);
+      let body = {};
+      if (Object.keys(edit).length) {
+        const raw = { ...edit };
+        if (raw.tags) raw.tags = String(raw.tags).split(',').map((t) => t.trim()).filter(Boolean);
+        if (raw.materials) raw.materials = String(raw.materials).split(',').map((t) => t.trim()).filter(Boolean);
+        const res = await api.patch(`/listings/${id}?dryRun=true`, raw);
+        body = res.body ?? {};
+      }
+      const extra = [];
+      if (attrTouched) {
+        const n = Object.values(attrPicked).filter((v) => v?.length).length;
+        if (n) extra.push(`${n} category attribute(s)`);
+      }
+      if (personalization) {
+        extra.push(personalization.isPersonalizable === false ? 'turn personalization off' : 'personalization question');
+      }
+      if (readinessStateId != null) extra.push('processing profile (applied to every variation)');
+      if (!Object.keys(body).length && !extra.length) { toast({ kind: 'warn', title: 'Nothing has changed' }); return; }
+      setConfirm({ body, extra });
+    } catch (err) { showError(err, 'Etsy rejected the update'); } finally { setBusy(false); }
+  };
+
+  const applyConfirmed = async () => {
+    setBusy(true);
+    try {
+      if (Object.keys(confirm.body).length) await api.patch(`/listings/${id}`, confirm.body);
+      if (attrTouched) {
+        for (const [propertyId, picked] of Object.entries(attrPicked)) {
+          if (!picked?.length) continue;
+          await api.put(`/listings/${id}/properties/${propertyId}`, {
+            value_ids: picked.map((v) => v.valueId), values: picked.map((v) => v.name),
+          });
+        }
+      }
+      if (personalization) await api.post(`/listings/${id}/personalization`, personalization);
+      if (readinessStateId != null) await api.post(`/listings/${id}/readiness-state`, { readinessStateId });
       toast({ kind: 'ok', title: 'Listing updated on Etsy' });
-      setEdit({});
+      setEdit({}); setAttrTouched(false); setPersonalization(null); setReadinessStateId(null); setConfirm(null);
       reload();
       onChanged();
     } catch (err) { showError(err, 'Etsy rejected the update'); } finally { setBusy(false); }
@@ -218,8 +303,8 @@ function ListingDetail({ id, onClose, onChanged }) {
     <Drawer open onClose={onClose} wide title={data?.title ?? 'Listing'}
             footer={data && (
               <>
-                <button className="btn primary" disabled={busy || !Object.keys(edit).length} onClick={save}>
-                  {busy ? <Spinner /> : 'Save to Etsy'}
+                <button className="btn primary" disabled={busy || nothingToSend} onClick={reviewChanges}>
+                  {busy ? <Spinner /> : 'Review changes'}
                 </button>
                 {data.state === 'active'
                   ? <button className="btn" onClick={() => setState('inactive')}>Deactivate</button>
@@ -257,6 +342,178 @@ function ListingDetail({ id, onClose, onChanged }) {
             <input className="input" value={edit.materials ?? data.materials.join(', ')} onChange={(e) => setEdit({ ...edit, materials: e.target.value })} />
           </div>
 
+          <div className="section-title">Category</div>
+          <CategoryPicker
+            value={edit.taxonomy_id ?? data.taxonomyId ?? ''}
+            onPick={(taxonomy_id) => setEdit({ ...edit, taxonomy_id: taxonomy_id === '' ? '' : Number(taxonomy_id) })}
+            attributes={attrPicked}
+            onAttributes={(a) => { setAttrPicked(a); setAttrTouched(true); }}
+          />
+
+          <div className="section-title">Made by</div>
+          <div className="split">
+            <div className="field">
+              <label>Who made it</label>
+              <select className="select" value={edit.who_made ?? data.whoMade ?? ''} onChange={(e) => setEdit({ ...edit, who_made: e.target.value })}>
+                <option value="">—</option>
+                {WHO_MADE.map((w) => <option key={w} value={w}>{w.replace(/_/g, ' ')}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>When was it made</label>
+              <select className="select" value={edit.when_made ?? data.whenMade ?? ''} onChange={(e) => setEdit({ ...edit, when_made: e.target.value })}>
+                <option value="">—</option>
+                {WHEN_MADE.map((w) => <option key={w} value={w}>{w.replace(/_/g, ' ')}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="split">
+            <div className="field">
+              <label>Listing type</label>
+              <select className="select" value={edit.type ?? data.type ?? ''} onChange={(e) => setEdit({ ...edit, type: e.target.value })}>
+                <option value="">—</option>
+                {LISTING_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Supply or finished product</label>
+              <div className="flex gap12">
+                <label className="flex gap4" style={{ alignItems: 'center' }}>
+                  <input type="radio" checked={(edit.is_supply ?? data.isSupply) === true} onChange={() => setEdit({ ...edit, is_supply: true })} /> Supply
+                </label>
+                <label className="flex gap4" style={{ alignItems: 'center' }}>
+                  <input type="radio" checked={(edit.is_supply ?? data.isSupply) === false} onChange={() => setEdit({ ...edit, is_supply: false })} /> Finished product
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div className="section-title">Shipping &amp; policies</div>
+          <div className="split">
+            <div className="field">
+              <label>Shipping profile</label>
+              <select className="select" value={edit.shipping_profile_id ?? data.shippingProfileId ?? ''}
+                      onChange={(e) => setEdit({ ...edit, shipping_profile_id: e.target.value })}>
+                <option value="">—</option>
+                {(choices?.shippingProfiles ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>{p.title}{p.processing ? ` · ${p.processing}` : ''}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label>Shop section</label>
+              <select className="select" value={edit.shop_section_id ?? data.sectionId ?? ''}
+                      onChange={(e) => setEdit({ ...edit, shop_section_id: e.target.value })}>
+                <option value="">—</option>
+                {(choices?.sections ?? []).map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="split">
+            <div className="field">
+              <label>Return policy</label>
+              <select className="select" value={edit.return_policy_id ?? data.returnPolicyId ?? ''}
+                      onChange={(e) => setEdit({ ...edit, return_policy_id: e.target.value })}>
+                <option value="">—</option>
+                {(choices?.returnPolicies ?? []).map((x) => (
+                  <option key={x.id} value={x.id}>{x.accepts ? `Accepts returns${x.days ? ` within ${x.days} days` : ''}` : 'No returns'}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label>Processing profile</label>
+              <select className="select" value={readinessStateId ?? data.readinessStateId ?? ''}
+                      onChange={(e) => setReadinessStateId(e.target.value ? Number(e.target.value) : null)}>
+                <option value="">—</option>
+                {(choices?.processingProfiles ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>{p.label ? `${p.label} · ` : ''}{String(p.readinessState ?? '').replace(/_/g, ' ')}</option>
+                ))}
+              </select>
+              <div className="hint">Applied separately — Etsy has no field for this on an update; it lives on the listing's inventory instead.</div>
+            </div>
+          </div>
+
+          <div className="section-title">Weight &amp; dimensions</div>
+          <div className="split">
+            <div className="field">
+              <label>Weight</label>
+              <div className="flex gap4">
+                <input className="input" type="number" step="0.01" value={edit.item_weight ?? data.itemWeight ?? ''}
+                       onChange={(e) => setEdit({ ...edit, item_weight: e.target.value })} />
+                <select className="select" value={edit.item_weight_unit ?? data.itemWeightUnit ?? ''}
+                        onChange={(e) => setEdit({ ...edit, item_weight_unit: e.target.value })}>
+                  <option value="">unit</option>
+                  {WEIGHT_UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="field">
+              <label>Dimensions unit</label>
+              <select className="select" value={edit.item_dimensions_unit ?? data.itemDimensionsUnit ?? ''}
+                      onChange={(e) => setEdit({ ...edit, item_dimensions_unit: e.target.value })}>
+                <option value="">—</option>
+                {DIMENSION_UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="flex gap12">
+            <div className="field"><label>Length</label>
+              <input className="input" type="number" step="0.01" value={edit.item_length ?? data.itemLength ?? ''}
+                     onChange={(e) => setEdit({ ...edit, item_length: e.target.value })} />
+            </div>
+            <div className="field"><label>Width</label>
+              <input className="input" type="number" step="0.01" value={edit.item_width ?? data.itemWidth ?? ''}
+                     onChange={(e) => setEdit({ ...edit, item_width: e.target.value })} />
+            </div>
+            <div className="field"><label>Height</label>
+              <input className="input" type="number" step="0.01" value={edit.item_height ?? data.itemHeight ?? ''}
+                     onChange={(e) => setEdit({ ...edit, item_height: e.target.value })} />
+            </div>
+          </div>
+
+          <div className="section-title">Settings</div>
+          <Checkbox checked={edit.is_taxable ?? data.isTaxable ?? false}
+                    onChange={(v) => setEdit({ ...edit, is_taxable: v })} label="Charge shop tax rates on this listing" />
+          <Checkbox checked={edit.should_auto_renew ?? data.shouldAutoRenew ?? false}
+                    onChange={(v) => setEdit({ ...edit, should_auto_renew: v })} label="Auto-renew for $0.20 when it expires" />
+          <div className="field">
+            <label>Feature this listing</label>
+            <input className="input" type="number" min={1} value={edit.featured_rank ?? data.featuredRank ?? ''}
+                   onChange={(e) => setEdit({ ...edit, featured_rank: e.target.value })} />
+            <div className="hint">Optional. Position in your shop's featured row — 1 is left-most.</div>
+          </div>
+          {(data.styles?.length > 0 || data.isCustomizable != null) && (
+            <div className="small dim mb16">
+              Styles{data.styles?.length ? `: ${data.styles.join(', ')}` : ''}
+              {data.isCustomizable != null ? ` · customizable: ${data.isCustomizable ? 'yes' : 'no'}` : ''}.
+              Etsy only accepts either one when a listing is first created — there is no way to change them afterwards.
+            </div>
+          )}
+
+          <div className="section-title">Personalization</div>
+          <Checkbox checked={pers.isPersonalizable} onChange={(v) => setPersonalization({ ...pers, isPersonalizable: v })}
+                    label="Buyers can personalize this listing" />
+          {pers.isPersonalizable && (
+            <>
+              <div className="field">
+                <label>Question shown to the buyer</label>
+                <input className="input" value={pers.questionText} onChange={(e) => setPersonalization({ ...pers, questionText: e.target.value })} />
+              </div>
+              <div className="field">
+                <label>Instructions</label>
+                <input className="input" value={pers.instructions} onChange={(e) => setPersonalization({ ...pers, instructions: e.target.value })} />
+              </div>
+              <div className="split">
+                <Checkbox checked={pers.isRequired} onChange={(v) => setPersonalization({ ...pers, isRequired: v })} label="Required" />
+                <div className="field">
+                  <label>Max characters</label>
+                  <input className="input" type="number" value={pers.charCountMax}
+                         onChange={(e) => setPersonalization({ ...pers, charCountMax: Number(e.target.value) })} />
+                </div>
+              </div>
+            </>
+          )}
+
           <div className="section-title">Variations ({data.variations.length})</div>
           <table className="data">
             <thead><tr><th /><th>SKU</th><th>Variation</th><th className="right">Price</th><th className="right">Qty</th></tr></thead>
@@ -274,6 +531,34 @@ function ListingDetail({ id, onClose, onChanged }) {
           </table>
           <div className="small muted mt8">Edit SKUs and prices on the SKUs screen, where changes batch per listing.</div>
         </>
+      )}
+
+      {confirm && (
+        <Modal open onClose={() => setConfirm(null)} title="Review before sending to Etsy"
+               footer={(
+                 <button className="btn primary" disabled={busy} onClick={applyConfirmed}>
+                   {busy ? <Spinner /> : 'Send to Etsy'}
+                 </button>
+               )}>
+          {Object.keys(confirm.body).length > 0 ? (
+            <>
+              <div className="section-title">Fields</div>
+              <dl className="kv">
+                {Object.entries(confirm.body).map(([k, v]) => (
+                  <React.Fragment key={k}>
+                    <dt>{k}</dt><dd className="small">{Array.isArray(v) ? v.join(', ') : String(v)}</dd>
+                  </React.Fragment>
+                ))}
+              </dl>
+            </>
+          ) : <div className="small dim">No plain fields changed.</div>}
+          {confirm.extra.length > 0 && (
+            <>
+              <div className="section-title">Also applied separately</div>
+              <ul style={{ margin: '6px 0 0 18px' }}>{confirm.extra.map((e) => <li key={e}>{e}</li>)}</ul>
+            </>
+          )}
+        </Modal>
       )}
     </Drawer>
   );

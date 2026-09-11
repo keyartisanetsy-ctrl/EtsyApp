@@ -2109,6 +2109,59 @@ await check('the "Create listing" page is checked against the same live-API rule
   }
 });
 
+await check('localListing surfaces the full ShopListing payload the edit drawer needs', async () => {
+  // The listings table's own columns cover only what other screens
+  // filter/sort by; the edit drawer's extra fields (who made it, weight,
+  // is_taxable, processing profile...) have to come from the raw payload
+  // Etsy actually sent, or the drawer has nothing to prefill from and every
+  // field silently reverts to its own placeholder on each open.
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const sync = await import('../server/src/services/sync.js');
+  const listings = await import('../server/src/services/listings.js');
+  await initDb();
+  const db = getDb();
+  const listingId = 960123;
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960123').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960123,'Full Fields Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960123);
+
+  try {
+    sync.saveListing({
+      listing_id: listingId, title: 'Keycap Set', description: 'A set.',
+      state: 'active', url: 'https://etsy.com/listing/960123',
+      price: { amount: 3999, divisor: 100, currency_code: 'USD' }, quantity: 5,
+      taxonomy_id: 1000, who_made: 'i_did', when_made: '2020_2026', is_supply: false,
+      listing_type: 'physical', is_taxable: true, is_customizable: true,
+      is_personalizable: true, should_auto_renew: true, featured_rank: 3,
+      readiness_state_id: 88, style: ['Steampunk', 'Formal'],
+      item_weight: 1.5, item_weight_unit: 'oz', item_length: 2, item_width: 3, item_height: 4,
+      item_dimensions_unit: 'in',
+    });
+
+    const detail = listings.localListing(listingId);
+    assert(detail.whoMade === 'i_did', `whoMade: ${detail.whoMade}`);
+    assert(detail.whenMade === '2020_2026', `whenMade: ${detail.whenMade}`);
+    assert(detail.isSupply === false, `isSupply: ${detail.isSupply}`);
+    assert(detail.type === 'physical', `type: ${detail.type}`);
+    assert(detail.isTaxable === true, `isTaxable: ${detail.isTaxable}`);
+    assert(detail.isCustomizable === true, `isCustomizable: ${detail.isCustomizable}`);
+    assert(detail.isPersonalizable === true, `isPersonalizable: ${detail.isPersonalizable}`);
+    assert(detail.shouldAutoRenew === true, `shouldAutoRenew: ${detail.shouldAutoRenew}`);
+    assert(detail.featuredRank === 3, `featuredRank: ${detail.featuredRank}`);
+    assert(detail.readinessStateId === 88, `readinessStateId: ${detail.readinessStateId}`);
+    assert(JSON.stringify(detail.styles) === JSON.stringify(['Steampunk', 'Formal']), `styles: ${JSON.stringify(detail.styles)}`);
+    assert(detail.itemWeight === 1.5 && detail.itemWeightUnit === 'oz', `weight: ${detail.itemWeight} ${detail.itemWeightUnit}`);
+    assert(detail.itemLength === 2 && detail.itemWidth === 3 && detail.itemHeight === 4 && detail.itemDimensionsUnit === 'in',
+      `dimensions: ${detail.itemLength}x${detail.itemWidth}x${detail.itemHeight} ${detail.itemDimensionsUnit}`);
+  } finally {
+    db.prepare('DELETE FROM listings WHERE shop_id = 960123').run();
+    client.removeAccount(960123);
+  }
+});
+
 await check("Product Studio's own shapes are read exactly, not guessed at", async () => {
   const ps = await import('../server/src/services/productstudio.js');
 
