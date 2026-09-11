@@ -189,6 +189,99 @@ export default function Listings() {
   );
 }
 
+/**
+ * Add/remove photos and video directly on an already-published listing.
+ *
+ * Etsy's own admin only shows drafts and inactive listings on the desk
+ * (drafts.js's pull only ever asks for those states), so an active listing's
+ * photos had nowhere to be added from at all before this -- Pictures.jsx is
+ * read-only by design. Shows a picked file immediately, the same way the
+ * draft desk's media manager does, instead of leaving the screen blank until
+ * the upload round-trips.
+ */
+function ListingMedia({ listingId, images, videos, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState([]); // { id, kind, previewUrl }
+  const showError = useErrorToast();
+
+  const addFile = async (kind, file) => {
+    setBusy(true);
+    const previewUrl = URL.createObjectURL(file);
+    const tempId = `pending-${Date.now()}-${Math.random()}`;
+    setPending((p) => [...p, { id: tempId, kind, previewUrl }]);
+    try {
+      const form = new FormData();
+      form.append(kind, file);
+      await api.upload(`/listings/${listingId}/${kind === 'image' ? 'images' : 'videos'}`, form);
+      await onChanged();
+    } catch (err) { showError(err, 'Could not upload that'); } finally {
+      setBusy(false);
+      setPending((p) => p.filter((x) => x.id !== tempId));
+      URL.revokeObjectURL(previewUrl);
+    }
+  };
+
+  const remove = async (kind, mediaId) => {
+    setBusy(true);
+    try {
+      await api.del(`/listings/${listingId}/${kind === 'image' ? 'images' : 'videos'}/${mediaId}`);
+      onChanged();
+    } catch (err) { showError(err, 'Could not remove that'); } finally { setBusy(false); }
+  };
+
+  const Row = ({ kind, items, max }) => {
+    const kindPending = pending.filter((p) => p.kind === kind);
+    const count = items.length + kindPending.length;
+    return (
+      <div className="mb16">
+        <div className="flex gap4" style={{ alignItems: 'center', justifyContent: 'space-between' }}>
+          <span className="small dim">{kind === 'image' ? 'Images' : 'Video'} — {count} of {max}</span>
+          <label className="btn xs ghost" style={{ cursor: count >= max ? 'not-allowed' : 'pointer', opacity: count >= max ? 0.5 : 1 }}>
+            + Upload
+            <input type="file" accept={kind === 'image' ? 'image/*' : 'video/*'} style={{ display: 'none' }}
+                   disabled={busy || count >= max}
+                   onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) addFile(kind, f); }} />
+          </label>
+        </div>
+        {count > 0 && (
+          <div className="flex gap4 mt8" style={{ flexWrap: 'wrap' }}>
+            {items.map((it) => (
+              <div key={it.id} style={{ position: 'relative' }}>
+                {kind === 'image'
+                  ? <Thumb src={it.url} size="lg" />
+                  : <video src={it.url} muted style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 6, background: '#000' }} />}
+                <button type="button" className="btn xs" disabled={busy}
+                        style={{ position: 'absolute', top: -6, right: -6, borderRadius: '50%', padding: '0 6px' }}
+                        onClick={() => remove(kind, it.id)} aria-label="Remove">×</button>
+              </div>
+            ))}
+            {kindPending.map((p) => (
+              <div key={p.id} style={{ position: 'relative' }}>
+                {kind === 'image'
+                  ? <Thumb src={p.previewUrl} size="lg" />
+                  : <video src={p.previewUrl} muted style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 6, background: '#000' }} />}
+                <div style={{
+                  position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  background: 'rgba(0,0,0,0.35)', borderRadius: 6,
+                }}>
+                  <Spinner />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="mb16">
+      <Row kind="image" items={images} max={20} />
+      <Row kind="video" items={videos} max={2} />
+    </div>
+  );
+}
+
 function ListingDetail({ id, onClose, onChanged }) {
   const { data, loading, reload } = useAsync(() => (id ? api.get(`/listings/${id}`) : null), [id], { immediate: !!id });
   // Etsy asks for these by numeric id; nobody knows them by heart -- same
@@ -315,9 +408,7 @@ function ListingDetail({ id, onClose, onChanged }) {
             )}>
       {loading || !data ? <Spinner /> : (
         <>
-          <div className="flex wrap mb16">
-            {data.images.map((img) => <Thumb key={img.id} src={img.url} size="lg" />)}
-          </div>
+          <ListingMedia listingId={id} images={data.images} videos={data.videos} onChanged={async () => { await reload(); onChanged(); }} />
 
           <Pictures listingId={data.listingId ?? data.listing_id} />
 

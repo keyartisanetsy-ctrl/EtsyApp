@@ -262,7 +262,7 @@ function DraftEditor({ id, onClose, onChanged }) {
           )}
 
           <div className="section-title">Photos &amp; video</div>
-          <MediaManager draft={draft} onChanged={() => { reload(); replan(); onChanged(); }} />
+          <MediaManager draft={draft} onChanged={async () => { await reload(); await replan(); onChanged(); }} />
 
           <div className="section-title">Listing</div>
           {field('title', 'Title', { hint: `${(merged.title ?? '').length} of 140 characters` })}
@@ -497,6 +497,12 @@ function MaterialsPicker({ value, changed, onChange }) {
  */
 function MediaManager({ draft, onChanged }) {
   const [busy, setBusy] = useState(false);
+  // A freshly picked file used to show nothing at all until the upload
+  // finished and the whole draft came back from the server -- on a slow
+  // connection that could be several seconds of "did that work?" with no
+  // feedback. This shows the file the instant it is picked, the same way
+  // Create Listing already does before anything has even been sent.
+  const [pending, setPending] = useState([]); // { id, kind, previewUrl }
   const showError = useErrorToast();
   const local = draft.isLocalOnly;
   const listingId = draft.listingId;
@@ -518,6 +524,9 @@ function MediaManager({ draft, onChanged }) {
 
   const addFile = async (kind, file) => {
     setBusy(true);
+    const previewUrl = URL.createObjectURL(file);
+    const tempId = `pending-${Date.now()}-${Math.random()}`;
+    setPending((p) => [...p, { id: tempId, kind, previewUrl }]);
     try {
       const form = new FormData();
       if (local) {
@@ -531,8 +540,15 @@ function MediaManager({ draft, onChanged }) {
         await api.upload(`/listings/${listingId}/${kind === 'image' ? 'images' : 'videos'}`, form);
         await api.post(`/drafts/${listingId}/resync`, {});
       }
-      onChanged();
-    } catch (err) { showError(err, 'Could not upload that'); } finally { setBusy(false); }
+      // Awaited so the real thumbnail is already in `draft` before the local
+      // preview is torn down -- otherwise there is a flash of nothing between
+      // the two.
+      await onChanged();
+    } catch (err) { showError(err, 'Could not upload that'); } finally {
+      setBusy(false);
+      setPending((p) => p.filter((x) => x.id !== tempId));
+      URL.revokeObjectURL(previewUrl);
+    }
   };
 
   const remove = async (kind, mediaId) => {
@@ -548,36 +564,55 @@ function MediaManager({ draft, onChanged }) {
     } catch (err) { showError(err, 'Could not remove that'); } finally { setBusy(false); }
   };
 
-  const Row = ({ kind, items, max }) => (
-    <div className="mb16">
-      <div className="flex gap4" style={{ alignItems: 'center', justifyContent: 'space-between' }}>
-        <span className="small dim">{kind === 'image' ? 'Images' : 'Video'} — {items.length} of {max}</span>
-        <div className="flex gap4">
-          <button className="btn xs ghost" disabled={busy || items.length >= max} onClick={() => addUrl(kind)}>+ By URL</button>
-          <label className="btn xs ghost" style={{ cursor: items.length >= max ? 'not-allowed' : 'pointer', opacity: items.length >= max ? 0.5 : 1 }}>
-            + Upload
-            <input type="file" accept={kind === 'image' ? 'image/*' : 'video/*'} style={{ display: 'none' }}
-                   disabled={busy || items.length >= max}
-                   onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) addFile(kind, f); }} />
-          </label>
+  const Row = ({ kind, items, max }) => {
+    const kindPending = pending.filter((p) => p.kind === kind);
+    const count = items.length + kindPending.length;
+    return (
+      <div className="mb16">
+        <div className="flex gap4" style={{ alignItems: 'center', justifyContent: 'space-between' }}>
+          <span className="small dim">{kind === 'image' ? 'Images' : 'Video'} — {count} of {max}</span>
+          <div className="flex gap4">
+            <button className="btn xs ghost" disabled={busy || count >= max} onClick={() => addUrl(kind)}>+ By URL</button>
+            <label className="btn xs ghost" style={{ cursor: count >= max ? 'not-allowed' : 'pointer', opacity: count >= max ? 0.5 : 1 }}>
+              + Upload
+              <input type="file" accept={kind === 'image' ? 'image/*' : 'video/*'} style={{ display: 'none' }}
+                     disabled={busy || count >= max}
+                     onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) addFile(kind, f); }} />
+            </label>
+          </div>
         </div>
+        {count > 0 && (
+          <div className="flex gap4 mt8" style={{ flexWrap: 'wrap' }}>
+            {items.map((it) => (
+              <div key={it.id} style={{ position: 'relative' }}>
+                {kind === 'image'
+                  ? <Thumb src={it.url} size="lg" />
+                  : <video src={it.url} muted style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 6, background: '#000' }} />}
+                <button type="button" className="btn xs" disabled={busy}
+                        style={{ position: 'absolute', top: -6, right: -6, borderRadius: '50%', padding: '0 6px' }}
+                        onClick={() => remove(kind, it.id)} aria-label="Remove">×</button>
+              </div>
+            ))}
+            {/* Shown the instant a file is picked, before the upload even
+                starts -- so "did that work?" never has to wait on the network. */}
+            {kindPending.map((p) => (
+              <div key={p.id} style={{ position: 'relative' }}>
+                {kind === 'image'
+                  ? <Thumb src={p.previewUrl} size="lg" />
+                  : <video src={p.previewUrl} muted style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 6, background: '#000' }} />}
+                <div style={{
+                  position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  background: 'rgba(0,0,0,0.35)', borderRadius: 6,
+                }}>
+                  <Spinner />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
-      {items.length > 0 && (
-        <div className="flex gap4 mt8" style={{ flexWrap: 'wrap' }}>
-          {items.map((it) => (
-            <div key={it.id} style={{ position: 'relative' }}>
-              {kind === 'image'
-                ? <Thumb src={it.url} size="lg" />
-                : <video src={it.url} muted style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 6, background: '#000' }} />}
-              <button type="button" className="btn xs" disabled={busy}
-                      style={{ position: 'absolute', top: -6, right: -6, borderRadius: '50%', padding: '0 6px' }}
-                      onClick={() => remove(kind, it.id)} aria-label="Remove">×</button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="mb16">
