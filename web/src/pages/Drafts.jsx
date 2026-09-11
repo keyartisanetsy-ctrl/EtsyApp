@@ -170,13 +170,19 @@ function DraftEditor({ id, onClose, onChanged }) {
     catch (err) { showError(err, 'Could not save that'); }
   };
 
-  const autofill = async () => {
+  const autofill = async (useAI) => {
     setFilling(true);
     try {
-      const r = await api.post(`/drafts/${id}/autofill`, {});
+      const r = await api.post(`/drafts/${id}/autofill`, { useAI });
       if (r.filled.length) {
-        toast({ kind: 'ok', title: `Filled in: ${r.filled.join(', ')}`, body: 'Review it below before sending.' });
+        toast({
+          kind: 'ok',
+          title: `Filled in: ${r.filled.join(', ')}`,
+          body: r.unresolved?.length ? `Could not fill without AI: ${r.unresolved.join(', ')}.` : 'Review it below before sending.',
+        });
         reload(); replan(); onChanged();
+      } else if (r.unresolved?.length) {
+        toast({ kind: 'warn', title: `Nothing in the title/description to fill ${r.unresolved.join(', ')} from`, body: 'Try "Fill with AI" instead.' });
       } else {
         toast({ kind: 'ok', title: r.note ?? 'Nothing was missing' });
       }
@@ -292,7 +298,10 @@ function DraftEditor({ id, onClose, onChanged }) {
                 <div className="flex gap12" style={{ alignItems: 'center' }}>
                   <div>Missing: {gaps.join(', ')}. Often the case for a product handed over from Product Studio.</div>
                   <div className="spacer" />
-                  <button className="btn xs" disabled={filling} onClick={autofill}>
+                  <button className="btn xs" disabled={filling} onClick={() => autofill(false)} title="Materials dictionary + the title's own words + Etsy's category search. No AI, no cost -- cannot write a description.">
+                    {filling ? <Spinner /> : 'Fill without AI'}
+                  </button>
+                  <button className="btn xs" disabled={filling} onClick={() => autofill(true)}>
                     {filling ? <Spinner /> : 'Fill with AI'}
                   </button>
                 </div>

@@ -43,9 +43,13 @@ router.get('/:id/preview', asyncRoute(async (req, res) => res.json(drafts.previe
 /**
  * One button: fill in whatever this draft is still missing (materials,
  * category, tags...) from what it already says about itself. Only ever
- * stages the gaps -- nothing already filled in is touched.
+ * stages the gaps -- nothing already filled in is touched. { useAI: false }
+ * fills with plain lookups instead of calling the AI -- free, but cannot
+ * write a description.
  */
-router.post('/:id/autofill', asyncRoute(async (req, res) => res.json(await drafts.autofillMissing(Number(req.params.id)))));
+router.post('/:id/autofill', asyncRoute(async (req, res) => {
+  res.json(await drafts.autofillMissing(Number(req.params.id), { useAI: req.body?.useAI !== false }));
+}));
 
 /** Send it to Etsy. */
 router.post('/:id/push', asyncRoute(async (req, res) => {

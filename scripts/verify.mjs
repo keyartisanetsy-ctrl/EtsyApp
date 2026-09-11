@@ -2778,6 +2778,59 @@ await check('autofilling a draft that is missing fields reaches for the AI', asy
   }
 });
 
+await check('the non-AI autofill reads materials and tags straight out of the title, no AI call needed', async () => {
+  // useAI: false has to work with no API key at all -- proven here by never
+  // touching anything that would need one. taxonomy_id is left already set
+  // on this fixture on purpose: resolving a missing category still goes
+  // through Etsy's live taxonomy search even in rules mode, which this
+  // offline environment cannot reach, so this test isolates the two parts
+  // that really are pure lookups -- materials and tags -- from the one that
+  // still needs a network call either way.
+  const { initDb, getDb, json } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+  const listingId = 960127;
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960127').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960127,'Rules Autofill Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960127);
+
+  try {
+    db.prepare(`INSERT INTO listing_drafts (listing_id, shop_id, source, etsy_state, etsy_snapshot, staged, created_at, updated_at)
+                VALUES (?, 960127, 'etsy', 'draft', ?, '{}', datetime('now'), datetime('now'))`)
+      .run(listingId, json({
+        listing_id: listingId, title: 'Resin Anime Artisan Keycap with PBT Base for Mechanical Keyboard',
+        description: '', price: { amount: 3999, divisor: 100, currency_code: 'USD' }, quantity: 5,
+        taxonomy_id: 1000, materials: [], tags: [],
+      }));
+
+    const result = await drafts.autofillMissing(listingId, { useAI: false });
+    assert(result.usedAI === false, 'usedAI should reflect the mode that actually ran');
+    assert(result.filled.includes('materials'), `expected materials to be filled, got ${JSON.stringify(result.filled)}`);
+    assert(result.filled.includes('tags'), `expected tags to be filled, got ${JSON.stringify(result.filled)}`);
+    assert(result.filled.includes('who made it'), `expected who_made to default, got ${JSON.stringify(result.filled)}`);
+    assert(result.filled.includes('when made'), `expected when_made to default, got ${JSON.stringify(result.filled)}`);
+    // description has no lookup table to come from -- it must be reported
+    // as unresolved, never guessed at.
+    assert(result.unresolved.includes('description'), `expected description in unresolved, got ${JSON.stringify(result.unresolved)}`);
+
+    const after = drafts.get(listingId);
+    const materials = after.merged.materials.map((m) => m.toLowerCase());
+    assert(materials.includes('resin'), `expected "Resin" among materials, got ${JSON.stringify(after.merged.materials)}`);
+    assert(materials.includes('pbt'), `expected "PBT" among materials, got ${JSON.stringify(after.merged.materials)}`);
+    assert(after.merged.tags.includes('keycap'), `expected "keycap" among tags, got ${JSON.stringify(after.merged.tags)}`);
+    assert(!after.merged.tags.includes('for'), `stopwords should never become tags, got ${JSON.stringify(after.merged.tags)}`);
+    assert(after.merged.who_made === 'i_did', `who_made: ${after.merged.who_made}`);
+    assert(after.merged.when_made === '2020_2026', `when_made: ${after.merged.when_made}`);
+  } finally {
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960127').run();
+    client.removeAccount(960127);
+  }
+});
+
 console.log('\nGuards');
 await check('a photo that fails to upload does not break the draft becoming a real listing', async () => {
   // Regression: a local draft with a staged photo that could not be

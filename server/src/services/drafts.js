@@ -414,21 +414,8 @@ export function remove(listingId) {
 /** Which of these a draft is missing, in the order the button reports them. */
 const AUTOFILL_FIELDS = ['materials', 'tags', 'taxonomy_id', 'description', 'who_made', 'when_made'];
 
-/**
- * One button: look at what a draft is still missing -- most often one that
- * arrived from Product Studio with nothing but a title, price and photos --
- * and ask the AI to fill in only those gaps from what the draft already says
- * about itself. Nothing already filled in is ever touched, so a product that
- * only needs a category does not also get its materials guessed at.
- *
- * Everything it comes back with is staged, never sent to Etsy on its own --
- * the normal "what will change" review before Send still applies.
- */
-export async function autofillMissing(listingId) {
-  const draft = get(listingId);
-  const merged = draft.merged;
-
-  const missing = {
+function missingFields(merged) {
+  return {
     materials: !(merged.materials?.length),
     tags: !(merged.tags?.length),
     taxonomy_id: !merged.taxonomy_id,
@@ -436,9 +423,67 @@ export async function autofillMissing(listingId) {
     who_made: !merged.who_made,
     when_made: !merged.when_made,
   };
-  const wanted = AUTOFILL_FIELDS.filter((k) => missing[k]);
-  if (!wanted.length) return { filled: [], note: 'Nothing here is missing.' };
+}
 
+/**
+ * Etsy's own materials vocabulary is free text, not a fixed list -- this is
+ * the same set the desk's own materials search box offers (web/src/pages/
+ * Drafts.jsx's COMMON_MATERIALS), plus the terms that list specifically
+ * because this shop sells keycaps and Etsy's general craft-materials list
+ * was never going to carry them.
+ */
+const MATERIAL_KEYWORDS = [
+  'Abacá', 'Abalone shell', 'ABS', 'Acacia', 'Acrylic', 'Alabaster', 'Alloy', 'Alpaca', 'Aluminum',
+  'Amber', 'Amethyst', 'Bamboo', 'Bone', 'Brass', 'Bronze', 'Burlap', 'Canvas', 'Cardboard',
+  'Cashmere', 'Cedar', 'Ceramic', 'Chiffon', 'Clay', 'Concrete', 'Copper', 'Cork', 'Cotton',
+  'Crystal', 'Denim', 'Diamond', 'Ebony', 'Enamel', 'Faux fur', 'Faux leather', 'Felt', 'Fiberglass',
+  'Foam', 'Glass', 'Glitter', 'Gold', 'Gold filled', 'Gold plated', 'Granite', 'Hemp', 'Iron',
+  'Jute', 'Lace', 'Latex', 'Leather', 'Linen', 'Mahogany', 'Marble', 'Mesh', 'Metal', 'Mother of pearl',
+  'MDF', 'Mylar', 'Nylon', 'Oak', 'Onyx', 'Paint', 'Paper', 'Papier mâché', 'PBT', 'Pearl', 'Pewter',
+  'Pine', 'Plastic', 'Platinum', 'Playdough', 'Plywood', 'Polycarbonate', 'Polyester', 'POM', 'Porcelain',
+  'Quartz', 'Rattan', 'Rayon', 'Resin', 'Rhinestone', 'Rose gold', 'Rubber', 'Satin', 'Sequin',
+  'Silicone', 'Silk', 'Silver', 'Slate', 'Spandex', 'Sponge', 'Stainless steel', 'Stone', 'Suede',
+  'Sterling silver', 'Straw', 'Suede leather', 'Tin', 'Titanium', 'Tulle', 'Turquoise', 'Velvet',
+  'Vinyl', 'Walnut', 'Wax', 'Wicker', 'Wire', 'Wood', 'Wool', 'Yarn', 'Zinc', 'Zinc alloy',
+];
+
+/**
+ * Filler that shows up constantly in titles carried over from a marketplace
+ * listing (Product Studio's own source) but is never a usable Etsy tag --
+ * plain stopwords, plus the marketing words that only ever describe the
+ * listing itself, not what a buyer would search for.
+ */
+const TAG_STOPWORDS = new Set([
+  'a', 'an', 'the', 'for', 'with', 'and', 'or', 'of', 'in', 'on', 'to', 'from', 'by', 'is', 'are',
+  'this', 'that', 'these', 'those', 'it', 'as', 'at', 'be', 'have', 'has', 'your', 'you', 'our',
+  'set', 'sets', 'pcs', 'pc', 'pack', 'packs', 'piece', 'pieces', 'lot', 'new', 'hot', 'sale', 'sales',
+  'style', 'styles', 'custom', 'high', 'quality', 'free', 'shipping', 'best', 'price', 'cheap',
+  'wholesale', 'retail', 'oem', 'odm', 'diy', 'gift', 'gifts', 'top', 'good', 'hight', 'fashion',
+]);
+
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Every material keyword that literally appears as a whole word in the text, in the shop's own vocabulary casing. */
+function materialsFromText(text) {
+  const lower = text.toLowerCase();
+  return MATERIAL_KEYWORDS.filter((m) => new RegExp(`\\b${escapeRegExp(m.toLowerCase())}\\b`).test(lower));
+}
+
+/** Meaningful words straight out of a title -- no AI, just stopwords and length limits. */
+function tagsFromTitle(title) {
+  const words = title
+    .split(/[^\p{L}\p{Nd}]+/u)
+    .map((w) => w.trim().toLowerCase())
+    .filter((w) => w.length >= 3 && w.length <= 20 && !/^\d+$/.test(w) && !TAG_STOPWORDS.has(w));
+  return [...new Set(words)].slice(0, 13);
+}
+
+/**
+ * Fill the gaps by asking the AI to write what a title and description
+ * imply -- the only path that can produce a description at all, since there
+ * is no lookup table for prose.
+ */
+async function autofillWithAI(merged, missing) {
   const result = await ai.writeListing({
     name: merged.title || undefined,
     notes: merged.description || merged.title || undefined,
@@ -461,9 +506,73 @@ export async function autofillMissing(listingId) {
     const found = await research.searchTaxonomy(result.listing.taxonomy_suggestion, { limit: 1 });
     if (found.results?.[0]) { patch.taxonomy_id = found.results[0].id; filled.push(`category (${found.results[0].name})`); }
   }
+  return { patch, filled };
+}
+
+/**
+ * Fill the gaps with plain lookups against what the draft already has --
+ * the materials dictionary, a stopword-filtered read of the title, and
+ * Etsy's own taxonomy search (the exact same one the category box runs on
+ * every keystroke) -- no AI call, no API key, no cost. Cannot write a
+ * description: there is no data to look one up from, so that field is
+ * simply left for the AI button instead of guessed at.
+ */
+async function autofillWithRules(merged, missing) {
+  const text = `${merged.title || ''} ${merged.description || ''}`;
+  const patch = {};
+  const filled = [];
+  const unresolved = [];
+
+  if (missing.materials) {
+    const found = materialsFromText(text);
+    if (found.length) { patch.materials = found.slice(0, 13); filled.push('materials'); } else unresolved.push('materials');
+  }
+  if (missing.tags) {
+    const found = merged.title ? tagsFromTitle(merged.title) : [];
+    if (found.length) { patch.tags = found; filled.push('tags'); } else unresolved.push('tags');
+  }
+  if (missing.taxonomy_id) {
+    const found = merged.title ? await research.searchTaxonomy(merged.title, { limit: 1 }) : null;
+    if (found?.results?.[0]) { patch.taxonomy_id = found.results[0].id; filled.push(`category (${found.results[0].name})`); }
+    else unresolved.push('category');
+  }
+  if (missing.who_made) { patch.who_made = 'i_did'; filled.push('who made it'); }
+  if (missing.when_made) { patch.when_made = '2020_2026'; filled.push('when made'); }
+  if (missing.description) unresolved.push('description');
+
+  return { patch, filled, unresolved };
+}
+
+/**
+ * One button: look at what a draft is still missing -- most often one that
+ * arrived from Product Studio with nothing but a title, price and photos --
+ * and fill in only those gaps from what the draft already says about
+ * itself. Nothing already filled in is ever touched, so a product that
+ * only needs a category does not also get its materials guessed at.
+ *
+ * Two ways to fill them: `useAI` (the default) asks the AI, which can also
+ * write a description; `useAI: false` uses plain lookups instead -- a
+ * materials dictionary, the title's own words, and Etsy's own taxonomy
+ * search -- with no AI call, no API key needed, and no cost, at the price
+ * of not being able to write a description at all.
+ *
+ * Everything it comes back with is staged, never sent to Etsy on its own --
+ * the normal "what will change" review before Send still applies.
+ */
+export async function autofillMissing(listingId, { useAI = true } = {}) {
+  const draft = get(listingId);
+  const merged = draft.merged;
+
+  const missing = missingFields(merged);
+  const wanted = AUTOFILL_FIELDS.filter((k) => missing[k]);
+  if (!wanted.length) return { filled: [], unresolved: [], wanted: [], usedAI: useAI, note: 'Nothing here is missing.' };
+
+  const { patch, filled, unresolved = [] } = useAI
+    ? await autofillWithAI(merged, missing)
+    : await autofillWithRules(merged, missing);
 
   if (Object.keys(patch).length) stage(listingId, patch);
-  return { filled, patch, wanted };
+  return { filled, unresolved, patch, wanted, usedAI: useAI };
 }
 
 /**
