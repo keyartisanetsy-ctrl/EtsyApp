@@ -56,13 +56,10 @@ export function startScheduler() {
   // remember to press a button for is a folder nobody uses. Reading it is a
   // directory listing, so it costs nothing to do often.
   timers.push(setInterval(() => {
-    try {
-      const r = scanInbox();
+    scanInbox().then((r) => {
       if (r.created) log.info(`product studio: ${r.created} product(s) picked up from the drop folder`);
       if (r.failed) log.warn(`product studio: ${r.failed} file(s) could not be read, moved to "failed"`);
-    } catch (err) {
-      log.warn(`product studio inbox: ${err.message}`);
-    }
+    }).catch((err) => log.warn(`product studio inbox: ${err.message}`));
   }, 20_000).unref());
 
   log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every 30m, drop folder every 20s)`);

@@ -32,6 +32,8 @@ import { createLogger } from '../lib/logger.js';
 import * as drafts from './drafts.js';
 import * as draftmedia from './draftmedia.js';
 import * as taobao from './taobao.js';
+import { convert } from './fx.js';
+import { reportingCurrency } from './reporting.js';
 
 const log = createLogger('product-studio');
 
@@ -158,7 +160,10 @@ function readProductStudio(payload) {
     price: null,
     cost: p.priceOriginal ?? null,
     currency: (p.currencyOriginal || 'CNY').toUpperCase(),
-    quantity: variants.reduce((n, v) => n + (v.stock ?? 0), 0) || 10,
+    // 3 units per variant is the starting stock when Product Studio did not
+    // report actual quantities -- a flat number regardless of variant count
+    // was wrong for anything but a single-variant listing.
+    quantity: variants.reduce((n, v) => n + (v.stock ?? 0), 0) || (variants.length ? variants.length * 3 : 3),
     sku: '',
     url: p.sourceUrl ?? '',
     variantUrl: '',
@@ -261,13 +266,14 @@ export function readProduct(payload = {}) {
 
   // Variants likewise: a list of names, or of objects.
   const variants = asArray(take('variants')).map((v) => {
-    if (typeof v === 'string') return { name: v, sku: '', price: null, url: '', image: null };
+    if (typeof v === 'string') return { name: v, sku: '', price: null, url: '', image: null, stock: null };
     return {
       name: String(v.name ?? v.title ?? v.label ?? v.variant ?? v.spec ?? v['规格'] ?? '').trim(),
       sku: String(v.sku ?? v.code ?? '').trim(),
       price: asNumber(v.price ?? v.cost ?? null),
       url: String(v.url ?? v.link ?? '').trim(),
       image: typeof v.image === 'string' ? v.image : v.image?.url ?? v.imageUrl ?? null,
+      stock: asNumber(v.stock ?? v.qty ?? v.quantity ?? v.inventory ?? null),
     };
   }).filter((v) => v.name || v.sku);
 
@@ -277,7 +283,11 @@ export function readProduct(payload = {}) {
     price: asNumber(take('price')),
     cost: asNumber(take('cost')),
     currency: (take('currency') ?? 'CNY').toString().toUpperCase(),
-    quantity: asNumber(take('quantity')) ?? 10,
+    // A flat quantity the payload names wins; otherwise 3 units per variant
+    // (matching the Product Studio reader below) rather than one flat number
+    // regardless of how many variants there are.
+    quantity: asNumber(take('quantity'))
+      ?? (variants.reduce((n, v) => n + (v.stock ?? 0), 0) || (variants.length ? variants.length * 3 : 3)),
     sku: take('sku') ? String(take('sku')).trim() : '',
     url: url ? String(url).trim() : '',
     variantUrl: variantUrl ? String(variantUrl).trim() : '',
@@ -319,7 +329,7 @@ export function readProduct(payload = {}) {
  * of the app reads it from there. Then the draft, which is what you actually
  * open and finish.
  */
-export function receive(payload = {}, { dryRun = false } = {}) {
+export async function receive(payload = {}, { dryRun = false } = {}) {
   const read = readProduct(payload);
   const p = read.product;
 
@@ -370,16 +380,44 @@ export function receive(payload = {}, { dryRun = false } = {}) {
     JOIN listing_drafts d ON d.listing_id = i.draft_id
     WHERE i.shop_id IS ? AND i.sku = ? AND d.pushed_at IS NULL`).get(activeShopId(), sku);
 
+  // Etsy sells in your currency, not the supplier's cost -- but a blank price
+  // is exactly as much manual work as no price at all, so a rough starting
+  // markup (3x cost, a common dropshipping rule of thumb) is offered instead
+  // when Product Studio did not send an actual sale price. It is staged like
+  // everything else here, so it is reviewed, not silently trusted.
+  const shopCurrency = reportingCurrency();
+  const roughPrice = p.cost != null
+    ? (p.currency === shopCurrency ? p.cost * 3 : convert(p.cost * 3, p.currency, shopCurrency, new Date().toISOString().slice(0, 10)))
+    : null;
+
+  // Only a genuinely new draft gets shop-wide defaults filled in -- an update
+  // (the same product sent again) keeps whatever was already staged rather
+  // than clobbering a choice the seller may have already reviewed.
+  let shopDefaults = {};
+  if (!existing) {
+    try {
+      const choices = await drafts.shopChoices();
+      shopDefaults = {
+        ...(choices.shippingProfiles?.[0]?.id ? { shipping_profile_id: choices.shippingProfiles[0].id } : {}),
+        ...(choices.processingProfiles?.[0]?.id ? { readiness_state_id: choices.processingProfiles[0].id } : {}),
+        ...(choices.sections?.[0]?.id ? { shop_section_id: choices.sections[0].id } : {}),
+      };
+    } catch (err) {
+      log.warn(`could not fetch shop defaults for a new draft: ${err.message}`);
+    }
+  }
+
   const fields = {
     title: p.title.slice(0, 140),
     description: p.description,
-    price: p.price ?? null,
+    price: p.price ?? roughPrice,
     quantity: p.quantity,
     tags: p.tags,
     materials: p.materials,
     ...(p.taxonomyId ? { taxonomy_id: p.taxonomyId } : {}),
-    who_made: 'someone_else',
-    when_made: 'made_to_order',
+    who_made: 'i_did',
+    when_made: '2020_2026',
+    ...shopDefaults,
   };
 
   // The Etsy side: a local draft, not a live listing.
@@ -490,7 +528,7 @@ export const inboxDir = () => path.join(config.dataDir, 'product-studio-inbox');
  * certainly save a file. Anything dropped in this folder as .json is picked up,
  * turned into a draft, and moved aside so it is not read twice.
  */
-export function scanInbox() {
+export async function scanInbox() {
   const dir = inboxDir();
   fs.mkdirSync(dir, { recursive: true });
   fs.mkdirSync(path.join(dir, 'done'), { recursive: true });
@@ -505,7 +543,7 @@ export function scanInbox() {
       const raw = JSON.parse(fs.readFileSync(full, 'utf8'));
       // A file may hold one product or a list of them.
       for (const item of Array.isArray(raw) ? raw : [raw]) {
-        results.push({ file, ...receive(item) });
+        results.push({ file, ...(await receive(item)) });
       }
       fs.renameSync(full, path.join(dir, 'done', `${Date.now()}-${file}`));
     } catch (err) {

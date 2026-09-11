@@ -1834,7 +1834,7 @@ await check('a product arrives as a draft, twice does not make two', async () =>
       variants: [{ name: 'MOA Profile', price: 18.5 }],
     };
 
-    const first = ps.receive(payload);
+    const first = await ps.receive(payload);
     assert(first.ok && first.draftId < 0, 'it should land as a local draft, not an Etsy listing');
     assert(first.sku === 'PS-1012415746554', `the SKU should come from the item id, got ${first.sku}`);
 
@@ -1842,6 +1842,10 @@ await check('a product arrives as a draft, twice does not make two', async () =>
     const draft = drafts.get(first.draftId);
     assert(draft.isLocalOnly, 'a product from another app must not go straight to Etsy');
     assert(draft.merged.title === payload.title, 'the title did not reach the draft');
+    assert(draft.merged.who_made === 'i_did', `who_made should default to i_did, got ${draft.merged.who_made}`);
+    assert(draft.merged.when_made === '2020_2026', `when_made should default to 2020_2026, got ${draft.merged.when_made}`);
+    // One variant, none reporting stock -> 3 units per variant.
+    assert(draft.merged.quantity === 3, `quantity should default to 3 (1 variant x 3), got ${draft.merged.quantity}`);
 
     // And the supply side is joined to the same SKU.
     const item = taobao.getItem(first.sku);
@@ -1853,7 +1857,7 @@ await check('a product arrives as a draft, twice does not make two', async () =>
     assert(inbox.images.length === 2 && inbox.variants.length === 1, 'what arrived was not kept');
 
     // Pressing the button again updates the same draft rather than adding one.
-    const second = ps.receive({ ...payload, title: 'Corrected title', cost: 19.9 });
+    const second = await ps.receive({ ...payload, title: 'Corrected title', cost: 19.9 });
     assert(second.updated === true, 'a second send was not recognised as the same product');
     assert(second.draftId === first.draftId, `a duplicate draft was made: ${first.draftId} vs ${second.draftId}`);
     assert(drafts.get(first.draftId).merged.title === 'Corrected title', 'the correction was not picked up');
@@ -2256,14 +2260,14 @@ await check('a product from Product Studio has its photos on the desk before it 
       cost: 18.5, currency: 'CNY', price: 39.99,
       images: ['https://img.alicdn.com/a.jpg', 'https://img.alicdn.com/b.jpg'],
     };
-    const first = ps.receive(payload);
+    const first = await ps.receive(payload);
     const staged = drafts.get(first.draftId);
     assert(staged.isLocalOnly, 'this should still be a local-only draft');
     assert(staged.pendingMedia?.images?.length === 2, `the photos never reached the desk: ${JSON.stringify(staged.pendingMedia)}`);
     assert(staged.pendingMedia.images[0].url === payload.images[0], 'the photo url was not kept as-is');
 
     // Sent again (a correction from the other app) replaces, not piles on.
-    ps.receive({ ...payload, images: ['https://img.alicdn.com/c.jpg'] });
+    await ps.receive({ ...payload, images: ['https://img.alicdn.com/c.jpg'] });
     const after = drafts.get(first.draftId);
     assert(after.pendingMedia.images.length === 1 && after.pendingMedia.images[0].url === 'https://img.alicdn.com/c.jpg',
       `resending should replace the staged photos, got ${JSON.stringify(after.pendingMedia.images)}`);

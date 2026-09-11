@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import api from '../lib/api.js';
 import Pictures from '../components/Pictures.jsx';
@@ -27,6 +27,17 @@ export default function Listings() {
   const nav = useNavigate();
   const toast = useToast();
   const showError = useErrorToast();
+
+  // Create listing hands over a link straight to the listing it just made,
+  // so it can be opened here to add more photos without hunting for it.
+  useEffect(() => {
+    const wanted = params.get('open');
+    if (!wanted) return;
+    setDetailId(Number(wanted));
+    const next = new URLSearchParams(params);
+    next.delete('open');
+    setParams(next, { replace: true });
+  }, [params, setParams]);
 
   const query = useMemo(() => ({ search: debounced, state, sort, dir, limit: LIMIT, offset }),
     [debounced, state, sort, dir, offset]);

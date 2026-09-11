@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../lib/api.js';
 import Page from '../components/Page.jsx';
-import { Spinner, Banner, useAsync, useToast, useErrorToast, useDebounced } from '../components/ui.jsx';
+import { Spinner, Banner, Thumb, useAsync, useToast, useErrorToast, useDebounced } from '../components/ui.jsx';
 import { MakeProcessingProfile } from './Drafts.jsx';
 
 const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007', '2000_2006',
@@ -22,7 +22,17 @@ export default function NewListing() {
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState(null);
   const [images, setImages] = useState([]);
+  const [previews, setPreviews] = useState([]);
   const [attributes, setAttributes] = useState({}); // propertyId -> [{ valueId, name }]
+
+  // Local, throwaway URLs just so the picked files can be seen before
+  // anything is uploaded -- revoked whenever the selection changes so they
+  // do not pile up as the picker is used.
+  useEffect(() => {
+    const urls = images.map((f) => URL.createObjectURL(f));
+    setPreviews(urls);
+    return () => urls.forEach((u) => URL.revokeObjectURL(u));
+  }, [images]);
 
   const nav = useNavigate();
   const toast = useToast();
@@ -132,7 +142,10 @@ export default function NewListing() {
         <Banner kind="ok">
           Draft <strong>{created.listing_id}</strong> created.{' '}
           <a href={created.url} target="_blank" rel="noreferrer">View on Etsy ↗</a>{' '}
-          — it stays a draft until you activate it from the Listings screen.
+          — it stays a draft until you activate it from the Listings screen.{' '}
+          <button className="btn xs" onClick={() => nav(`/listings?open=${created.listing_id}`)}>
+            Manage photos &amp; details →
+          </button>
         </Banner>
       )}
 
@@ -280,9 +293,21 @@ export default function NewListing() {
 
           <div className="field">
             <label>Images</label>
-            <input className="input" type="file" accept="image/*" multiple onChange={(e) => setImages([...e.target.files])} />
-            <div className="hint">Uploaded right after the draft is created, in the order you pick them.</div>
-            {images.length > 0 && <div className="small dim mt8">{images.length} file(s) ready</div>}
+            <input className="input" type="file" accept="image/*" multiple
+                   onChange={(e) => setImages([...images, ...e.target.files])} />
+            <div className="hint">Uploaded right after the draft is created, in the order shown below.</div>
+            {images.length > 0 && (
+              <div className="flex gap4 mt8" style={{ flexWrap: 'wrap' }}>
+                {images.map((file, i) => (
+                  <div key={`${file.name}-${file.lastModified}-${i}`} style={{ position: 'relative' }}>
+                    <Thumb src={previews[i]} size="lg" />
+                    <button type="button" className="btn xs" disabled={busy}
+                            style={{ position: 'absolute', top: -6, right: -6, borderRadius: '50%', padding: '0 6px' }}
+                            onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label="Remove">×</button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -41,16 +41,17 @@ router.post('/product-studio/key', asyncRoute(async (req, res) => {
  * `?dryRun=1` reads the payload and reports the mapping without creating anything.
  */
 router.post('/product-studio/product', guard, asyncRoute(async (req, res) => {
-  res.status(201).json(ps.receive(req.body ?? {}, { dryRun: bool(req.query.dryRun) }));
+  res.status(201).json(await ps.receive(req.body ?? {}, { dryRun: bool(req.query.dryRun) }));
 }));
 
 /** Several at once. Each is reported on its own so one bad row does not sink the rest. */
 router.post('/product-studio/products', guard, asyncRoute(async (req, res) => {
   const items = Array.isArray(req.body) ? req.body : req.body?.products ?? [];
-  const results = items.map((item) => {
-    try { return ps.receive(item); }
-    catch (err) { return { error: err.message, title: item?.title ?? null }; }
-  });
+  const results = [];
+  for (const item of items) {
+    try { results.push(await ps.receive(item)); }
+    catch (err) { results.push({ error: err.message, title: item?.title ?? null }); }
+  }
   res.status(201).json({
     received: items.length,
     created: results.filter((r) => r.ok).length,
@@ -65,7 +66,7 @@ router.post('/product-studio/dry-run', guard, asyncRoute(async (req, res) => {
 }));
 
 /** The no-code path: read whatever was dropped in the folder. */
-router.post('/product-studio/scan', asyncRoute(async (req, res) => res.json(ps.scanInbox())));
+router.post('/product-studio/scan', asyncRoute(async (req, res) => res.json(await ps.scanInbox())));
 
 /** The photos and options that arrived with a draft. */
 router.get('/product-studio/draft/:id', asyncRoute(async (req, res) => {
