@@ -3,12 +3,17 @@ import { useSearchParams } from 'react-router-dom';
 import api from '../lib/api.js';
 import { TablePage } from '../components/Page.jsx';
 import {
-  Spinner, Empty, Banner, Drawer, Modal, Thumb, CopyButton, Tabs,
+  Spinner, Empty, Banner, Checkbox, Drawer, Modal, Thumb, CopyButton, Tabs,
   useAsync, useToast, useErrorToast, fmtMoney, fmtAgo,
 } from '../components/ui.jsx';
 import { CategoryPicker } from './NewListing.jsx';
 
-const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007'];
+const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007',
+  '2000_2006', '1990s', '1980s', '1970s', '1960s', '1950s', '1940s', '1930s', '1920s', '1910s',
+  '1900s', '1800s', '1700s', 'before_1700'];
+const LISTING_TYPES = ['physical', 'download', 'both'];
+const WEIGHT_UNITS = ['oz', 'lb', 'g', 'kg'];
+const DIMENSION_UNITS = ['in', 'ft', 'mm', 'cm', 'm', 'yd', 'inches'];
 
 // A helpful starting list for the materials picker. Etsy's materials field is
 // free text (any string of letters/numbers/spaces is valid), not a fixed
@@ -290,6 +295,23 @@ function DraftEditor({ id, onClose, onChanged }) {
             {field('who_made', 'Who made it', { options: ['i_did', 'someone_else', 'collective'] })}
             {field('when_made', 'When was it made', { options: WHEN_MADE })}
           </div>
+          <div className="split">
+            {field('type', 'Listing type', { options: LISTING_TYPES })}
+            <div className="field">
+              <label>
+                Supply or finished product
+                {isChanged('is_supply') && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
+              </label>
+              <div className="flex gap12">
+                <label className="flex gap4" style={{ alignItems: 'center' }}>
+                  <input type="radio" checked={merged.is_supply === true} onChange={() => save({ is_supply: true })} /> Supply
+                </label>
+                <label className="flex gap4" style={{ alignItems: 'center' }}>
+                  <input type="radio" checked={merged.is_supply === false} onChange={() => save({ is_supply: false })} /> Finished product
+                </label>
+              </div>
+            </div>
+          </div>
           {pick('shipping_profile_id', 'Shipping delivery profile',
             (choices?.shippingProfiles ?? []).map((p) => ({
               value: p.id, label: `${p.title}${p.processing ? ` · ${p.processing}` : ''}`,
@@ -338,6 +360,38 @@ function DraftEditor({ id, onClose, onChanged }) {
               'Optional.')}
           </div>
 
+          <div className="section-title">Weight &amp; dimensions</div>
+          <div className="split">
+            <div className="field">
+              <label>
+                Weight
+                {isChanged('item_weight') && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
+              </label>
+              <div className="flex gap4">
+                <input className="input" type="number" step="0.01" value={merged.item_weight ?? ''}
+                       onChange={(e) => save({ item_weight: e.target.value })} />
+                <select className="select" value={merged.item_weight_unit ?? ''}
+                        onChange={(e) => save({ item_weight_unit: e.target.value })}>
+                  <option value="">unit</option>
+                  {WEIGHT_UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="field">
+              <label>Dimensions unit</label>
+              <select className="select" value={merged.item_dimensions_unit ?? ''}
+                      onChange={(e) => save({ item_dimensions_unit: e.target.value })}>
+                <option value="">—</option>
+                {DIMENSION_UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="flex gap12">
+            {field('item_length', 'Length', { type: 'number', step: '0.01' })}
+            {field('item_width', 'Width', { type: 'number', step: '0.01' })}
+            {field('item_height', 'Height', { type: 'number', step: '0.01' })}
+          </div>
+
           <div className="section-title">Settings</div>
           <div className="field">
             <label>
@@ -357,10 +411,25 @@ function DraftEditor({ id, onClose, onChanged }) {
               </label>
             </div>
           </div>
+          <Checkbox checked={merged.is_taxable ?? false} onChange={(v) => save({ is_taxable: v })}
+                    label="Charge shop tax rates on this listing" />
+          {draft.isLocalOnly ? (
+            <Checkbox checked={merged.is_customizable ?? false} onChange={(v) => save({ is_customizable: v })}
+                      label="Buyers may contact you for a customized order" />
+          ) : (merged.is_customizable != null || merged.styles?.length > 0) && (
+            <div className="small dim mb16">
+              Customizable: {merged.is_customizable ? 'yes' : 'no'}{merged.styles?.length ? ` · styles: ${merged.styles.join(', ')}` : ''}.
+              Etsy only accepts either one when a listing is first created — there is no way to change them afterwards.
+            </div>
+          )}
           {!draft.isLocalOnly && field('featured_rank', 'Feature this listing', {
             type: 'number', min: 1, clearAs: null,
             hint: 'Optional. Position in your shop’s featured row — 1 is left-most.',
           })}
+
+          <div className="section-title">Personalization</div>
+          <PersonalizationEditor value={merged.personalization} changed={isChanged('personalization')}
+                                  onChange={(personalization) => save({ personalization })} />
 
           <div className="section-title">What Etsy has right now</div>
           <dl className="kv">
@@ -483,6 +552,48 @@ function MaterialsPicker({ value, changed, onChange }) {
             </div>
           )}
           <div className="hint">Select up to {MAX_MATERIALS}.</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Not a real ShopListing field -- Etsy takes personalization as its own
+ * resource (a list of questions), staged here as { isPersonalizable,
+ * isRequired, charCountMax, instructions, questionText } the same way
+ * category attributes are, and applied by push() with its own call once
+ * the listing exists. Not prefilled from what Etsy already has: the
+ * draft's snapshot never mirrors getListingPersonalization, the same
+ * limitation attributes already have here.
+ */
+function PersonalizationEditor({ value, changed, onChange }) {
+  const p = value && Object.keys(value).length ? value : {
+    isPersonalizable: false, isRequired: false, charCountMax: 256, instructions: '', questionText: 'Personalization',
+  };
+  return (
+    <div className="mb16">
+      {changed && <div className="mb4"><span className="badge amber">changed</span></div>}
+      <Checkbox checked={p.isPersonalizable} onChange={(v) => onChange({ ...p, isPersonalizable: v })}
+                label="Buyers can personalize this listing" />
+      {p.isPersonalizable && (
+        <>
+          <div className="field">
+            <label>Question shown to the buyer</label>
+            <input className="input" value={p.questionText} onChange={(e) => onChange({ ...p, questionText: e.target.value })} />
+          </div>
+          <div className="field">
+            <label>Instructions</label>
+            <input className="input" value={p.instructions} onChange={(e) => onChange({ ...p, instructions: e.target.value })} />
+          </div>
+          <div className="split">
+            <Checkbox checked={p.isRequired} onChange={(v) => onChange({ ...p, isRequired: v })} label="Required" />
+            <div className="field">
+              <label>Max characters</label>
+              <input className="input" type="number" value={p.charCountMax}
+                     onChange={(e) => onChange({ ...p, charCountMax: Number(e.target.value) })} />
+            </div>
+          </div>
         </>
       )}
     </div>

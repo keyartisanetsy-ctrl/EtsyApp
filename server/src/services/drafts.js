@@ -241,6 +241,21 @@ export function get(listingId) {
     shipping_profile_id: etsy.shipping_profile_id ?? null,
     return_policy_id: etsy.return_policy_id ?? null,
     state: etsy.state ?? row.etsy_state,
+    // Etsy's read side names this listing_type, its write side just type --
+    // both createDraftListing and updateListing take "type", so staging
+    // reads/writes the same key while diffing against what was actually
+    // reported back.
+    type: etsy.listing_type ?? null,
+    is_taxable: etsy.is_taxable ?? null,
+    is_customizable: etsy.is_customizable ?? null,
+    should_auto_renew: etsy.should_auto_renew ?? null,
+    item_weight: etsy.item_weight ?? null,
+    item_weight_unit: etsy.item_weight_unit ?? null,
+    item_length: etsy.item_length ?? null,
+    item_width: etsy.item_width ?? null,
+    item_height: etsy.item_height ?? null,
+    item_dimensions_unit: etsy.item_dimensions_unit ?? null,
+    styles: etsy.style ?? [],
     // Etsy's own snapshot carries no structured attribute state (this app
     // never mirrors getListingProperties into it), so there is nothing to
     // diff against -- any staged attribute always counts as a change,

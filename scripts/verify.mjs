@@ -2504,6 +2504,60 @@ await check('pushing a staged category attribute on an existing draft sets it vi
   }
 });
 
+await check('pushing staged personalization on an existing draft sets it via updateListingPersonalization, not the listing body', async () => {
+  const { initDb, getDb, json } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+  const listingId = 960124;
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960124').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960124,'Personalization Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960124);
+
+  try {
+    db.prepare(`INSERT INTO listing_drafts (listing_id, shop_id, source, etsy_state, etsy_snapshot, staged, created_at, updated_at)
+                VALUES (?, 960124, 'etsy', 'draft', ?, '{}', datetime('now'), datetime('now'))`)
+      .run(listingId, json({
+        listing_id: listingId, title: 'Keycap Set', description: 'A set.',
+        price: { amount: 3999, divisor: 100, currency_code: 'USD' }, quantity: 5,
+        who_made: 'i_did', when_made: 'made_to_order', taxonomy_id: 1000,
+      }));
+    drafts.stage(listingId, {
+      title: 'Personalizable Keycap Set',
+      personalization: { isPersonalizable: true, isRequired: true, charCountMax: 40, instructions: 'Add your name', questionText: 'Name for the keycap?' },
+    });
+
+    let sawUpdateListingPersonalization = false;
+    const stubCaller = async (operationId, args, opts) => {
+      if (operationId === 'updateListing') {
+        assert(!('personalization' in opts.body), `personalization leaked into updateListing's body: ${JSON.stringify(opts.body)}`);
+        return { listing_id: listingId, title: opts.body.title, state: 'draft' };
+      }
+      if (operationId === 'updateListingPersonalization') {
+        sawUpdateListingPersonalization = true;
+        assert(args.listing_id === listingId, 'wrong listing_id on the personalization write');
+        const expected = { personalization_questions: [{
+          question_text: 'Name for the keycap?', instructions: 'Add your name',
+          question_type: 'text_input', required: true, max_allowed_characters: 40,
+        }] };
+        assert(JSON.stringify(opts.body) === JSON.stringify(expected), `wrong personalization body: ${JSON.stringify(opts.body)}`);
+        return {};
+      }
+      throw new Error(`unexpected operation in this test: ${operationId}`);
+    };
+
+    await drafts.push(listingId, { caller: stubCaller });
+    assert(sawUpdateListingPersonalization, 'updateListingPersonalization was never called');
+  } finally {
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960124').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960124').run();
+    client.removeAccount(960124);
+  }
+});
+
 await check('creating a listing from a local draft applies its staged category attributes after the listing exists', async () => {
   const { initDb, getDb } = await import('../server/src/db/index.js');
   const client = await import('../server/src/etsy/client.js');
