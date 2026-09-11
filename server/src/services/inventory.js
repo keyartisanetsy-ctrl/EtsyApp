@@ -67,6 +67,23 @@ export async function writeInventory(listingId, payload) {
 }
 
 /**
+ * Etsy has no "set the listing's processing profile" field on updateListing --
+ * once a listing exists, its readiness_state_id lives on each inventory
+ * offering instead (see ListingInventoryProductOffering), the same place a
+ * per-variation processing time would go. Applied uniformly here because the
+ * desk shows one processing-profile picker for the whole listing, not one per
+ * variation.
+ */
+export async function setReadinessStateForAll(listingId, readinessStateId) {
+  const live = await fetchInventory(listingId);
+  const payload = toWritablePayload(live);
+  for (const p of payload.products) {
+    for (const o of p.offerings) o.readiness_state_id = Number(readinessStateId);
+  }
+  return writeInventory(listingId, payload);
+}
+
+/**
  * Apply per-product changes. `changes` is keyed by product_id:
  *   { [product_id]: { sku, price, quantity, is_enabled } }
  * Any product not mentioned is written back unchanged.

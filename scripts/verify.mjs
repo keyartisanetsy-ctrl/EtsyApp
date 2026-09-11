@@ -2496,6 +2496,62 @@ await check('creating a listing from a local draft applies its staged category a
   }
 });
 
+await check('pushing readiness_state_id and styles on an existing draft never sends them to updateListing', async () => {
+  // Neither field is in updateListing's request body at all (Etsy only takes
+  // them at creation) -- readiness_state_id has a real home once a listing
+  // exists (each inventory offering carries its own), styles does not. Both
+  // must be kept out of onlyChanged regardless, and styles has to come back
+  // in `skipped` rather than being silently dropped with no trace.
+  const { initDb, getDb, json } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+  const listingId = 960122;
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960122').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960122,'Readiness Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960122);
+
+  try {
+    db.prepare(`INSERT INTO listing_drafts (listing_id, shop_id, source, etsy_state, etsy_snapshot, staged, created_at, updated_at)
+                VALUES (?, 960122, 'etsy', 'draft', ?, '{}', datetime('now'), datetime('now'))`)
+      .run(listingId, json({
+        listing_id: listingId, title: 'Keycap Set', description: 'A set.',
+        price: { amount: 3999, divisor: 100, currency_code: 'USD' }, quantity: 5,
+        who_made: 'i_did', when_made: 'made_to_order', taxonomy_id: 1000,
+      }));
+    drafts.stage(listingId, {
+      title: 'Anime Artisan Keycap Set',
+      readiness_state_id: 88,
+      styles: ['Steampunk'],
+    });
+
+    const stubCaller = async (operationId, args, opts) => {
+      if (operationId === 'updateListing') {
+        assert(!('readiness_state_id' in opts.body), `readiness_state_id leaked into updateListing's body: ${JSON.stringify(opts.body)}`);
+        assert(!('styles' in opts.body), `styles leaked into updateListing's body: ${JSON.stringify(opts.body)}`);
+        assert(opts.body.title === 'Anime Artisan Keycap Set', 'the real change did not go through alongside them');
+        return { listing_id: listingId, title: opts.body.title, state: 'draft' };
+      }
+      throw new Error(`unexpected operation in this test: ${operationId}`);
+    };
+
+    const result = await drafts.push(listingId, { caller: stubCaller });
+    // setReadinessStateForAll uses the live client, not this test's stub, so
+    // it genuinely fails offline here (caught and logged, same as an image
+    // upload failing) -- the push itself still has to succeed regardless.
+    assert(result.listingId === listingId, 'the push itself should still succeed');
+    assert(result.skipped.includes('styles'), `expected "styles" in skipped, got ${JSON.stringify(result.skipped)}`);
+    assert(!result.skipped.includes('readiness_state_id'), 'readiness_state_id has a real path and should not be reported as skipped');
+  } finally {
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960122').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960122').run();
+    client.removeAccount(960122);
+  }
+});
+
 console.log('\nGuards');
 await check('a photo that fails to upload does not break the draft becoming a real listing', async () => {
   // Regression: a local draft with a staged photo that could not be

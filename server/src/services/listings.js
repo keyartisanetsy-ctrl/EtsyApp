@@ -140,13 +140,22 @@ export function localListing(listingId) {
 
 // ------------------------------------------------------------------ mutate
 
-/** Fields updateListing accepts. Anything else is rejected up front. */
+/**
+ * Fields Etsy's own updateListing endpoint accepts. Anything else is rejected
+ * up front -- including, on purpose, is_personalizable/personalization_*:
+ * those read like ShopListing fields but updateListing's request body has
+ * never carried them. Personalization is its own resource (a list of
+ * questions) behind updateListingPersonalization/deleteListingPersonalization;
+ * see setPersonalization below. Likewise styles, is_customizable,
+ * processing_min/max and readiness_state_id are createDraftListing-only --
+ * Etsy gives no way to change any of them on a listing that already exists,
+ * except readiness_state_id, which moves to the inventory's offerings once
+ * that's true (see inventory.setReadinessStateForAll).
+ */
 const UPDATABLE = new Set(['title', 'description', 'materials', 'should_auto_renew', 'shipping_profile_id',
   'return_policy_id', 'shop_section_id', 'item_weight', 'item_length', 'item_width', 'item_height',
   'item_weight_unit', 'item_dimensions_unit', 'is_taxable', 'taxonomy_id', 'tags', 'who_made',
-  'when_made', 'featured_rank', 'is_personalizable', 'personalization_is_required',
-  'personalization_char_count_max', 'personalization_instructions', 'state', 'is_supply',
-  'production_partner_ids', 'type', 'image_ids']);
+  'when_made', 'featured_rank', 'state', 'is_supply', 'production_partner_ids', 'type', 'image_ids']);
 
 export function validateListingFields(fields) {
   const out = {};
@@ -334,15 +343,30 @@ export const listFiles = (listingId) => call('getAllListingFiles', { shop_id: re
 export const deleteFile = (listingId, fileId) =>
   call('deleteListingFile', { shop_id: requireShopId(), listing_id: listingId, listing_file_id: fileId });
 
-export const setPersonalization = (listingId, opts) =>
-  call('updateListingPersonalization', { shop_id: requireShopId(), listing_id: listingId }, {
+/**
+ * Etsy's personalization is a list of questions, not the single
+ * flag-plus-instructions pair this used to send -- is_personalizable,
+ * personalization_is_required, personalization_char_count_max and
+ * personalization_instructions have never been fields this endpoint
+ * accepts. The desk still edits the simple case (one free-text question),
+ * built here into the one-question array Etsy actually wants.
+ * isPersonalizable: false routes to deleteListingPersonalization, the real
+ * way to turn personalization off, instead of sending an empty question list.
+ */
+export const setPersonalization = (listingId, opts) => {
+  if (opts.isPersonalizable === false) return removePersonalization(listingId);
+  return call('updateListingPersonalization', { shop_id: requireShopId(), listing_id: listingId }, {
     body: {
-      is_personalizable: opts.isPersonalizable !== false,
-      personalization_is_required: !!opts.isRequired,
-      personalization_char_count_max: opts.charCountMax ?? 256,
-      personalization_instructions: opts.instructions ?? '',
+      personalization_questions: [{
+        question_text: opts.questionText || 'Personalization',
+        instructions: opts.instructions ?? '',
+        question_type: 'text_input',
+        required: !!opts.isRequired,
+        max_allowed_characters: opts.charCountMax ?? 256,
+      }],
     },
   });
+};
 
 export const removePersonalization = (listingId) =>
   call('deleteListingPersonalization', { shop_id: requireShopId(), listing_id: listingId });

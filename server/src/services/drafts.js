@@ -24,6 +24,7 @@ import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 import * as listings from './listings.js';
 import * as draftmedia from './draftmedia.js';
+import * as inventory from './inventory.js';
 import * as undo from './undo.js';
 
 const log = createLogger('drafts');
@@ -33,11 +34,17 @@ export const EDITABLE = [
   'title', 'description', 'price', 'quantity', 'tags', 'materials',
   'taxonomy_id', 'who_made', 'when_made', 'is_supply', 'shop_section_id',
   'shipping_profile_id', 'return_policy_id', 'item_weight', 'item_length',
-  'item_width', 'item_height', 'is_personalizable', 'personalization_instructions',
-  'is_customizable', 'state',
+  'item_width', 'item_height', 'is_customizable', 'state',
   // The rest of what Etsy's own spec accepts on a draft. Without these the app
   // could not set a processing time or a weight unit, and the listing had to be
   // finished on Etsy anyway - which defeats the point of the desk.
+  //
+  // Etsy only accepts styles, is_customizable, processing_min/max and
+  // readiness_state_id at creation (createDraftListing) -- there is no field
+  // for any of them on updateListing. push() below strips them out of an
+  // update to an existing listing rather than let Etsy's 400 explain that;
+  // readiness_state_id still reaches a real listing, just through
+  // updateListingInventory instead (see applyReadinessState).
   'styles', 'processing_min', 'processing_max', 'readiness_state_id',
   'item_weight_unit', 'item_dimensions_unit', 'production_partner_ids',
   'should_auto_renew', 'is_taxable', 'type', 'image_ids',
@@ -50,6 +57,13 @@ export const EDITABLE = [
   // this is a staging area push() walks after the listing itself exists,
   // never sent as part of the create/update body itself.
   'attributes',
+  // Personalization is Etsy's own separate resource (a list of questions)
+  // behind updateListingPersonalization/deleteListingPersonalization -- never
+  // a handful of flat ShopListing fields, on either create or update. Staged
+  // here the same way attributes is: { isPersonalizable, isRequired,
+  // charCountMax, instructions, questionText }, applied by push() once the
+  // listing exists.
+  'personalization',
 ];
 
 // Etsy's own create-listing screen caps materials at 5 and quantity at 999
@@ -180,6 +194,12 @@ function cleanFields(fields = {}) {
       if (value && typeof value === 'object' && Object.keys(value).length) out[key] = value;
       continue;
     }
+    if (key === 'personalization') {
+      // { isPersonalizable, isRequired, charCountMax, instructions,
+      // questionText } -- opaque for the same reason attributes is.
+      if (value && typeof value === 'object' && Object.keys(value).length) out[key] = value;
+      continue;
+    }
     if (key === 'tags' || key === 'materials') value = asList(value);
     if (key === 'styles') value = asList(value).slice(0, 2);       // Etsy allows two
     if (key === 'image_ids' || key === 'production_partner_ids') {
@@ -226,6 +246,8 @@ export function get(listingId) {
     // diff against -- any staged attribute always counts as a change,
     // exactly like a staged photo does.
     attributes: {},
+    // Same reasoning: the snapshot never mirrors getListingPersonalization.
+    personalization: {},
   };
 
   // Which fields you actually changed, so the screen can mark them and the
@@ -454,6 +476,11 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
   // exists, never as part of the create/update body.
   const pendingAttributes = body.attributes;
   delete body.attributes;
+  // Also never a ShopListing field on create or update -- personalization is
+  // its own resource behind updateListingPersonalization/
+  // deleteListingPersonalization.
+  const pendingPersonalization = body.personalization;
+  delete body.personalization;
 
   /** One write per property; a failure on one names that property rather
    *  than losing every attribute this push was carrying. */
@@ -469,6 +496,40 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
     }
   };
 
+  const applyPersonalization = async (targetId) => {
+    // merged.personalization is always at least {} (fromEtsy's placeholder),
+    // even when nothing was ever staged -- only an object with something in
+    // it is a real edit.
+    if (!pendingPersonalization || !Object.keys(pendingPersonalization).length) return;
+    try {
+      if (pendingPersonalization.isPersonalizable === false) {
+        await caller('deleteListingPersonalization', { shop_id: shopId, listing_id: targetId });
+        return;
+      }
+      await caller('updateListingPersonalization', { shop_id: shopId, listing_id: targetId }, {
+        body: {
+          personalization_questions: [{
+            question_text: pendingPersonalization.questionText || 'Personalization',
+            instructions: pendingPersonalization.instructions ?? '',
+            question_type: 'text_input',
+            required: !!pendingPersonalization.isRequired,
+            max_allowed_characters: pendingPersonalization.charCountMax ?? 256,
+          }],
+        },
+      });
+    } catch (err) { log.warn(`draft ${id}: could not set personalization on ${targetId}: ${err.message}`); }
+  };
+
+  // Etsy accepts these only at creation (createDraftListing) -- there is no
+  // field for any of them on updateListing, so staging one against a listing
+  // that already exists can never reach Etsy through the listing body itself.
+  // readiness_state_id still has a real home once the listing exists (each
+  // inventory offering carries its own, via updateListingInventory); the rest
+  // have no update path at all and are simply left off the request rather
+  // than sent somewhere Etsy will 400 on them.
+  const UPDATE_UNSUPPORTED = ['styles', 'is_customizable', 'processing_min', 'processing_max'];
+  const skipped = [];
+
   let media = null;
   try {
     let result;
@@ -476,6 +537,7 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
       result = await caller('createDraftListing', { shop_id: shopId }, { body });
       const newId = result.listing_id;
       await applyAttributes(newId);
+      await applyPersonalization(newId);
 
       // Etsy hands out the listing_id only now, so photos/video staged before
       // this point could not be uploaded until this moment - do that first,
@@ -507,16 +569,31 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
       log.info(`draft ${id} became Etsy listing ${newId}`);
     } else {
       const onlyChanged = {};
-      // attributes is not a real ShopListing field -- validateListingFields
-      // would reject the whole update over it. Applied separately below,
-      // after Etsy has accepted everything else.
-      for (const key of draft.changed) if (key !== 'attributes') onlyChanged[key] = draft.merged[key];
+      // attributes and personalization are not real ShopListing fields --
+      // validateListingFields would reject the whole update over either one.
+      // Applied separately below, after Etsy has accepted everything else.
+      // The UPDATE_UNSUPPORTED fields have nowhere at all to go on an update
+      // (readiness_state_id gets its own real path just below); staging one
+      // against a listing that already exists quietly does nothing rather
+      // than failing the push, and is reported back in `skipped`.
+      let pendingReadinessStateId;
+      for (const key of draft.changed) {
+        if (key === 'attributes' || key === 'personalization') continue;
+        if (key === 'readiness_state_id') { pendingReadinessStateId = draft.merged[key]; continue; }
+        if (UPDATE_UNSUPPORTED.includes(key)) { skipped.push(key); continue; }
+        onlyChanged[key] = draft.merged[key];
+      }
       if (Object.keys(onlyChanged).length) {
         result = await listings.updateListing(id, onlyChanged, { caller });
       } else {
         result = { listing_id: id };
       }
       await applyAttributes(id);
+      await applyPersonalization(id);
+      if (pendingReadinessStateId != null) {
+        try { await inventory.setReadinessStateForAll(id, pendingReadinessStateId); }
+        catch (err) { log.warn(`draft ${id}: could not set the processing profile on ${id}: ${err.message}`); }
+      }
       // updateListing's response is the bare ShopListing - it carries none of
       // the association fields (images, videos, inventory...) a pulled draft
       // has, because none of those were asked for or changed. Overwriting the
@@ -550,6 +627,9 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
       listingId: result.listing_id ?? id,
       created: draft.isLocalOnly,
       pushed: draft.changed,
+      // Staged but with nowhere to go once a listing already exists on Etsy
+      // (styles, is_customizable, processing time -- create-only fields).
+      skipped,
       state: result.state ?? null,
       url: result.url ?? `https://www.etsy.com/listing/${result.listing_id ?? id}`,
       media,

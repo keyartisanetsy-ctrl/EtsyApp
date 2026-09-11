@@ -173,6 +173,13 @@ function DraftEditor({ id, onClose, onChanged }) {
         title: r.created ? `Created on Etsy as ${r.listingId}` : `Sent ${r.pushed.length} change(s) to Etsy`,
         body: activate ? 'It is live now.' : 'It is a draft on Etsy — activate it when you are ready.',
       });
+      if (r.skipped?.length) {
+        toast({
+          kind: 'warn',
+          title: `Etsy has no way to change ${r.skipped.join(', ')} after a listing exists`,
+          body: 'Those only take effect when a listing is first created.',
+        });
+      }
       onChanged();
       onClose();
     } catch (err) { showError(err, 'Etsy would not take it'); } finally { setBusy(false); }
