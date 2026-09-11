@@ -208,21 +208,59 @@ Install-OrRestart-Service -name 'EtsyTunnel' -exe $cloudflaredExe -argString 'tu
 # *.trycloudflare.com address every time cloudflared starts -- it is
 # printed to its own log once the connection is up, not returned by nssm,
 # so it has to be read back out.
+#
+# A bare domain match here used to also accept api.trycloudflare.com --
+# the internal endpoint cloudflared itself talks to while registering the
+# tunnel, which shows up in the log on a retry/warning line and reads
+# exactly like a real link but is not one. Real quick-tunnel hostnames are
+# always several dictionary words joined by hyphens
+# (warm-glass-cats-slowly.trycloudflare.com), so requiring a hyphen plus an
+# explicit blocklist of the short technical subdomains Cloudflare actually
+# runs rules that out structurally instead of guessing at every subdomain
+# cloudflared might ever log.
 Section "Waiting for the tunnel address..."
 $TunnelUrl = $null
 $errLog = Join-Path $LogDir 'EtsyTunnel-err.log'
 $outLog = Join-Path $LogDir 'EtsyTunnel-out.log'
+$ReservedTunnelNames = @('api','www','update','updates','login','dash','support','status','blog','developers','community','help')
 for ($i = 0; $i -lt 20 -and -not $TunnelUrl; $i++) {
   Start-Sleep -Seconds 2
-  $line = Select-String -Path @($errLog, $outLog) -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' -ErrorAction SilentlyContinue | Select-Object -Last 1
-  if ($line) { $TunnelUrl = $line.Matches[0].Value }
+  $found = Select-String -Path @($errLog, $outLog) -Pattern 'https://([a-z0-9-]+)\.trycloudflare\.com' -AllMatches -ErrorAction SilentlyContinue
+  $candidates = foreach ($line in $found) {
+    foreach ($m in $line.Matches) {
+      $sub = $m.Groups[1].Value.ToLowerInvariant()
+      if ($sub -notin $ReservedTunnelNames -and $sub -like '*-*') { $m.Value }
+    }
+  }
+  if ($candidates) { $TunnelUrl = $candidates | Select-Object -Last 1 }
+}
+
+# A freshly created quick tunnel can take a moment to actually route through
+# Cloudflare's edge even after its address is known -- confirmed here rather
+# than just printed and hoped for, since a link that actually works is the
+# whole point of handing one to another machine.
+$TunnelReachable = $false
+if ($TunnelUrl) {
+  Section "Confirming the tunnel actually answers..."
+  for ($i = 0; $i -lt 6 -and -not $TunnelReachable; $i++) {
+    try {
+      Invoke-WebRequest -Uri $TunnelUrl -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop | Out-Null
+      $TunnelReachable = $true
+    } catch {
+      # Any HTTP response at all (even the app's own 401 for no password)
+      # counts as reachable -- only a connection-level failure lands here.
+      if ($_.Exception.Response) { $TunnelReachable = $true } else { Start-Sleep -Seconds 2 }
+    }
+  }
 }
 
 Write-Host "`n================================================================"
 Write-Host " Ready."
 Write-Host ""
-if ($TunnelUrl) {
+if ($TunnelUrl -and $TunnelReachable) {
   Write-Host " Open:      $TunnelUrl"
+} elseif ($TunnelUrl) {
+  Write-Host " Open:      $TunnelUrl  (not confirmed reachable yet -- give it a few more seconds)"
 } else {
   Write-Host " The tunnel address was not found yet -- give it a moment, then run:"
   Write-Host "   Select-String -Path `"$errLog`",`"$outLog`" -Pattern 'trycloudflare.com'"

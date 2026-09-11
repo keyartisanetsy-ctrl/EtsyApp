@@ -452,6 +452,54 @@ await check('opening a browser never crashes the server', async () => {
   delete process.env.OPEN_BROWSER;
 });
 
+await check('the public-link parser never mistakes cloudflared\'s own api endpoint for the tunnel', async () => {
+  // Regression: a bare *.trycloudflare.com match used to accept
+  // api.trycloudflare.com -- the internal endpoint cloudflared itself talks
+  // to while registering a quick tunnel, which some versions echo into a
+  // retry/warning line. That string is not a working link, but it matched
+  // the old regex exactly the same as a real one.
+  const { findTunnelUrl } = await import('./remote-access.mjs');
+
+  const real = findTunnelUrl('some log line\nhttps://warm-glass-cats-slowly.trycloudflare.com\nmore log');
+  assert(real === 'https://warm-glass-cats-slowly.trycloudflare.com', `expected the real tunnel url, got ${real}`);
+
+  const onlyFake = findTunnelUrl('WRN failed to connect to api.trycloudflare.com: dial tcp: timeout');
+  assert(onlyFake === null, `api.trycloudflare.com should never be treated as the tunnel link, got ${onlyFake}`);
+
+  // The real one still has to win even when the fake one appears first in
+  // the same chunk of output, which is the actual order cloudflared logs in.
+  const both = findTunnelUrl('WRN failed to connect to api.trycloudflare.com: dial tcp: timeout\nINF https://actual-tunnel-name-here.trycloudflare.com');
+  assert(both === 'https://actual-tunnel-name-here.trycloudflare.com', `expected the real link to win, got ${both}`);
+
+  for (const reserved of ['www', 'update', 'login', 'dash']) {
+    const r = findTunnelUrl(`https://${reserved}.trycloudflare.com`);
+    assert(r === null, `"${reserved}" is a known Cloudflare subdomain, not a tunnel -- got ${r}`);
+  }
+});
+
+await check('waitForPort finds a real listener and gives up quickly on a dead one', async () => {
+  const { waitForPort } = await import('./remote-access.mjs');
+  const net = await import('node:net');
+
+  const server = net.createServer((sock) => sock.end());
+  const port = await new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve(server.address().port));
+  });
+  try {
+    const up = await waitForPort(port, { timeoutMs: 2000, intervalMs: 50 });
+    assert(up === true, 'should have found the port that really is listening');
+  } finally {
+    server.close();
+  }
+
+  // Port 0 never listens on its own; a short timeout here proves this does
+  // not hang the whole startup waiting on a port that will never open.
+  const start = Date.now();
+  const neverUp = await waitForPort(1, { timeoutMs: 500, intervalMs: 50 });
+  assert(neverUp === false, 'a port nothing listens on should report not-up');
+  assert(Date.now() - start < 2000, 'waitForPort should respect its own timeout, not hang');
+});
+
 await check('the default redirect URI uses a hostname, not an IP literal', async () => {
   // Etsy's own app dashboard rejects IP-literal redirect URIs outright
   // ("IP addresses are not allowed", e.g. 127.0.0.1) but accepts a hostname.
