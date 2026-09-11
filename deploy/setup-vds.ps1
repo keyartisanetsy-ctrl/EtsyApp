@@ -80,17 +80,23 @@ $nodeExe = $node.Source
 Invoke-Native -Exe $nodeExe -CallArgs @('--version')
 
 # --- App code (a plain zip download, no git needed) --------------------------
+# Always re-fetched, even on a re-run: this is also how you pick up a fix,
+# just by running this exact same command again. The zip is straight from
+# the git branch, so it never contains .env or data\ (both gitignored) --
+# copying it over an existing $AppDir overwrites the app's own code without
+# touching your password or your local database.
+Section "Downloading the latest app code..."
+$zip = Join-Path $ToolsDir 'EtsyApp.zip'
+Invoke-WebRequest -Uri 'https://github.com/keyartisanetsy-ctrl/EtsyApp/archive/refs/heads/claude/etsy-bulk-management-app-q3enu5.zip' -OutFile $zip
+$extractTo = Join-Path $ToolsDir 'extract'
+Remove-Item $extractTo -Recurse -Force -ErrorAction SilentlyContinue
+Expand-Archive -Path $zip -DestinationPath $extractTo -Force
+$inner = Get-ChildItem $extractTo | Select-Object -First 1
 if (-not (Test-Path $AppDir)) {
-  Section "Downloading the app..."
-  $zip = Join-Path $ToolsDir 'EtsyApp.zip'
-  Invoke-WebRequest -Uri 'https://github.com/keyartisanetsy-ctrl/EtsyApp/archive/refs/heads/claude/etsy-bulk-management-app-q3enu5.zip' -OutFile $zip
-  $extractTo = Join-Path $ToolsDir 'extract'
-  Remove-Item $extractTo -Recurse -Force -ErrorAction SilentlyContinue
-  Expand-Archive -Path $zip -DestinationPath $extractTo -Force
-  $inner = Get-ChildItem $extractTo | Select-Object -First 1
   Move-Item $inner.FullName $AppDir
 } else {
-  Write-Host "App directory $AppDir already exists -- using what is there. Delete it first to fetch fresh code."
+  Copy-Item -Path (Join-Path $inner.FullName '*') -Destination $AppDir -Recurse -Force
+  Remove-Item $extractTo -Recurse -Force -ErrorAction SilentlyContinue
 }
 Set-Location $AppDir
 
