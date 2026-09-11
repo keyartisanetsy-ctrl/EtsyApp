@@ -500,6 +500,79 @@ await check('waitForPort finds a real listener and gives up quickly on a dead on
   assert(Date.now() - start < 2000, 'waitForPort should respect its own timeout, not hang');
 });
 
+await check('the Pinggy URL parser picks the https line and ignores everything else ssh prints', async () => {
+  const { findPinggyUrl } = await import('./pinggy-tunnel.mjs');
+  const chunk = [
+    'Server started successfully.',
+    'You are running free tier, upgrade to remove these limitations.',
+    'http://rfjxa-1-2-3-4.free.pinggy.link',
+    'https://rfjxa-1-2-3-4.free.pinggy.link',
+  ].join('\n');
+  assert(findPinggyUrl(chunk) === 'https://rfjxa-1-2-3-4.free.pinggy.link', `got ${findPinggyUrl(chunk)}`);
+  assert(findPinggyUrl('just some unrelated ssh banner text') === null, 'should not match unrelated text');
+  // Pinggy has changed its exact subdomain shape before (plain vs
+  // region-prefixed) -- this has to keep matching either.
+  assert(findPinggyUrl('https://abc123.a.free.pinggy.link') === 'https://abc123.a.free.pinggy.link', 'region-prefixed form should still match');
+});
+
+await check('the Pinggy tunnel reconnects on its own when the connection ends, with a fresh address', async () => {
+  // Pinggy's free tier closes the SSH connection on its own after about an
+  // hour, on purpose -- the whole point of this feature is that nobody has
+  // to notice that and re-run a script. A mock "ssh" stands in for a real
+  // Pinggy session: prints an address, then exits shortly after, the same
+  // shape a real free-tier cutoff has. Also the regression test for a real
+  // bug this exact check caught: the exit listener used to be attached only
+  // after the reachability check finished, which can outlast a short-lived
+  // connection -- 'exit' had already fired by then and never fires twice,
+  // so the loop hung forever instead of reconnecting.
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const os = await import('node:os');
+  const { runForever } = await import('./pinggy-tunnel.mjs');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mock-ssh-'));
+  const mockPath = path.join(dir, 'ssh');
+  fs.writeFileSync(mockPath, [
+    '#!/usr/bin/env bash',
+    'echo "Server started successfully."',
+    'echo "https://mock-$RANDOM.free.pinggy.link"',
+    'sleep 1',
+    'exit 0',
+  ].join('\n'));
+  fs.chmodSync(mockPath, 0o755);
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${dir}:${originalPath}`;
+  let stop = () => {};
+  try {
+    const handle = runForever(4317, 'testpass123');
+    stop = handle.stop;
+    const first = await handle.firstUrl;
+    assert(first && /^https:\/\/mock-\d+\.free\.pinggy\.link$/.test(first), `unexpected first url: ${first}`);
+
+    // Long enough for the mock to exit and the loop to reconnect at least
+    // once (1s sleep + a little slack for the reachability check's own
+    // short-circuiting retries).
+    const seen = new Set([first]);
+    const deadline = Date.now() + 12_000;
+    const origLog = console.log;
+    console.log = (...args) => {
+      const line = args.join(' ');
+      const m = line.match(/https:\/\/mock-\d+\.free\.pinggy\.link/);
+      if (m) seen.add(m[0]);
+    };
+    try {
+      while (seen.size < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
+    } finally { console.log = origLog; }
+
+    assert(seen.size >= 2, `expected a reconnect with a new address, only ever saw ${JSON.stringify([...seen])}`);
+  } finally {
+    stop();
+    process.env.PATH = originalPath;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 await check('the default redirect URI uses a hostname, not an IP literal', async () => {
   // Etsy's own app dashboard rejects IP-literal redirect URIs outright
   // ("IP addresses are not allowed", e.g. 127.0.0.1) but accepts a hostname.

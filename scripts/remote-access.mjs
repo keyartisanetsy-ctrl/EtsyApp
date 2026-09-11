@@ -152,7 +152,7 @@ export function startQuickTunnel(exePath, port) {
  * machine. Any HTTP response at all (even the app's own 401 for no
  * password) counts as reachable; only a network-level failure does not.
  */
-async function isReachable(url, { attempts = 6, delayMs = 1500 } = {}) {
+export async function isReachable(url, { attempts = 6, delayMs = 1500 } = {}) {
   for (let i = 0; i < attempts; i += 1) {
     try {
       const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(5000) });

@@ -46,9 +46,15 @@ process.env.OPEN_BROWSER = process.env.OPEN_BROWSER ?? '1';
 console.log('Starting the server...');
 await import('../server/src/index.js');
 
-// Started after the server import resolves, so cloudflared has something to
+// Started after the server import resolves, so the tunnel has something to
 // proxy to almost immediately -- opt in with REMOTE_ACCESS=1 in .env.
+// Pinggy is the default (no binary to fetch, and it renews its own address
+// automatically for as long as this process runs instead of needing a
+// re-run every time its free-tier hour is up); TUNNEL_PROVIDER=cloudflare
+// switches to the Cloudflare Tunnel path in remote-access.mjs instead.
 if (/^(1|true|yes|on)$/i.test(process.env.REMOTE_ACCESS || '')) {
-  const { startRemoteAccess } = await import('./remote-access.mjs');
+  const provider = (process.env.TUNNEL_PROVIDER || 'pinggy').trim().toLowerCase();
+  const mod = provider === 'cloudflare' ? './remote-access.mjs' : './pinggy-tunnel.mjs';
+  const { startRemoteAccess } = await import(mod);
   await startRemoteAccess({ root, port: Number(process.env.PORT) || 4317 });
 }

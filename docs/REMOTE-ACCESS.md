@@ -78,21 +78,34 @@ REMOTE_ACCESS=1
 ```
 
 The next time you run `npm start` (or double-click the packaged app), it
-downloads `cloudflared` once (a few seconds, cached after that), opens a
-tunnel to itself, and prints a box like:
+opens a tunnel to itself via [Pinggy](https://pinggy.io) — no binary to
+download, just an outbound SSH connection — and prints a box like:
 
 ```
 ======================================================================
-  Open from anywhere:  https://some-random-words.trycloudflare.com
+  Open from anywhere:  https://some-random-words.free.pinggy.link
   Password:            a9F3kLp2Qz...
 ======================================================================
 ```
 
 `APP_PASSWORD` is generated automatically the first time this runs if you
-had not already set one. That link works from any browser, anywhere, for as
-long as this "start" window stays open — closing it (or restarting the app)
-ends that link; the next start prints a new one. Keep the terminal window
-around if you want to read the link again later in the session.
+had not already set one. That link works from any browser, anywhere.
+
+**It renews itself automatically.** Pinggy's free tier closes the
+connection on its own after about an hour — this notices right away and
+opens a fresh one with a new address, printed in the same terminal window
+again, for as long as `npm start` keeps running. Nothing to re-run by hand;
+just keep an eye on this window for the next address once it renews. Closing
+the window (or restarting the app) ends the link the same as before — the
+next start opens a new one.
+
+Needs an `ssh` command on this machine — Windows 10/11 already include one
+(OpenSSH Client, on by default since 2018); if it's genuinely missing, the
+app says so and keeps running locally, no public link. Prefer the old
+Cloudflare Tunnel path instead (a small binary is downloaded once, but its
+link does not renew itself while the app stays open — closing that gap is
+the whole point of Pinggy being the default now)? Set `TUNNEL_PROVIDER=cloudflare`
+in `.env` alongside `REMOTE_ACCESS=1`.
 
 **This changes nothing about what Etsy sees.** Every Etsy API call this app
 makes happens from wherever this process is physically running — a browser
