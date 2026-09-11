@@ -25,6 +25,8 @@ import { createLogger } from '../lib/logger.js';
 import * as listings from './listings.js';
 import * as draftmedia from './draftmedia.js';
 import * as inventory from './inventory.js';
+import * as ai from './ai/index.js';
+import * as research from './research.js';
 import * as undo from './undo.js';
 
 const log = createLogger('drafts');
@@ -407,6 +409,61 @@ export function remove(listingId) {
     .run(id, activeShopId()).changes;
   undo.commit(handle, { affected: n });
   return { removed: n, listingId: id };
+}
+
+/** Which of these a draft is missing, in the order the button reports them. */
+const AUTOFILL_FIELDS = ['materials', 'tags', 'taxonomy_id', 'description', 'who_made', 'when_made'];
+
+/**
+ * One button: look at what a draft is still missing -- most often one that
+ * arrived from Product Studio with nothing but a title, price and photos --
+ * and ask the AI to fill in only those gaps from what the draft already says
+ * about itself. Nothing already filled in is ever touched, so a product that
+ * only needs a category does not also get its materials guessed at.
+ *
+ * Everything it comes back with is staged, never sent to Etsy on its own --
+ * the normal "what will change" review before Send still applies.
+ */
+export async function autofillMissing(listingId) {
+  const draft = get(listingId);
+  const merged = draft.merged;
+
+  const missing = {
+    materials: !(merged.materials?.length),
+    tags: !(merged.tags?.length),
+    taxonomy_id: !merged.taxonomy_id,
+    description: !merged.description?.trim(),
+    who_made: !merged.who_made,
+    when_made: !merged.when_made,
+  };
+  const wanted = AUTOFILL_FIELDS.filter((k) => missing[k]);
+  if (!wanted.length) return { filled: [], note: 'Nothing here is missing.' };
+
+  const result = await ai.writeListing({
+    name: merged.title || undefined,
+    notes: merged.description || merged.title || undefined,
+  }, {});
+  if (!result.listing) {
+    throw badRequest('The AI did not return a usable listing to fill the gaps from.', { raw: result.text });
+  }
+
+  const patch = {};
+  const filled = [];
+  if (missing.materials && result.listing.materials?.length) { patch.materials = result.listing.materials; filled.push('materials'); }
+  if (missing.tags && result.listing.tags?.length) { patch.tags = result.listing.tags; filled.push('tags'); }
+  if (missing.description && result.listing.description?.trim()) { patch.description = result.listing.description; filled.push('description'); }
+  if (missing.who_made && result.listing.who_made) { patch.who_made = result.listing.who_made; filled.push('who made it'); }
+  if (missing.when_made && result.listing.when_made) { patch.when_made = result.listing.when_made; filled.push('when made'); }
+  if (missing.taxonomy_id && result.listing.taxonomy_suggestion) {
+    // The AI names a category in words ("resin keycaps"), never an id --
+    // resolved against Etsy's own taxonomy the same way the category search
+    // box does, so a raw id never has to be guessed at or shown anywhere.
+    const found = await research.searchTaxonomy(result.listing.taxonomy_suggestion, { limit: 1 });
+    if (found.results?.[0]) { patch.taxonomy_id = found.results[0].id; filled.push(`category (${found.results[0].name})`); }
+  }
+
+  if (Object.keys(patch).length) stage(listingId, patch);
+  return { filled, patch, wanted };
 }
 
 /**

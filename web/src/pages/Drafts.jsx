@@ -164,9 +164,23 @@ function DraftEditor({ id, onClose, onChanged }) {
 
   if (!id) return null;
 
+  const [filling, setFilling] = useState(false);
   const save = async (patch) => {
     try { await api.patch(`/drafts/${id}`, patch); reload(); replan(); onChanged(); }
     catch (err) { showError(err, 'Could not save that'); }
+  };
+
+  const autofill = async () => {
+    setFilling(true);
+    try {
+      const r = await api.post(`/drafts/${id}/autofill`, {});
+      if (r.filled.length) {
+        toast({ kind: 'ok', title: `Filled in: ${r.filled.join(', ')}`, body: 'Review it below before sending.' });
+        reload(); replan(); onChanged();
+      } else {
+        toast({ kind: 'ok', title: r.note ?? 'Nothing was missing' });
+      }
+    } catch (err) { showError(err, 'Could not fill the gaps'); } finally { setFilling(false); }
   };
 
   const send = async (activate) => {
@@ -265,6 +279,26 @@ function DraftEditor({ id, onClose, onChanged }) {
               Ready. {plan.isNew ? 'This will be created on Etsy.' : `${plan.willChange.length} field(s) will change: ${plan.willChange.join(', ')}.`}
             </Banner>
           )}
+
+          {(() => {
+            const gaps = [
+              !merged.materials?.length && 'materials',
+              !merged.tags?.length && 'tags',
+              !merged.taxonomy_id && 'category',
+              !merged.description?.trim() && 'description',
+            ].filter(Boolean);
+            return gaps.length > 0 && (
+              <Banner kind="info">
+                <div className="flex gap12" style={{ alignItems: 'center' }}>
+                  <div>Missing: {gaps.join(', ')}. Often the case for a product handed over from Product Studio.</div>
+                  <div className="spacer" />
+                  <button className="btn xs" disabled={filling} onClick={autofill}>
+                    {filling ? <Spinner /> : 'Fill with AI'}
+                  </button>
+                </div>
+              </Banner>
+            );
+          })()}
 
           <div className="section-title">Photos &amp; video</div>
           <MediaManager draft={draft} onChanged={async () => { await reload(); await replan(); onChanged(); }} />

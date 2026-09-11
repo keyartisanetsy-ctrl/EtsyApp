@@ -2659,6 +2659,77 @@ await check('pushing readiness_state_id and styles on an existing draft never se
   }
 });
 
+await check('autofilling a draft with nothing missing does nothing and never calls the AI', async () => {
+  // A product that already has materials, tags, a category, a description
+  // and who/when-made should not have any of it touched, or "fill the gaps"
+  // would quietly become "overwrite what I already set".
+  const { initDb, getDb, json } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+  const listingId = 960125;
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960125').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960125,'Autofill Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960125);
+
+  try {
+    db.prepare(`INSERT INTO listing_drafts (listing_id, shop_id, source, etsy_state, etsy_snapshot, staged, created_at, updated_at)
+                VALUES (?, 960125, 'etsy', 'draft', ?, '{}', datetime('now'), datetime('now'))`)
+      .run(listingId, json({
+        listing_id: listingId, title: 'Keycap Set', description: 'A full description already.',
+        price: { amount: 3999, divisor: 100, currency_code: 'USD' }, quantity: 5,
+        materials: ['Resin'], tags: ['keycap'], taxonomy_id: 1000,
+        who_made: 'i_did', when_made: 'made_to_order',
+      }));
+
+    const result = await drafts.autofillMissing(listingId);
+    assert(result.filled.length === 0, `expected nothing filled, got ${JSON.stringify(result.filled)}`);
+    assert(result.note, 'expected a note explaining nothing was missing');
+  } finally {
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960125').run();
+    client.removeAccount(960125);
+  }
+});
+
+await check('autofilling a draft that is missing fields reaches for the AI', async () => {
+  // The opposite case: something really is missing, so this has to actually
+  // ask the AI rather than silently reporting nothing to do. No provider is
+  // configured in this environment, so the clean "no provider" error is
+  // exactly what proves the AI was reached for at all.
+  const { initDb, getDb, json } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+  const listingId = 960126;
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960126').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960126,'Autofill Gap Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960126);
+
+  try {
+    db.prepare(`INSERT INTO listing_drafts (listing_id, shop_id, source, etsy_state, etsy_snapshot, staged, created_at, updated_at)
+                VALUES (?, 960126, 'etsy', 'draft', ?, '{}', datetime('now'), datetime('now'))`)
+      .run(listingId, json({
+        listing_id: listingId, title: 'Anime Artisan Keycap', description: '',
+        price: { amount: 3999, divisor: 100, currency_code: 'USD' }, quantity: 5,
+        materials: [], tags: [], who_made: 'i_did', when_made: 'made_to_order',
+      }));
+
+    let err = null;
+    try { await drafts.autofillMissing(listingId); } catch (e) { err = e; }
+    assert(err, 'expected this to fail without a configured AI provider');
+    assert(/provider/i.test(err.message), `expected a "no provider" style message, got: ${err.message}`);
+  } finally {
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960126').run();
+    client.removeAccount(960126);
+  }
+});
+
 console.log('\nGuards');
 await check('a photo that fails to upload does not break the draft becoming a real listing', async () => {
   // Regression: a local draft with a staged photo that could not be

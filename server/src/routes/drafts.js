@@ -40,6 +40,13 @@ router.patch('/:id', asyncRoute(async (req, res) => res.json(drafts.stage(Number
 /** What pushing would do, and anything that would stop it. */
 router.get('/:id/preview', asyncRoute(async (req, res) => res.json(drafts.preview(Number(req.params.id)))));
 
+/**
+ * One button: fill in whatever this draft is still missing (materials,
+ * category, tags...) from what it already says about itself. Only ever
+ * stages the gaps -- nothing already filled in is touched.
+ */
+router.post('/:id/autofill', asyncRoute(async (req, res) => res.json(await drafts.autofillMissing(Number(req.params.id)))));
+
 /** Send it to Etsy. */
 router.post('/:id/push', asyncRoute(async (req, res) => {
   res.json(await drafts.push(Number(req.params.id), { activate: bool(req.body?.activate) }));
