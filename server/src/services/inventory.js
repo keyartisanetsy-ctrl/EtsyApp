@@ -148,6 +148,7 @@ const GRID_SQL = `
     l.price_amount AS listing_price_amount, l.price_divisor AS listing_price_divisor,
     l.price_currency AS listing_price_currency, l.shop_section_id, l.quantity AS listing_quantity,
     l.updated_ts,
+    (SELECT i.url_570xN FROM listing_images i WHERE i.listing_id = l.listing_id ORDER BY i.rank DESC LIMIT 1) AS last_image_url,
     m.supply_link, m.variant_supply_link, m.supplier_name, m.variant_image_url,
     m.supply_cost, m.supply_currency, m.lead_time_days, m.notes
   FROM listing_products p
@@ -237,8 +238,10 @@ export function skuGrid({
         supplyLink: r.supply_link || '',
         variantSupplyLink: r.variant_supply_link || '',
         supplierName: r.supplier_name || '',
-        // The photo you saved for this variant, else the one Etsy has for it.
-        variantImageUrl: r.variant_image_url || r.variation_image_url || '',
+        // The photo you saved for this variant, else the one Etsy has for it,
+        // else -- most listings never bother pinning per-variant photos --
+        // the listing's own cover shot, same fallback the Pictures panel uses.
+        variantImageUrl: r.variant_image_url || r.variation_image_url || r.first_image_url || '',
         savedVariantImageUrl: r.variant_image_url || '',
         supplyCost: cost,
         supplyCurrency: r.supply_currency || null,
@@ -246,6 +249,7 @@ export function skuGrid({
         notes: r.notes || '',
         firstImageUrl: r.first_image_url,
         firstImageId: r.first_image_id,
+        lastImageUrl: r.last_image_url || '',
         variationImageUrl: r.variation_image_url,
         variationImageId: r.variation_image_id,
         sectionId: r.shop_section_id,

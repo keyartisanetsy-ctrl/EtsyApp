@@ -2447,6 +2447,54 @@ await check('a photo that fails to upload does not break the draft becoming a re
   }
 });
 
+await check('a draft Etsy no longer has is removed from the desk on the next pull', async () => {
+  // A draft missing from getListingsByShop is not necessarily deleted -- it
+  // may have just changed state to something this pull did not ask for. Only
+  // a 404 from Etsy on that exact listing means it is actually gone.
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960118').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960118,'Vanishing Draft Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960118);
+
+  try {
+    const deletedId = 7770001;
+    const movedId = 7770002;
+    for (const id of [deletedId, movedId]) {
+      db.prepare(`INSERT INTO listing_drafts (listing_id, shop_id, source, etsy_state, etsy_snapshot, staged, created_at, updated_at)
+                  VALUES (?,960118,'etsy','draft','{}','{}',datetime('now'),datetime('now'))`).run(id);
+    }
+
+    const { EtsyApiError } = await import('../server/src/lib/errors.js');
+    const stubCaller = async (operationId, args) => {
+      if (operationId === 'getListingsByShop') return { results: [] }; // nothing draft/inactive right now
+      if (operationId === 'getListing') {
+        if (args.listing_id === deletedId) throw new EtsyApiError(404, 'not found');
+        if (args.listing_id === movedId) return { listing_id: movedId, state: 'active' }; // just changed state
+        throw new Error(`unexpected listing_id ${args.listing_id}`);
+      }
+      throw new Error(`unexpected operation in this test: ${operationId}`);
+    };
+
+    const result = await drafts.pullFromEtsy({ caller: stubCaller });
+    assert(result.removed === 1, `expected 1 removed, got ${result.removed}`);
+
+    const stillThere = db.prepare('SELECT listing_id FROM listing_drafts WHERE listing_id = ?').get(deletedId);
+    assert(!stillThere, 'the 404d draft should have been removed from the desk');
+
+    const kept = db.prepare('SELECT listing_id FROM listing_drafts WHERE listing_id = ?').get(movedId);
+    assert(kept, 'a draft that merely changed state should not be removed');
+  } finally {
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960118').run();
+    client.removeAccount(960118);
+  }
+});
+
 await check('unauthenticated Etsy write is refused with guidance', async () => {
   const { status, body } = await req('/api/listings', {
     method: 'POST',

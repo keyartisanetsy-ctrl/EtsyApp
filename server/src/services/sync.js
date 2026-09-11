@@ -221,6 +221,32 @@ export async function syncVariationImages(listingId, shopId = requireShopId()) {
 }
 
 /**
+ * Re-ask Etsy for variation images across every listing in the active shop
+ * at once, instead of one at a time from each listing's own panel -- the
+ * per-listing "Ask Etsy again" button, run in bulk.
+ */
+export async function syncAllVariationImages({ onProgress } = {}) {
+  const shopId = requireShopId();
+  const ids = getDb().prepare('SELECT listing_id FROM listings WHERE shop_id IS ?').all(shopId).map((r) => r.listing_id);
+
+  let checked = 0;
+  let mapped = 0;
+  const errors = [];
+  for (const listingId of ids) {
+    try {
+      mapped += await syncVariationImages(listingId, shopId);
+    } catch (err) {
+      errors.push({ listingId, message: err.message });
+    }
+    checked += 1;
+    onProgress?.({ checked, total: ids.length, listingId });
+  }
+
+  audit('sync.variation_images', { entity: 'listing', detail: { checked, mapped, errors: errors.length } });
+  return { checked, mapped, errors };
+}
+
+/**
  * Sync listings for the given states. `withInventory` also pulls every
  * variation/SKU, which is what the SKU manager reads.
  */

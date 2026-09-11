@@ -36,6 +36,7 @@ export default function Skus() {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [dupOpen, setDupOpen] = useState(false);
+  const [syncingImages, setSyncingImages] = useState(false);
 
   const toast = useToast();
   const showError = useErrorToast();
@@ -155,6 +156,22 @@ export default function Skus() {
     reload();
   };
 
+  /** The per-listing "Ask Etsy again" button, for every listing at once. */
+  const syncAllVariantImages = async () => {
+    setSyncingImages(true);
+    try {
+      const r = await api.post('/skus/variation-images/sync-all', {});
+      const failed = r.errors?.length ?? 0;
+      toast({
+        kind: failed ? 'warn' : 'ok',
+        title: 'Variant images re-checked',
+        body: `${r.checked} listing(s) checked, ${r.mapped} variant photo(s) found`
+          + (failed ? ` — ${failed} listing(s) could not be checked` : ''),
+      });
+      reload();
+    } catch (err) { showError(err, 'Could not re-check variant images'); } finally { setSyncingImages(false); }
+  };
+
   const exportXlsx = async () => {
     try {
       const r = await api.post('/exports/skus', { search: debounced, state, missingSku, missingSupply });
@@ -175,6 +192,10 @@ export default function Skus() {
             </button>
           )}
           <button className="btn sm" onClick={exportXlsx}>⤓ Excel</button>
+          <button className="btn sm" onClick={syncAllVariantImages} disabled={syncingImages}
+                  title="Ask Etsy again for every listing's variant photos, not just one at a time">
+            {syncingImages ? <Spinner /> : '🖼'} Sync variant images
+          </button>
           <button className="btn sm" onClick={reload} disabled={loading}>{loading ? <Spinner /> : '↻'} Refresh</button>
           <button className="btn sm primary" disabled={!dirtyCount || saving} onClick={saveAll}>
             {saving ? <Spinner /> : '✓'} Save {dirtyCount || ''}
@@ -385,8 +406,14 @@ function SkuDetail({ row, pct, onClose, onSaved }) {
                       <div className="spacer" /><CopyButton text={row.sku} label="Copy SKU" /></>}>
       <div className="section-title">Product</div>
       <div className="flex gap12 mb16" style={{ alignItems: 'flex-start' }}>
-        <Thumb src={row.firstImageUrl} size="lg" />
-        <Thumb src={row.variationImageUrl} size="lg" fallback="–" />
+        <div>
+          <Thumb src={row.firstImageUrl} size="lg" />
+          <div className="small dim" style={{ textAlign: 'center' }}>first</div>
+        </div>
+        <div>
+          <Thumb src={row.variationImageUrl || row.lastImageUrl} size="lg" fallback="–" />
+          <div className="small dim" style={{ textAlign: 'center' }}>{row.variationImageUrl ? 'variant' : 'last'}</div>
+        </div>
         <div style={{ flex: 1 }}>
           <div style={{ fontWeight: 600 }}>{row.title}</div>
           <div className="small dim">{row.variation || 'No variation attributes'}</div>

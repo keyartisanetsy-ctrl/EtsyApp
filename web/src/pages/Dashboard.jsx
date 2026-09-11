@@ -104,8 +104,22 @@ export default function Dashboard({ summary, onRefresh }) {
             <Stat label="Last 7 days" value={fmtMoney(revenue.last7, revenue.currency)} />
             <Stat label="Last 30 days" value={fmtMoney(revenue.last30, revenue.currency)} />
           </div>
+          {revenue.detail?.last30 && (
+            <dl className="kv mt16">
+              <dt>Gross (last 30 days)</dt><dd>{fmtMoney(revenue.detail.last30.gross, revenue.currency)}</dd>
+              <dt>Refunded</dt>
+              <dd className={revenue.detail.last30.refunded ? 'num' : 'dim'} style={{ color: revenue.detail.last30.refunded ? 'var(--danger,#e05252)' : undefined }}>
+                {revenue.detail.last30.refunded ? `-${fmtMoney(revenue.detail.last30.refunded, revenue.currency)}` : 'none'}
+                {revenue.detail.last30.refundedOrders ? ` (${revenue.detail.last30.refundedOrders} order${revenue.detail.last30.refundedOrders === 1 ? '' : 's'})` : ''}
+              </dd>
+              <dt>Cancelled orders excluded</dt><dd>{revenue.detail.last30.canceledOrders || 0}</dd>
+            </dl>
+          )}
           <div className="card-sub mt16">
-            From synced receipts, cancellations excluded. Sync orders to bring this up to date.
+            Net figures already have refunds taken off and cancelled orders left out — this is not the same as
+            Etsy&rsquo;s own Payment account fees (transaction/listing/processing fees, Ads spend), which Etsy&rsquo;s
+            public API does not expose in the same categorised form its own Shop Manager uses. Sync orders to bring
+            this up to date.
           </div>
         </div>
 

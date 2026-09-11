@@ -69,17 +69,18 @@ const asList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(',').map((s)
  * state. Every draft it has becomes a row here; ones already open on the desk
  * keep whatever you had staged.
  */
-export async function pullFromEtsy({ includeInactive = false } = {}) {
+export async function pullFromEtsy({ includeInactive = false, caller = call } = {}) {
   const db = getDb();
   const shopId = requireShopId();
   const states = includeInactive ? ['draft', 'inactive'] : ['draft'];
+  const seenIds = new Set();
 
   let seen = 0;
   let added = 0;
   for (const state of states) {
     let offset = 0;
     for (;;) {
-      const res = await call('getListingsByShop', {
+      const res = await caller('getListingsByShop', {
         shop_id: shopId, state, limit: 100, offset,
         includes: ['Images', 'Videos', 'Inventory'],
       });
@@ -88,6 +89,7 @@ export async function pullFromEtsy({ includeInactive = false } = {}) {
 
       for (const l of rows) {
         seen += 1;
+        seenIds.add(l.listing_id);
         const exists = db.prepare('SELECT listing_id FROM listing_drafts WHERE listing_id = ?').get(l.listing_id);
         // Always refresh what Etsy has; never overwrite what you staged.
         db.prepare(`
@@ -105,12 +107,36 @@ export async function pullFromEtsy({ includeInactive = false } = {}) {
     }
   }
 
-  audit('drafts.pull', { detail: { seen, added } });
+  // A row this pull did not see is not necessarily gone -- it may just have
+  // moved to a state this pull did not ask for (active, say, if only drafts
+  // were requested). Only a listing Etsy itself now says it cannot find is
+  // actually deleted, so each one is checked directly rather than assumed.
+  const candidates = db.prepare(
+    `SELECT listing_id FROM listing_drafts WHERE shop_id IS ? AND source = 'etsy' AND listing_id > 0`,
+  ).all(shopId).map((r) => r.listing_id).filter((id) => !seenIds.has(id));
+
+  let removed = 0;
+  for (const listingId of candidates) {
+    try {
+      await caller('getListing', { listing_id: listingId });
+    } catch (err) {
+      if (err.status === 404) {
+        db.prepare('DELETE FROM listing_drafts WHERE listing_id = ?').run(listingId);
+        removed += 1;
+        log.info(`draft ${listingId} was deleted on Etsy; removed from the desk`);
+      }
+      // Any other error (rate limit, network) says nothing about whether the
+      // listing still exists, so the row is left alone rather than guessed at.
+    }
+  }
+
+  audit('drafts.pull', { detail: { seen, added, removed } });
   return {
     seen,
     added,
+    removed,
     note: seen
-      ? `${added} new draft(s) came down; the rest were already on the desk with your edits kept.`
+      ? `${added} new draft(s) came down; the rest were already on the desk with your edits kept.${removed ? ` ${removed} removed here because Etsy no longer has them.` : ''}`
       : 'Etsy has no drafts for this shop right now.',
   };
 }

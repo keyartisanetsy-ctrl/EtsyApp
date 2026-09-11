@@ -2,7 +2,7 @@ import { Router } from 'express';
 import * as skugen from '../services/skugen.js';
 import { asyncRoute, int, bool, num, required, ids } from '../lib/http.js';
 import * as inventory from '../services/inventory.js';
-import { syncVariationImages } from '../services/sync.js';
+import { syncVariationImages, syncAllVariationImages } from '../services/sync.js';
 
 const router = Router();
 
@@ -51,6 +51,11 @@ router.delete('/inventory/:listingId/variations', asyncRoute(async (req, res) =>
 
 router.post('/inventory/:listingId/variation-images/sync', asyncRoute(async (req, res) => {
   res.json({ mapped: await syncVariationImages(Number(req.params.listingId)) });
+}));
+
+/** The same "ask Etsy again" for every listing in the shop, not just one. */
+router.post('/variation-images/sync-all', asyncRoute(async (req, res) => {
+  res.json(await syncAllVariationImages());
 }));
 
 // -------------------------------------------------------- supply metadata
