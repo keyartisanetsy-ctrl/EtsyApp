@@ -47,6 +47,7 @@ export default function Drafts() {
   const [open, setOpen] = useState(null);
   const [busy, setBusy] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
+  const [defaultsOpen, setDefaultsOpen] = useState(false);
   const [params, setParams] = useSearchParams();
 
   // Product Studio is handed a link straight to the draft it just created, so
@@ -89,6 +90,7 @@ export default function Drafts() {
       subtitle={drafts.length ? `${drafts.length} draft(s) — nothing here is on Etsy until you send it` : ''}
       actions={
         <>
+          <button className="btn sm" onClick={() => setDefaultsOpen(true)}>⚙ Usual defaults</button>
           <button className="btn sm" onClick={() => setConnectOpen(true)}>🔗 Connect an outside app</button>
           <button className="btn sm" onClick={startNew}>＋ Start one here</button>
           <button className="btn sm primary" disabled={busy} onClick={pull}>
@@ -144,7 +146,171 @@ export default function Drafts() {
 
       <DraftEditor key={open} id={open} onClose={() => setOpen(null)} onChanged={reload} />
       <ConnectProductStudio open={connectOpen} onClose={() => setConnectOpen(false)} onImported={reload} />
+      <DraftDefaultsModal open={defaultsOpen} onClose={() => setDefaultsOpen(false)} />
     </TablePage>
+  );
+}
+
+/**
+ * "What I always use" -- saved once, applied by both autofill buttons from
+ * then on ahead of any guessing. A seller who lists one kind of thing over
+ * and over (this shop's keycaps) picks the same category, materials,
+ * who/when-made, shipping/return/section and settings on nearly every
+ * listing; "fill the gaps" should mean that first, not a fresh guess every
+ * time. Never a raw category id here either -- the same CategoryPicker the
+ * draft editor uses.
+ */
+function DraftDefaultsModal({ open, onClose }) {
+  const [form, setForm] = useState(null);
+  const [attributes, setAttributes] = useState({});
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const showError = useErrorToast();
+
+  const { data: choices } = useAsync(() => (open ? api.get('/drafts/choices') : null), [open], { immediate: !!open });
+
+  useEffect(() => {
+    if (!open) return;
+    setForm(null);
+    api.get('/drafts/defaults').then((d) => { setForm(d); setAttributes(d.attributes ?? {}); }).catch(() => setForm({}));
+  }, [open]);
+
+  if (!open) return null;
+  const set = (patch) => setForm((f) => ({ ...(f ?? {}), ...patch }));
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.put('/drafts/defaults', { ...form, attributes });
+      toast({ kind: 'ok', title: 'Saved. The autofill buttons will use these from now on.' });
+      onClose();
+    } catch (err) { showError(err, 'Could not save'); } finally { setBusy(false); }
+  };
+
+  const f = form ?? {};
+  return (
+    <Modal open onClose={onClose} lg title="Your usual defaults for new drafts"
+           footer={<button className="btn primary" disabled={busy || !form} onClick={save}>{busy ? <Spinner /> : 'Save'}</button>}>
+      {!form ? <Spinner /> : (
+        <>
+          <div className="hint mb16">
+            Applied by &ldquo;Fill without AI&rdquo; (and ahead of guessing, by &ldquo;Fill with AI&rdquo; too) wherever a draft
+            is missing the field and you have set one here. Leave anything blank to keep guessing at it per draft instead.
+          </div>
+
+          <div className="section-title">Category</div>
+          <CategoryPicker
+            value={f.taxonomy_id ?? ''}
+            onPick={(taxonomy_id) => set({ taxonomy_id: taxonomy_id === '' ? null : Number(taxonomy_id) })}
+            attributes={attributes}
+            onAttributes={setAttributes}
+          />
+
+          <MaterialsPicker value={f.materials ?? []} onChange={(materials) => set({ materials })} />
+
+          <div className="section-title">Made by</div>
+          <div className="split">
+            <div className="field">
+              <label>Who made it</label>
+              <select className="select" value={f.who_made ?? ''} onChange={(e) => set({ who_made: e.target.value })}>
+                <option value="">— keep guessing —</option>
+                {['i_did', 'someone_else', 'collective'].map((w) => <option key={w} value={w}>{w.replace(/_/g, ' ')}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>When was it made</label>
+              <select className="select" value={f.when_made ?? ''} onChange={(e) => set({ when_made: e.target.value })}>
+                <option value="">— keep guessing —</option>
+                {WHEN_MADE.map((w) => <option key={w} value={w}>{w.replace(/_/g, ' ')}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="split">
+            <div className="field">
+              <label>Listing type</label>
+              <select className="select" value={f.type ?? ''} onChange={(e) => set({ type: e.target.value })}>
+                <option value="">— keep guessing —</option>
+                {LISTING_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Supply or finished product</label>
+              <select className="select" value={f.is_supply === true ? 'true' : f.is_supply === false ? 'false' : ''}
+                      onChange={(e) => set({ is_supply: e.target.value === '' ? null : e.target.value === 'true' })}>
+                <option value="">— keep guessing —</option>
+                <option value="false">Finished product</option>
+                <option value="true">Supply</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="section-title">Shipping &amp; policies</div>
+          <div className="split">
+            <div className="field">
+              <label>Shipping profile</label>
+              <select className="select" value={f.shipping_profile_id ?? ''} onChange={(e) => set({ shipping_profile_id: e.target.value ? Number(e.target.value) : null })}>
+                <option value="">— none —</option>
+                {(choices?.shippingProfiles ?? []).map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Shop section</label>
+              <select className="select" value={f.shop_section_id ?? ''} onChange={(e) => set({ shop_section_id: e.target.value ? Number(e.target.value) : null })}>
+                <option value="">— none —</option>
+                {(choices?.sections ?? []).map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="field">
+            <label>Return policy</label>
+            <select className="select" value={f.return_policy_id ?? ''} onChange={(e) => set({ return_policy_id: e.target.value ? Number(e.target.value) : null })}>
+              <option value="">— none —</option>
+              {(choices?.returnPolicies ?? []).map((x) => (
+                <option key={x.id} value={x.id}>{x.accepts ? `Accepts returns${x.days ? ` within ${x.days} days` : ''}` : 'No returns'}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="section-title">Weight &amp; dimensions units</div>
+          <div className="split">
+            <div className="field">
+              <label>Weight unit</label>
+              <select className="select" value={f.item_weight_unit ?? ''} onChange={(e) => set({ item_weight_unit: e.target.value })}>
+                <option value="">— keep guessing —</option>
+                {WEIGHT_UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Dimensions unit</label>
+              <select className="select" value={f.item_dimensions_unit ?? ''} onChange={(e) => set({ item_dimensions_unit: e.target.value })}>
+                <option value="">— keep guessing —</option>
+                {DIMENSION_UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div className="section-title">Settings</div>
+          <div className="field">
+            <label>Tax</label>
+            <select className="select" value={f.is_taxable === true ? 'true' : f.is_taxable === false ? 'false' : ''}
+                    onChange={(e) => set({ is_taxable: e.target.value === '' ? null : e.target.value === 'true' })}>
+              <option value="">— keep guessing —</option>
+              <option value="true">Charge shop tax rates</option>
+              <option value="false">Do not charge tax</option>
+            </select>
+          </div>
+          <div className="field">
+            <label>Renewal</label>
+            <select className="select" value={f.should_auto_renew === true ? 'true' : f.should_auto_renew === false ? 'false' : ''}
+                    onChange={(e) => set({ should_auto_renew: e.target.value === '' ? null : e.target.value === 'true' })}>
+              <option value="">— keep guessing —</option>
+              <option value="true">Automatic — renews for $0.20 when it expires</option>
+              <option value="false">Manual</option>
+            </select>
+          </div>
+        </>
+      )}
+    </Modal>
   );
 }
 

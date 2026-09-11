@@ -2831,6 +2831,75 @@ await check('the non-AI autofill reads materials and tags straight out of the ti
   }
 });
 
+await check('saved shop defaults win over guessing, and cover fields neither engine ever touches', async () => {
+  // A seller who lists the same kind of thing over and over wants "fill the
+  // gaps" to mean "use what I always use" first -- category, materials,
+  // who/when-made, shipping/return/section, tax/renewal, the units this
+  // shop always uses. This also has to work with useAI: true and no
+  // provider configured: if every content field is already covered by a
+  // saved default, the AI must never be reached for at all, or this would
+  // throw exactly like the "reaches for the AI" test above proves it does
+  // when something really is missing.
+  const { initDb, getDb, json, deleteSetting } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  await initDb();
+  const db = getDb();
+  const listingId = 960128;
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960128').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960128,'Defaults Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960128);
+
+  try {
+    drafts.setDraftDefaults({
+      who_made: 'i_did', when_made: '2020_2026',
+      taxonomy_id: 2000, attributes: { 5: [{ valueId: 9, name: 'Blue' }] },
+      materials: ['Aluminum', 'PBT'],
+      is_supply: false, type: 'physical',
+      shipping_profile_id: 42, return_policy_id: 7, shop_section_id: 3,
+      item_weight_unit: 'g', item_dimensions_unit: 'cm',
+      is_taxable: true, should_auto_renew: true,
+    });
+
+    // Title still says "Resin" -- proving the saved materials default wins
+    // over what keyword-matching would otherwise have found there.
+    db.prepare(`INSERT INTO listing_drafts (listing_id, shop_id, source, etsy_state, etsy_snapshot, staged, created_at, updated_at)
+                VALUES (?, 960128, 'etsy', 'draft', ?, '{}', datetime('now'), datetime('now'))`)
+      .run(listingId, json({
+        listing_id: listingId, title: 'Resin Anime Keycap', description: 'A description already.',
+        price: { amount: 3999, divisor: 100, currency_code: 'USD' }, quantity: 5,
+        tags: ['keycap'], materials: [],
+      }));
+
+    const result = await drafts.autofillMissing(listingId, { useAI: true });
+    for (const label of ['materials', 'category', 'category attributes', 'who made it', 'when made',
+      'listing type', 'supply/finished', 'shipping profile', 'return policy', 'shop section',
+      'weight unit', 'dimensions unit', 'tax setting', 'renewal setting']) {
+      assert(result.filled.includes(label), `expected "${label}" in filled, got ${JSON.stringify(result.filled)}`);
+    }
+
+    const after = drafts.get(listingId);
+    assert(JSON.stringify(after.merged.materials) === JSON.stringify(['Aluminum', 'PBT']),
+      `saved default should win over the title's own "Resin", got ${JSON.stringify(after.merged.materials)}`);
+    assert(after.merged.taxonomy_id === 2000, `taxonomy_id: ${after.merged.taxonomy_id}`);
+    assert(JSON.stringify(after.merged.attributes) === JSON.stringify({ 5: [{ valueId: 9, name: 'Blue' }] }),
+      `attributes: ${JSON.stringify(after.merged.attributes)}`);
+    assert(after.merged.who_made === 'i_did' && after.merged.when_made === '2020_2026', 'who/when made not applied');
+    assert(after.merged.is_supply === false, `is_supply: ${after.merged.is_supply}`);
+    assert(after.merged.type === 'physical', `type: ${after.merged.type}`);
+    assert(after.merged.shipping_profile_id === 42 && after.merged.return_policy_id === 7 && after.merged.shop_section_id === 3,
+      'shipping/return/section defaults not applied');
+    assert(after.merged.item_weight_unit === 'g' && after.merged.item_dimensions_unit === 'cm', 'unit defaults not applied');
+    assert(after.merged.is_taxable === true && after.merged.should_auto_renew === true, 'tax/renewal defaults not applied');
+  } finally {
+    deleteSetting('drafts.defaults');
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960128').run();
+    client.removeAccount(960128);
+  }
+});
+
 console.log('\nGuards');
 await check('a photo that fails to upload does not break the draft becoming a real listing', async () => {
   // Regression: a local draft with a staged photo that could not be

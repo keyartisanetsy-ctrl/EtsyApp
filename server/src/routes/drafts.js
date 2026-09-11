@@ -29,6 +29,15 @@ router.post('/choices/processing-profile', asyncRoute(async (req, res) => {
   res.status(201).json(await drafts.createProcessingProfile(req.body ?? {}));
 }));
 
+/**
+ * What "Fill without AI" (and the defaultable part of "Fill with AI") fill
+ * in first, before guessing at anything: this shop's own usual category,
+ * materials, who/when-made, shipping/return/section and settings. Ahead of
+ * the /:id routes so "defaults" is never swallowed as a listing id.
+ */
+router.get('/defaults', asyncRoute(async (req, res) => res.json(drafts.getDraftDefaults())));
+router.put('/defaults', asyncRoute(async (req, res) => res.json(drafts.setDraftDefaults(req.body ?? {}))));
+
 /** Start one here. Etsy sees nothing until it is pushed. */
 router.post('/', asyncRoute(async (req, res) => res.json(drafts.createLocal(req.body ?? {}))));
 

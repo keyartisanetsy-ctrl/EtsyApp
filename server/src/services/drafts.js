@@ -17,7 +17,7 @@
  * Pushing goes through the same write queue as everything else, so Etsy never
  * sees two writes from this app at once.
  */
-import { getDb, json, parse, audit } from '../db/index.js';
+import { getDb, json, parse, audit, getSetting, setSetting } from '../db/index.js';
 import { activeShopId, requireShopId } from '../etsy/shop.js';
 import { call } from '../etsy/client.js';
 import { badRequest, notFound } from '../lib/errors.js';
@@ -411,8 +411,55 @@ export function remove(listingId) {
   return { removed: n, listingId: id };
 }
 
-/** Which of these a draft is missing, in the order the button reports them. */
+/** Which of these a draft can be missing, in the order the button reports them. */
 const AUTOFILL_FIELDS = ['materials', 'tags', 'taxonomy_id', 'description', 'who_made', 'when_made'];
+
+// Settings-like fields: this shop's own defaults are the only way any of
+// these ever gets filled -- neither the AI nor plain lookups guess at a
+// shipping profile or a tax setting from a title, and should not.
+const DEFAULTABLE_FIELDS = ['who_made', 'when_made', 'materials', 'is_supply', 'type',
+  'shipping_profile_id', 'return_policy_id', 'shop_section_id',
+  'item_weight_unit', 'item_dimensions_unit', 'is_taxable', 'should_auto_renew'];
+
+const DEFAULT_FIELD_LABELS = {
+  who_made: 'who made it', when_made: 'when made', materials: 'materials',
+  is_supply: 'supply/finished', type: 'listing type',
+  shipping_profile_id: 'shipping profile', return_policy_id: 'return policy',
+  shop_section_id: 'shop section', item_weight_unit: 'weight unit',
+  item_dimensions_unit: 'dimensions unit', is_taxable: 'tax setting',
+  should_auto_renew: 'renewal setting',
+};
+
+const DEFAULTS_KEY = 'drafts.defaults';
+
+/**
+ * A seller who lists one kind of thing over and over (this shop's keycaps)
+ * picks the same category, the same materials, the same who/when-made,
+ * the same shipping and processing setup on almost every listing. Saved
+ * here once and applied by the autofill button from then on, so "fill the
+ * gaps" means "use what I always use" first, and only guesses at whatever
+ * this shop has never told it.
+ *
+ * Deliberately outside SETTING_DEFS/listSettings(): taxonomy_id and
+ * attributes have no business ever reaching the generic settings screen,
+ * which would render a plain number box for exactly the field this app
+ * promises never to show one for. This is edited from its own picker in
+ * the draft desk instead.
+ */
+export function getDraftDefaults() {
+  return parse(getSetting(DEFAULTS_KEY, '{}'), {}) ?? {};
+}
+
+export function setDraftDefaults(patch = {}) {
+  const current = getDraftDefaults();
+  const merged = { ...current };
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null || v === undefined || v === '' || (Array.isArray(v) && !v.length)) delete merged[k];
+    else merged[k] = v;
+  }
+  setSetting(DEFAULTS_KEY, JSON.stringify(merged));
+  return merged;
+}
 
 function missingFields(merged) {
   return {
@@ -422,7 +469,42 @@ function missingFields(merged) {
     description: !merged.description?.trim(),
     who_made: !merged.who_made,
     when_made: !merged.when_made,
+    is_supply: merged.is_supply == null,
+    type: !merged.type,
+    shipping_profile_id: !merged.shipping_profile_id,
+    return_policy_id: !merged.return_policy_id,
+    shop_section_id: !merged.shop_section_id,
+    item_weight_unit: !merged.item_weight_unit,
+    item_dimensions_unit: !merged.item_dimensions_unit,
+    is_taxable: merged.is_taxable == null,
+    should_auto_renew: merged.should_auto_renew == null,
   };
+}
+
+/** Whatever this shop has saved as "what I always use", applied wherever the field is actually empty. */
+function applyDraftDefaults(missing, defaults) {
+  const patch = {};
+  const filled = [];
+
+  for (const key of DEFAULTABLE_FIELDS) {
+    if (!missing[key]) continue;
+    const value = defaults[key];
+    const has = key === 'materials' ? value?.length > 0 : value !== undefined && value !== null && value !== '';
+    if (!has) continue;
+    patch[key] = value;
+    filled.push(DEFAULT_FIELD_LABELS[key] ?? key);
+  }
+
+  if (missing.taxonomy_id && defaults.taxonomy_id) {
+    patch.taxonomy_id = defaults.taxonomy_id;
+    filled.push('category');
+    if (defaults.attributes && Object.keys(defaults.attributes).length) {
+      patch.attributes = defaults.attributes;
+      filled.push('category attributes');
+    }
+  }
+
+  return { patch, filled };
 }
 
 /**
@@ -550,11 +632,19 @@ async function autofillWithRules(merged, missing) {
  * itself. Nothing already filled in is ever touched, so a product that
  * only needs a category does not also get its materials guessed at.
  *
- * Two ways to fill them: `useAI` (the default) asks the AI, which can also
- * write a description; `useAI: false` uses plain lookups instead -- a
- * materials dictionary, the title's own words, and Etsy's own taxonomy
- * search -- with no AI call, no API key needed, and no cost, at the price
- * of not being able to write a description at all.
+ * Two passes:
+ *   1. This shop's own saved defaults (see getDraftDefaults) -- who made
+ *      it, when, the category, materials, shipping/return/section,
+ *      tax/renewal, the units this shop always uses. Applied first,
+ *      because a seller who lists the same kind of thing over and over
+ *      wants "fill the gaps" to mean "use what I always use", not a guess.
+ *   2. Whatever is still missing after that (no default saved for it, or
+ *      a field defaults cannot touch at all -- description, tags) goes to
+ *      whichever engine the button asked for: `useAI` (the default) asks
+ *      the AI, which can also write a description; `useAI: false` uses
+ *      plain lookups instead -- a materials dictionary, the title's own
+ *      words, and Etsy's own taxonomy search -- no AI call, no API key,
+ *      no cost, at the price of not being able to write a description.
  *
  * Everything it comes back with is staged, never sent to Etsy on its own --
  * the normal "what will change" review before Send still applies.
@@ -562,17 +652,31 @@ async function autofillWithRules(merged, missing) {
 export async function autofillMissing(listingId, { useAI = true } = {}) {
   const draft = get(listingId);
   const merged = draft.merged;
-
   const missing = missingFields(merged);
-  const wanted = AUTOFILL_FIELDS.filter((k) => missing[k]);
-  if (!wanted.length) return { filled: [], unresolved: [], wanted: [], usedAI: useAI, note: 'Nothing here is missing.' };
 
-  const { patch, filled, unresolved = [] } = useAI
-    ? await autofillWithAI(merged, missing)
-    : await autofillWithRules(merged, missing);
+  // Pass 1: this shop's own saved defaults. Cheap and pure -- always worth
+  // trying, whether or not the content fields below need an engine at all.
+  const defaults = getDraftDefaults();
+  const { patch, filled } = applyDraftDefaults(missing, defaults);
+  const stillMissing = { ...missing };
+  for (const key of Object.keys(patch)) stillMissing[key] = false;
+
+  // Pass 2: the AI or plain lookups, but only for the content fields
+  // (materials/tags/category/description/who+when-made) and only for
+  // whichever of those a default did not already cover -- a shipping
+  // profile or a tax setting is never something either engine guesses at.
+  const wanted = AUTOFILL_FIELDS.filter((k) => missing[k]);
+  let unresolved = [];
+  if (AUTOFILL_FIELDS.some((k) => stillMissing[k])) {
+    const rest = useAI ? await autofillWithAI(merged, stillMissing) : await autofillWithRules(merged, stillMissing);
+    Object.assign(patch, rest.patch);
+    filled.push(...rest.filled);
+    unresolved = rest.unresolved ?? [];
+  }
 
   if (Object.keys(patch).length) stage(listingId, patch);
-  return { filled, unresolved, patch, wanted, usedAI: useAI };
+  const note = filled.length ? undefined : 'Nothing here is missing.';
+  return { filled, unresolved, patch, wanted, usedAI: useAI, note };
 }
 
 /**
