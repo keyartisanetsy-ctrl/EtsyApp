@@ -4,13 +4,14 @@
  * skipped while the shop is not connected.
  */
 import { createLogger } from './lib/logger.js';
-import config from './config.js';
+import config, { ROOT } from './config.js';
 import { readSetting } from './services/settings.js';
 import { getStoredToken } from './etsy/client.js';
 import { syncTracking, refreshStaleFlags } from './services/tracking/index.js';
 import { syncReceipts } from './services/sync.js';
 import { ensureRates } from './services/fx.js';
 import { scanInbox } from './services/productstudio.js';
+import { checkForUpdate, applyUpdate } from '../../scripts/self-update.mjs';
 
 const log = createLogger('scheduler');
 const timers = [];
@@ -61,6 +62,34 @@ export function startScheduler() {
       if (r.failed) log.warn(`product studio: ${r.failed} file(s) could not be read, moved to "failed"`);
     }).catch((err) => log.warn(`product studio inbox: ${err.message}`));
   }, 20_000).unref());
+
+  // Opt-in (AUTO_UPDATE=1 in .env): pull in a newer commit from this app's
+  // own branch on its own, instead of someone having to re-run the VDS
+  // setup script by hand every time a fix ships. AUTO_UPDATE_RESTART=1
+  // additionally exits the process once an update is installed, which is
+  // only safe under a supervisor that restarts it (NSSM on the VDS setup
+  // sets both) -- without that flag the new code is fetched and built, and
+  // just waits for the next manual restart to actually run.
+  if (/^(1|true|yes|on)$/i.test(process.env.AUTO_UPDATE || '')) {
+    const restart = /^(1|true|yes|on)$/i.test(process.env.AUTO_UPDATE_RESTART || '');
+    const runCheck = async () => {
+      const status = await checkForUpdate(ROOT);
+      if (!status.hasUpdate) return;
+      log.info(`update available (${status.current?.slice(0, 7)} -> ${status.latest.slice(0, 7)}), installing...`);
+      try {
+        const r = await applyUpdate(ROOT, { restart });
+        log.info(r.restarting
+          ? `updated to ${r.updatedTo.slice(0, 7)}, restarting now`
+          : `updated to ${r.updatedTo.slice(0, 7)} -- restart the app to use it`);
+      } catch (err) {
+        log.warn(`auto-update failed, still running the previous version: ${err.message}`);
+      }
+    };
+    setTimeout(() => runCheck().catch((e) => log.warn(`update check: ${e.message}`)), 60_000).unref();
+    timers.push(setInterval(() => {
+      runCheck().catch((e) => log.warn(`update check: ${e.message}`));
+    }, 30 * 60_000).unref());
+  }
 
   log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every 30m, drop folder every 20s)`);
 }

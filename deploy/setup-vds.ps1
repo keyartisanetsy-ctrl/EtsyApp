@@ -88,6 +88,11 @@ Invoke-Native -Exe $nodeExe -CallArgs @('--version')
 Section "Downloading the latest app code..."
 $zip = Join-Path $ToolsDir 'EtsyApp.zip'
 Invoke-WebRequest -Uri 'https://github.com/keyartisanetsy-ctrl/EtsyApp/archive/refs/heads/claude/etsy-bulk-management-app-q3enu5.zip' -OutFile $zip
+# What was just downloaded, so the app's own auto-update check (below) knows
+# it already has this and does not immediately redownload the same thing.
+try {
+  $LatestSha = (Invoke-RestMethod -Uri 'https://api.github.com/repos/keyartisanetsy-ctrl/EtsyApp/commits/claude/etsy-bulk-management-app-q3enu5' -Headers @{ 'User-Agent' = 'EtsyCommandCenter' }).sha
+} catch { $LatestSha = $null }
 $extractTo = Join-Path $ToolsDir 'extract'
 Remove-Item $extractTo -Recurse -Force -ErrorAction SilentlyContinue
 Expand-Archive -Path $zip -DestinationPath $extractTo -Force
@@ -103,6 +108,11 @@ Set-Location $AppDir
 Section "Installing and building the app (first run downloads dependencies - a few minutes)..."
 Invoke-Native -Exe 'npm' -CallArgs @('run', 'setup')
 Invoke-Native -Exe 'npm' -CallArgs @('run', 'build')
+
+if ($LatestSha) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $AppDir 'data') | Out-Null
+  Set-Content -Path (Join-Path $AppDir 'data\.installed-commit') -Value $LatestSha -NoNewline
+}
 
 # --- .env / app password -----------------------------------------------------
 $EnvFile = Join-Path $AppDir '.env'
@@ -121,6 +131,19 @@ if ($envText -match '(?m)^HOST=.*$') {
   $envText = $envText -replace '(?m)^HOST=.*$', 'HOST=127.0.0.1'
 } else {
   $envText += "`nHOST=127.0.0.1`n"
+}
+# From here on the app checks its own branch every 30 minutes and updates
+# itself -- re-running this whole script by hand is only needed again if
+# something about the VDS itself changes, not for picking up an app fix.
+# AUTO_UPDATE_RESTART is safe specifically because EtsyCommandCenter is an
+# NSSM service below, which restarts it automatically on exit.
+foreach ($pair in @('AUTO_UPDATE=1', 'AUTO_UPDATE_RESTART=1')) {
+  $envKey = $pair.Split('=')[0]
+  if ($envText -match "(?m)^$envKey=.*$") {
+    $envText = $envText -replace "(?m)^$envKey=.*$", $pair
+  } else {
+    $envText += "`n$pair`n"
+  }
 }
 Set-Content -Path $EnvFile -Value $envText -NoNewline
 $AppPassword = (Select-String -Path $EnvFile -Pattern '^APP_PASSWORD=(.+)$').Matches[0].Groups[1].Value
