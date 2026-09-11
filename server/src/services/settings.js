@@ -79,8 +79,16 @@ export const SETTING_DEFS = {
   'pricing.discount_percent': { env: String(config.pricing.discountPercent), def: '30', label: 'Discount percentage' },
   'orders.ship_days_min':  { env: '', def: '2', label: 'Expected dispatch: minimum business days' },
   'orders.ship_days_max':  { env: '', def: '5', label: 'Expected dispatch: maximum business days' },
-  'orders.default_carrier':   { env: '', def: '', label: 'Default carrier for bulk tracking' },
+  'orders.default_carrier':   { env: '', def: 'Yunexpress', label: 'Default carrier when adding tracking' },
   'orders.notify_buyer':      { env: '', def: 'true', label: 'Email the buyer when tracking is added' },
+  'orders.default_note':      { env: '', def:
+    'Great news! Your order has been shipped and is on its way to you. \u{1F69A}✨\n\n'
+    + 'Just a quick note: As mentioned in the product listing, orders ship from Hong Kong, though they may '
+    + 'appear as China in tracking. If you have any issues or questions about your purchase, we’re here '
+    + 'to help. Simply reach out, and we’ll work to resolve it as swiftly as possible.\n\n'
+    + 'Thank you for choosing us, and we hope you love your new keycaps!\n\nBest regards, \u{1F60A}',
+    label: 'Default note to buyer when adding tracking' },
+  'orders.ship_origin_country': { env: '', def: 'HK', label: 'Where parcels ship from (ISO country code, used to fetch Etsy’s carrier list)' },
 };
 
 export function readSetting(key) {

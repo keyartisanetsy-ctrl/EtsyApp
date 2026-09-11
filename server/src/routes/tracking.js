@@ -4,7 +4,7 @@ import ExcelJS from 'exceljs';
 import { asyncRoute, int, bool, list, required } from '../lib/http.js';
 import * as tracking from '../services/tracking/index.js';
 import { STATUS, STATUS_LABELS } from '../services/tracking/status.js';
-import { trackingUrl } from '../services/settings.js';
+import { trackingUrl, readSetting } from '../services/settings.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -20,6 +20,16 @@ router.get('/', asyncRoute(async (req, res) => {
 }));
 
 router.get('/summary', asyncRoute(async (req, res) => res.json(tracking.trackingSummary())));
+
+/** The carriers Etsy recognises for a ship-from country, plus the shop's
+ *  own defaults, in one call -- everything a "add tracking" form needs. */
+router.get('/carriers', asyncRoute(async (req, res) => {
+  res.json({
+    carriers: await tracking.carriersFor(req.query.country),
+    defaultCarrier: readSetting('orders.default_carrier'),
+    defaultNote: readSetting('orders.default_note'),
+  });
+}));
 
 router.get('/statuses', asyncRoute(async (req, res) => {
   res.json({ statuses: Object.values(STATUS), labels: STATUS_LABELS });
@@ -46,7 +56,10 @@ router.post('/bulk', asyncRoute(async (req, res) => {
 
   const result = await tracking.addTracking(entries, {
     pushToEtsy: body.pushToEtsy !== false,
-    noteToBuyer: body.noteToBuyer ?? '',
+    // Left undefined rather than '' when the caller says nothing at all, so
+    // addTracking can tell "nothing sent" from "cleared on purpose" and fill
+    // in the shop's own default note only for the former.
+    noteToBuyer: body.noteToBuyer,
     sendBcc: !!body.sendBcc,
     dryRun: !!body.dryRun,
   });
@@ -77,7 +90,7 @@ router.post('/bulk/upload', upload.single('file'), asyncRoute(async (req, res) =
 
   const result = await tracking.addTracking(entries, {
     pushToEtsy: req.body.pushToEtsy !== 'false',
-    noteToBuyer: req.body.noteToBuyer ?? '',
+    noteToBuyer: req.body.noteToBuyer,
     sendBcc: bool(req.body.sendBcc),
   });
   res.json({ ...result, parseErrors: errors });

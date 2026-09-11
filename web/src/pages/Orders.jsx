@@ -698,8 +698,9 @@ function OrderDetail({ id, onClose, onChanged }) {
 
           {tab === 'tracking' && (
             <>
+              <AddTrackingForm receiptId={id} onAdded={() => { reload(); onChanged(); }} />
               {order.shipments.length === 0
-                ? <Empty icon="➤" title="No tracking yet">Add a number from the Orders list or the Tracking board.</Empty>
+                ? <Empty icon="➤" title="No tracking yet">Add it above.</Empty>
                 : order.shipments.map((s) => (
                     <div key={s.trackingCode} className="card mb8">
                       <div className="flex">
@@ -748,6 +749,79 @@ function OrderDetail({ id, onClose, onChanged }) {
   );
 }
 
+/**
+ * One order, one tracking number -- the quick path, instead of going
+ * through the bulk paste box for a single parcel. Carrier suggestions come
+ * from Etsy's own getShippingCarriers for the shop's ship-from country;
+ * carrier_name itself is a free string on Etsy's side (its own docs: use
+ * "other" only when you don't have a real name to give it), so the field
+ * stays a plain text input with those suggestions rather than a locked
+ * dropdown -- a courier Etsy has never heard of, like Yunexpress, still
+ * goes through exactly as typed.
+ */
+function AddTrackingForm({ receiptId, onAdded }) {
+  const { data } = useAsync(() => api.get('/tracking/carriers').catch(() => null), []);
+  const [code, setCode] = useState('');
+  const [carrier, setCarrier] = useState('');
+  const [note, setNote] = useState('');
+  const [noteTouched, setNoteTouched] = useState(false);
+  const [pushToEtsy, setPushToEtsy] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const showError = useErrorToast();
+
+  React.useEffect(() => {
+    if (data && !carrier) setCarrier(data.defaultCarrier || '');
+    if (data && !noteTouched) setNote(data.defaultNote || '');
+  }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const submit = async () => {
+    if (!code.trim()) return;
+    setBusy(true);
+    try {
+      const r = await api.post('/tracking/bulk', {
+        entries: [{ receiptId, trackingCode: code.trim().toUpperCase(), carrierName: carrier.trim() || null }],
+        pushToEtsy,
+        noteToBuyer: pushToEtsy ? note : '',
+      });
+      if (r.failed) throw new Error(r.results?.[0]?.error || 'Etsy would not take it');
+      toast({ kind: 'ok', title: 'Tracking added', body: pushToEtsy ? 'Sent to Etsy — the buyer has been notified.' : 'Stored locally.' });
+      setCode('');
+      onAdded();
+    } catch (err) { showError(err, 'Could not add tracking'); } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="card mb16" style={{ padding: 12 }}>
+      <div className="section-title" style={{ marginTop: 0 }}>Add tracking</div>
+      <div className="split">
+        <div className="field">
+          <label>Tracking number</label>
+          <input className="input" value={code} onChange={(e) => setCode(e.target.value)} placeholder="YT2607600700845852" />
+        </div>
+        <div className="field">
+          <label>Carrier</label>
+          <input className="input" list="etsy-carriers" value={carrier} onChange={(e) => setCarrier(e.target.value)} placeholder="e.g. Yunexpress" />
+          <datalist id="etsy-carriers">
+            {(data?.carriers ?? []).map((c) => <option key={c.id} value={c.name} />)}
+          </datalist>
+        </div>
+      </div>
+      <Checkbox checked={pushToEtsy} onChange={setPushToEtsy} label="Send to Etsy (marks the order shipped and emails the buyer)" />
+      {pushToEtsy && (
+        <div className="field mt8">
+          <label>Note to buyer</label>
+          <textarea className="textarea" rows={5} value={note}
+                    onChange={(e) => { setNote(e.target.value); setNoteTouched(true); }} />
+        </div>
+      )}
+      <button className="btn primary mt8" onClick={submit} disabled={busy || !code.trim()}>
+        {busy ? <Spinner /> : '➤'} Add tracking
+      </button>
+    </div>
+  );
+}
+
 /** Paste order/tracking pairs, preview the parse, then push to Etsy. */
 function BulkTrackingModal({ open, onClose, onDone }) {
   const [text, setText] = useState('');
@@ -758,6 +832,9 @@ function BulkTrackingModal({ open, onClose, onDone }) {
   const [result, setResult] = useState(null);
   const toast = useToast();
   const showError = useErrorToast();
+
+  const { data: defaults } = useAsync(() => (open ? api.get('/tracking/carriers').catch(() => null) : null), [open], { immediate: open });
+  React.useEffect(() => { if (open && defaults && !note) setNote(defaults.defaultNote || ''); }, [open, defaults]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!open) return null;
 
@@ -811,6 +888,7 @@ function BulkTrackingModal({ open, onClose, onDone }) {
                   placeholder={'3456789012, LP00432300758472, YunExpress\n3456789013  YT2024001234567'} />
         <div className="hint">
           Order id first, then the tracking number, then an optional carrier. Commas, semicolons or tabs all work.
+          Leave the carrier off a line and it defaults to <strong>{defaults?.defaultCarrier || 'the shop default'}</strong>.
         </div>
       </div>
 
@@ -825,7 +903,8 @@ function BulkTrackingModal({ open, onClose, onDone }) {
       {pushToEtsy && (
         <div className="field mt8">
           <label>Note to buyer (optional)</label>
-          <input className="input" value={note} onChange={(e) => setNote(e.target.value)} />
+          <textarea className="textarea" rows={5} value={note} onChange={(e) => setNote(e.target.value)} />
+          <div className="hint">Pre-filled from the shop's default note (Settings). Cleared means no note is sent.</div>
         </div>
       )}
 

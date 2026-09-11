@@ -132,10 +132,29 @@ export function startsAsInTransit(code) {
   return prefixes.some((p) => upper.startsWith(p));
 }
 
-export async function addTracking(entries, { pushToEtsy = true, noteToBuyer = '', sendBcc = false, dryRun = false } = {}) {
+/**
+ * Etsy's own list of carriers it recognises for a given ship-from country --
+ * the same list its "mark as shipped" dialog offers. `carrier_name` on
+ * createReceiptShipment is a free string, not limited to this list (Etsy's
+ * own docs: "If the carrier is not supported, you may use `other`... " --
+ * implying anything else, like a courier Etsy has never heard of, can just
+ * be sent as its real name instead), so this is offered as a convenience
+ * list, not a hard constraint on what can be typed.
+ */
+export async function carriersFor(countryIso) {
+  const country = String(countryIso || readSetting('orders.ship_origin_country') || 'HK').toUpperCase();
+  const res = await call('getShippingCarriers', { origin_country_iso: country });
+  return (res?.results ?? []).map((c) => ({ id: c.shipping_carrier_id, name: c.name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function addTracking(entries, { pushToEtsy = true, noteToBuyer, sendBcc = false, dryRun = false } = {}) {
   const db = getDb();
   const shopId = pushToEtsy ? requireShopId() : null;
   const defaultCarrier = readSetting('orders.default_carrier');
+  // A caller that never mentions a note at all gets the shop's own default
+  // ("" is left alone -- clearing the field on purpose means no note).
+  const note = noteToBuyer === undefined ? readSetting('orders.default_note') : noteToBuyer;
   const results = [];
 
   for (const entry of entries) {
@@ -149,7 +168,7 @@ export async function addTracking(entries, { pushToEtsy = true, noteToBuyer = ''
       db.prepare(`INSERT INTO shipments (shop_id, receipt_id, tracking_code, carrier_name, note_to_buyer, send_bcc)
                   VALUES (?,?,?,?,?,?)
                   ON CONFLICT(receipt_id, tracking_code) DO UPDATE SET carrier_name = excluded.carrier_name`)
-        .run(shopIdForEntry, entry.receiptId, entry.trackingCode, carrier, noteToBuyer || null, sendBcc ? 1 : 0);
+        .run(shopIdForEntry, entry.receiptId, entry.trackingCode, carrier, note || null, sendBcc ? 1 : 0);
 
       // A YunExpress number (YT...) only exists once the parcel is with them,
       // so it starts in transit rather than waiting for the first scan. Other
@@ -165,7 +184,7 @@ export async function addTracking(entries, { pushToEtsy = true, noteToBuyer = ''
       if (pushToEtsy) {
         const body = { tracking_code: entry.trackingCode };
         if (carrier) body.carrier_name = carrier;
-        if (noteToBuyer) body.note_to_buyer = noteToBuyer;
+        if (note) body.note_to_buyer = note;
         if (sendBcc) body.send_bcc = true;
 
         await call('createReceiptShipment', { shop_id: shopId, receipt_id: entry.receiptId }, { body });

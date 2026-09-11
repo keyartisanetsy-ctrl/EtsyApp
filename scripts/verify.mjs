@@ -2499,6 +2499,50 @@ await check('a draft Etsy no longer has is removed from the desk on the next pul
   }
 });
 
+await check('adding tracking without a carrier or note falls back to the shop defaults', async () => {
+  // orders.default_carrier ships as "Yunexpress" and orders.default_note as
+  // the shop's own template; a caller (the UI, a bulk paste line with only
+  // two columns) that says nothing about either should get both rather than
+  // a blank carrier_name/note_to_buyer. pushToEtsy: false keeps this to a
+  // pure DB check -- no live Etsy call needed to prove the fallback itself.
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const settings = await import('../server/src/services/settings.js');
+  const tracking = await import('../server/src/services/tracking/index.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960119').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960119,'Tracking Defaults Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960119);
+
+  try {
+    assert(settings.readSetting('orders.default_carrier') === 'Yunexpress',
+      `expected the default carrier to be Yunexpress, got ${settings.readSetting('orders.default_carrier')}`);
+    assert(/keycaps/i.test(settings.readSetting('orders.default_note')),
+      'the default note to buyer does not look like the shop\'s own template');
+
+    // No carrier, no note mentioned at all -> both fall back.
+    await tracking.addTracking([{ receiptId: 9990001, trackingCode: 'TESTDEFAULT001' }], { pushToEtsy: false });
+    const row = db.prepare('SELECT carrier_name, note_to_buyer FROM shipments WHERE receipt_id = ?').get(9990001);
+    assert(row.carrier_name === 'Yunexpress', `expected Yunexpress, got ${row.carrier_name}`);
+    assert(/keycaps/i.test(row.note_to_buyer || ''), 'the default note was not applied');
+
+    // An explicit empty note means "no note", not "use the default".
+    await tracking.addTracking([{ receiptId: 9990002, trackingCode: 'TESTDEFAULT002', carrierName: 'DHL' }],
+      { pushToEtsy: false, noteToBuyer: '' });
+    const row2 = db.prepare('SELECT carrier_name, note_to_buyer FROM shipments WHERE receipt_id = ?').get(9990002);
+    assert(row2.carrier_name === 'DHL', `an explicit carrier should not be overridden, got ${row2.carrier_name}`);
+    assert(!row2.note_to_buyer, `an explicitly empty note should stay empty, got ${JSON.stringify(row2.note_to_buyer)}`);
+  } finally {
+    db.prepare('DELETE FROM shipments WHERE receipt_id IN (9990001, 9990002)').run();
+    db.prepare('DELETE FROM tracking WHERE shop_id = 960119').run();
+    db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960119').run();
+    client.removeAccount(960119);
+  }
+});
+
 await check('unauthenticated Etsy write is refused with guidance', async () => {
   const { status, body } = await req('/api/listings', {
     method: 'POST',
