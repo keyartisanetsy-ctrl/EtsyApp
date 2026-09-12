@@ -22,11 +22,19 @@ echo "Do not open it yourself - too early and it will say"
 echo "\"site cannot be reached\"."
 echo
 echo "The first run downloads what the app needs (a minute or two)."
-echo "Leave this window OPEN while you use the app."
+echo "Leave this window OPEN while you use the app -- closing it is"
+echo "the only way to stop it. It restarts itself on its own after"
+echo "installing an automatic update, and keeps this same window."
 echo
 
-npm start
-
-echo
-echo "The app stopped. Read any error above."
-read -r -p "Press Enter to close..."
+while true; do
+  npm start
+  echo
+  echo "------------------------------------------------------------"
+  echo "The app just stopped. If that was an automatic update, it"
+  echo "restarts itself below in a few seconds. If something actually"
+  echo "crashed, read the error above -- closing this window stops"
+  echo "the restart loop."
+  echo "------------------------------------------------------------"
+  sleep 5
+done

@@ -788,21 +788,17 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
     // it is a real edit.
     if (!pendingPersonalization || !Object.keys(pendingPersonalization).length) return;
     try {
-      if (pendingPersonalization.isPersonalizable === false) {
+      if (pendingPersonalization.isPersonalizable === false || !pendingPersonalization.questions?.length) {
         await caller('deleteListingPersonalization', { shop_id: shopId, listing_id: targetId });
         return;
       }
-      await caller('updateListingPersonalization', { shop_id: shopId, listing_id: targetId }, {
-        body: {
-          personalization_questions: [{
-            question_text: pendingPersonalization.questionText || 'Personalization',
-            instructions: pendingPersonalization.instructions ?? '',
-            question_type: 'text_input',
-            required: !!pendingPersonalization.isRequired,
-            max_allowed_characters: pendingPersonalization.charCountMax ?? 256,
-          }],
-        },
-      });
+      await caller('updateListingPersonalization',
+        { shop_id: shopId, listing_id: targetId, supports_multiple_personalization_questions: true }, {
+          body: {
+            personalization_questions: pendingPersonalization.questions
+              .slice(0, listings.MAX_PERSONALIZATION_QUESTIONS).map(listings.toEtsyQuestion),
+          },
+        });
     } catch (err) { log.warn(`draft ${id}: could not set personalization on ${targetId}: ${err.message}`); }
   };
 
@@ -993,6 +989,18 @@ export async function shopChoices() {
         id: p.return_policy_id,
         accepts: !!p.accepts_returns,
         days: p.return_deadline,
+      }));
+    }),
+
+    // Etsy requires disclosing who actually makes a listing when it is made
+    // by someone other than the seller -- a shop with none configured just
+    // gets an empty list back here, not an error.
+    settle('productionPartners', async () => {
+      const r = await call('getShopProductionPartners', { shop_id: shopId });
+      return (r?.results ?? []).map((p) => ({
+        id: p.production_partner_id,
+        name: p.partner_name,
+        location: p.location,
       }));
     }),
   ]);

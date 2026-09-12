@@ -7,6 +7,7 @@ import {
   useAsync, useToast, useErrorToast, fmtMoney, fmtAgo, DecimalInput,
 } from '../components/ui.jsx';
 import { CategoryPicker } from './NewListing.jsx';
+import { PersonalizationEditor } from '../components/Personalization.jsx';
 
 const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007',
   '2000_2006', '1990s', '1980s', '1970s', '1960s', '1950s', '1940s', '1930s', '1920s', '1910s',
@@ -569,6 +570,30 @@ function DraftEditor({ id, onClose, onChanged }) {
               'Optional.')}
           </div>
 
+          {(choices?.productionPartners ?? []).length > 0 && (
+            <div className="field">
+              <label>
+                Production partner
+                {isChanged('production_partner_ids') && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
+              </label>
+              <div className="pill-row">
+                {choices.productionPartners.map((p) => {
+                  const picked = (merged.production_partner_ids ?? []).includes(p.id);
+                  return (
+                    <button key={p.id} type="button" className={`btn xs ${picked ? 'primary' : ''}`}
+                            onClick={() => {
+                              const current = merged.production_partner_ids ?? [];
+                              save({ production_partner_ids: picked ? current.filter((x) => x !== p.id) : [...current, p.id] });
+                            }}>
+                      {p.name}{p.location ? ` (${p.location})` : ''}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="hint">Required on an active listing when someone other than you makes it.</div>
+            </div>
+          )}
+
           <div className="section-title">Weight &amp; dimensions</div>
           <div className="split">
             <div className="field">
@@ -762,48 +787,6 @@ function MaterialsPicker({ value, changed, onChange }) {
             </div>
           )}
           <div className="hint">Select up to {MAX_MATERIALS}.</div>
-        </>
-      )}
-    </div>
-  );
-}
-
-/**
- * Not a real ShopListing field -- Etsy takes personalization as its own
- * resource (a list of questions), staged here as { isPersonalizable,
- * isRequired, charCountMax, instructions, questionText } the same way
- * category attributes are, and applied by push() with its own call once
- * the listing exists. Not prefilled from what Etsy already has: the
- * draft's snapshot never mirrors getListingPersonalization, the same
- * limitation attributes already have here.
- */
-function PersonalizationEditor({ value, changed, onChange }) {
-  const p = value && Object.keys(value).length ? value : {
-    isPersonalizable: false, isRequired: false, charCountMax: 256, instructions: '', questionText: 'Personalization',
-  };
-  return (
-    <div className="mb16">
-      {changed && <div className="mb4"><span className="badge amber">changed</span></div>}
-      <Checkbox checked={p.isPersonalizable} onChange={(v) => onChange({ ...p, isPersonalizable: v })}
-                label="Buyers can personalize this listing" />
-      {p.isPersonalizable && (
-        <>
-          <div className="field">
-            <label>Question shown to the buyer</label>
-            <input className="input" value={p.questionText} onChange={(e) => onChange({ ...p, questionText: e.target.value })} />
-          </div>
-          <div className="field">
-            <label>Instructions</label>
-            <input className="input" value={p.instructions} onChange={(e) => onChange({ ...p, instructions: e.target.value })} />
-          </div>
-          <div className="split">
-            <Checkbox checked={p.isRequired} onChange={(v) => onChange({ ...p, isRequired: v })} label="Required" />
-            <div className="field">
-              <label>Max characters</label>
-              <input className="input" type="number" value={p.charCountMax}
-                     onChange={(e) => onChange({ ...p, charCountMax: Number(e.target.value) })} />
-            </div>
-          </div>
         </>
       )}
     </div>

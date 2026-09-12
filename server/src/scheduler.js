@@ -16,6 +16,14 @@ import { checkForUpdate, applyUpdate } from '../../scripts/self-update.mjs';
 const log = createLogger('scheduler');
 const timers = [];
 
+/**
+ * True unless explicitly turned off. Used for the auto-update flags, which
+ * default to on -- unset or blank (an existing .env from before this
+ * default changed, or one that never mentioned the flag at all) reads as
+ * "on", same as a fresh one. Only an explicit 0/false/no/off opts out.
+ */
+export const enabledByDefault = (value) => !/^(0|false|no|off)$/i.test(value ?? '');
+
 export function startScheduler() {
   const trackingMinutes = Number(readSetting('tracking.sync_minutes')) || 180;
 
@@ -63,15 +71,19 @@ export function startScheduler() {
     }).catch((err) => log.warn(`product studio inbox: ${err.message}`));
   }, 20_000).unref());
 
-  // Opt-in (AUTO_UPDATE=1 in .env): pull in a newer commit from this app's
-  // own branch on its own, instead of someone having to re-run the VDS
-  // setup script by hand every time a fix ships. AUTO_UPDATE_RESTART=1
-  // additionally exits the process once an update is installed, which is
-  // only safe under a supervisor that restarts it (NSSM on the VDS setup
-  // sets both) -- without that flag the new code is fetched and built, and
-  // just waits for the next manual restart to actually run.
-  if (/^(1|true|yes|on)$/i.test(process.env.AUTO_UPDATE || '')) {
-    const restart = /^(1|true|yes|on)$/i.test(process.env.AUTO_UPDATE_RESTART || '');
+  // On by default -- pull in a newer commit from this app's own branch the
+  // moment this process starts, and every 30 minutes after, instead of
+  // someone having to notice a fix shipped and re-run anything by hand.
+  // Explicitly set AUTO_UPDATE=0 to turn this off entirely.
+  // AUTO_UPDATE_RESTART is also on by default now that both START-WINDOWS.bat
+  // and START-MAC-LINUX.command loop and relaunch "npm start" on their own
+  // when the process exits (the VDS setup's NSSM/systemd service always did
+  // this too) -- so restarting to pick up the new code is safe from every
+  // launch path this app ships. Someone running "npm start" directly in a
+  // terminal, without either wrapper, is the one case this is not safe for;
+  // set AUTO_UPDATE_RESTART=0 there if that matters.
+  if (enabledByDefault(process.env.AUTO_UPDATE)) {
+    const restart = enabledByDefault(process.env.AUTO_UPDATE_RESTART);
     const runCheck = async () => {
       const status = await checkForUpdate(ROOT);
       if (!status.hasUpdate) return;
@@ -85,7 +97,7 @@ export function startScheduler() {
         log.warn(`auto-update failed, still running the previous version: ${err.message}`);
       }
     };
-    setTimeout(() => runCheck().catch((e) => log.warn(`update check: ${e.message}`)), 60_000).unref();
+    setTimeout(() => runCheck().catch((e) => log.warn(`update check: ${e.message}`)), 5_000).unref();
     timers.push(setInterval(() => {
       runCheck().catch((e) => log.warn(`update check: ${e.message}`));
     }, 30 * 60_000).unref());

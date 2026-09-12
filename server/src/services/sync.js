@@ -23,6 +23,22 @@ export function variationLabel(propertyValues = []) {
 
 // ------------------------------------------------------------------ listings
 
+/**
+ * listing_images/listing_products/listing_videos all carry a foreign key onto
+ * listings(listing_id). Every caller that writes one of those tables is
+ * *supposed* to have already cached the parent listing first (saveListing
+ * does, in the right order) -- but a listing born from a local draft, or one
+ * reached through a narrower path that only ever touches its photos or
+ * inventory, has no guarantee of that. Rather than trust every current and
+ * future call site to get the ordering right, each of the write functions
+ * below calls this first: a stub row costs nothing to insert twice (IGNORE),
+ * and a real sync overwrites it with the full row moments later anyway.
+ */
+function ensureListingRow(db, listingId, shopId = activeShopId()) {
+  db.prepare('INSERT OR IGNORE INTO listings (listing_id, shop_id, synced_at) VALUES (?, ?, datetime(\'now\'))')
+    .run(listingId, shopId);
+}
+
 const upsertListing = (db) => db.prepare(`
   INSERT INTO listings (listing_id, shop_id, title, description, state, url,
     price_amount, price_divisor, price_currency, quantity, taxonomy_id, shop_section_id,
@@ -92,8 +108,24 @@ export function saveListing(listing) {
   })();
 }
 
+/**
+ * Drops any cached listing for this shop that was not in the set just seen
+ * from Etsy -- deleted there, so it should not keep showing up here forever.
+ * Cascades onto listing_images/listing_products via their own foreign keys.
+ */
+export function pruneMissingListings(shopId, keepIds) {
+  const db = getDb();
+  const cached = db.prepare('SELECT listing_id FROM listings WHERE shop_id IS ?').all(shopId).map((r) => r.listing_id);
+  const gone = cached.filter((id) => !keepIds.has(id));
+  if (gone.length) {
+    db.prepare(`DELETE FROM listings WHERE listing_id IN (${gone.map(() => '?').join(',')})`).run(...gone);
+  }
+  return gone.length;
+}
+
 export function saveImages(listingId, images = []) {
   const db = getDb();
+  ensureListingRow(db, listingId);
   const stmt = db.prepare(`
     INSERT INTO listing_images (listing_image_id, listing_id, rank, url_75x75, url_570xN, url_fullxfull, alt_text, raw)
     VALUES (?,?,?,?,?,?,?,?)
@@ -120,6 +152,7 @@ export function saveImages(listingId, images = []) {
 
 export function saveVideos(listingId, videos = []) {
   const db = getDb();
+  ensureListingRow(db, listingId);
   const stmt = db.prepare(`
     INSERT INTO listing_videos (video_id, listing_id, height, width, thumbnail_url, video_url, video_state, raw)
     VALUES (?,?,?,?,?,?,?,?)
@@ -135,6 +168,7 @@ export function saveVideos(listingId, videos = []) {
 /** Flattens Etsy's inventory payload into one row per variation (product). */
 export function saveInventory(listingId, inventory) {
   const db = getDb();
+  ensureListingRow(db, listingId);
   const products = inventory?.products || [];
   const stmt = db.prepare(`
     INSERT INTO listing_products (product_id, listing_id, sku, is_deleted, property_values,
@@ -254,16 +288,28 @@ export async function syncListings({
   states = LISTING_STATES, withInventory = true, withVariationImages = true, onProgress,
 } = {}) {
   const shopId = requireShopId();
-  const summary = { shopId, states: {}, listings: 0, products: 0, errors: [] };
+  const summary = { shopId, states: {}, listings: 0, products: 0, errors: [], removed: 0 };
+  const seen = new Set();
 
   for (const state of states) {
     const listings = await callAll('getListingsByShop',
       { shop_id: shopId, state, includes: ['Images', 'Videos'] },
       { onPage: (rows) => onProgress?.({ phase: 'listings', state, added: rows.length }) });
 
-    for (const l of listings) saveListing({ ...l, state: l.state || state });
+    for (const l of listings) { saveListing({ ...l, state: l.state || state }); seen.add(l.listing_id); }
     summary.states[state] = listings.length;
     summary.listings += listings.length;
+  }
+
+  // Every state Etsy has was just asked for above, so anything this shop had
+  // cached locally that did not come back in any of them is gone on Etsy's
+  // side (deleted, or moved to a state not in `states`) -- drop it here too,
+  // same as the draft desk already does when a draft disappears from Etsy.
+  // Only prune when every state was actually asked for; a caller that
+  // narrowed `states` on purpose (a filtered re-sync) should not have this
+  // treat everything outside that narrower set as deleted.
+  if (states.length === LISTING_STATES.length) {
+    summary.removed = pruneMissingListings(shopId, seen);
   }
 
   if (withInventory) {

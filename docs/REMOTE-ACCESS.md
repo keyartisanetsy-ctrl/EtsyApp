@@ -53,13 +53,14 @@ The `-ExecutionPolicy Bypass` only applies to this one run; it does not
 change anything system-wide. Check the services any time with
 `Get-Service EtsyCommandCenter, EtsyTunnel`.
 
-**You should not need to run this script again after this.** It turns on
-`AUTO_UPDATE` (and `AUTO_UPDATE_RESTART`, safe here specifically because
-`EtsyCommandCenter` is an NSSM service that restarts itself on exit) --
-from here on the app checks its own branch every 30 minutes and updates
-itself, rebuilding and restarting on its own when a fix ships. Re-run this
-script by hand only if something about the VDS itself changes (a fresh
-machine, Node got uninstalled, etc.), not to pick up an app update.
+**You should not need to run this script again after this.** Both
+`AUTO_UPDATE` and `AUTO_UPDATE_RESTART` are on by default now (this script
+still sets them explicitly, which is redundant but harmless) -- from here on
+the app checks its own branch the moment it starts, and every 30 minutes
+after, updating and restarting itself on its own when a fix ships; safe here
+because `EtsyCommandCenter` is an NSSM service that restarts itself on exit.
+Re-run this script by hand only if something about the VDS itself changes (a
+fresh machine, Node got uninstalled, etc.), not to pick up an app update.
 
 (The Linux script still uses Caddy with your own IP/hostname and needs
 inbound 80/443 open, at the OS and at whatever sits in front of the VDS. If

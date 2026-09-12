@@ -2729,7 +2729,13 @@ await check('pushing staged personalization on an existing draft sets it via upd
       }));
     drafts.stage(listingId, {
       title: 'Personalizable Keycap Set',
-      personalization: { isPersonalizable: true, isRequired: true, charCountMax: 40, instructions: 'Add your name', questionText: 'Name for the keycap?' },
+      personalization: {
+        isPersonalizable: true,
+        questions: [
+          { questionText: 'Name for the keycap?', instructions: 'Add your name', questionType: 'text_input', isRequired: true, charCountMax: 40 },
+          { questionText: 'Engraving font', questionType: 'dropdown', isRequired: false, options: ['Serif', 'Script', ''], addOnPrice: 2.5 },
+        ],
+      },
     });
 
     let sawUpdateListingPersonalization = false;
@@ -2741,10 +2747,12 @@ await check('pushing staged personalization on an existing draft sets it via upd
       if (operationId === 'updateListingPersonalization') {
         sawUpdateListingPersonalization = true;
         assert(args.listing_id === listingId, 'wrong listing_id on the personalization write');
-        const expected = { personalization_questions: [{
-          question_text: 'Name for the keycap?', instructions: 'Add your name',
-          question_type: 'text_input', required: true, max_allowed_characters: 40,
-        }] };
+        assert(args.supports_multiple_personalization_questions === true,
+          'multi-question support was not declared, so Etsy would only keep the first question');
+        const expected = { personalization_questions: [
+          { question_text: 'Name for the keycap?', instructions: 'Add your name', question_type: 'text_input', required: true, max_allowed_characters: 40 },
+          { question_text: 'Engraving font', instructions: '', question_type: 'dropdown', required: false, options: ['Serif', 'Script'], add_on_price: 2.5 },
+        ] };
         assert(JSON.stringify(opts.body) === JSON.stringify(expected), `wrong personalization body: ${JSON.stringify(opts.body)}`);
         return {};
       }
@@ -3051,6 +3059,109 @@ await check('saved shop defaults win over guessing, and cover fields neither eng
     deleteSetting('drafts.defaults');
     db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960128').run();
     client.removeAccount(960128);
+  }
+});
+
+await check('personalization questions map to and from Etsy\'s real multi-question shape', async () => {
+  const listings = await import('../server/src/services/listings.js');
+
+  // Text, dropdown, and a labeled file upload, each with their own
+  // type-specific fields plus an optional add-on price.
+  const toEtsy = listings.toEtsyQuestion({
+    questionText: 'Engraving text', instructions: 'Max 20 letters', questionType: 'text_input',
+    isRequired: true, charCountMax: 20, addOnPrice: '3.50',
+  });
+  assert(toEtsy.question_type === 'text_input' && toEtsy.max_allowed_characters === 20, 'text_input fields wrong');
+  assert(toEtsy.add_on_price === 3.5, `add-on price should be a plain number, got ${JSON.stringify(toEtsy.add_on_price)}`);
+  assert(!('options' in toEtsy) && !('max_allowed_files' in toEtsy), 'text_input leaked fields from other question types');
+
+  const dropdown = listings.toEtsyQuestion({
+    questionText: 'Font', questionType: 'dropdown', options: ['Serif', '', '  Script  ', 'Serif'],
+  });
+  assert(JSON.stringify(dropdown.options) === JSON.stringify(['Serif', 'Script', 'Serif']),
+    `dropdown options should be trimmed with blanks dropped, got ${JSON.stringify(dropdown.options)}`);
+  assert(!('add_on_price' in dropdown), 'no add-on price was set, so the field should be absent, not null/0');
+
+  const upload = listings.toEtsyQuestion({ questionText: 'Reference photo', questionType: 'labeled_upload', maxFiles: 3 });
+  assert(upload.max_allowed_files === 3 && upload.question_type === 'labeled_upload', 'upload fields wrong');
+
+  const unknown = listings.toEtsyQuestion({ questionText: 'X', questionType: 'not_a_real_type' });
+  assert(unknown.question_type === 'text_input', 'an unrecognised type should fall back to text_input, not be sent as-is');
+
+  // And the read side: Etsy's snake_case, Money-wrapped response back to
+  // the app's plain shape.
+  const back = listings.fromEtsyQuestion({
+    question_id: 55, question_text: 'Font', question_type: 'dropdown', required: false,
+    options: ['Serif'], add_on_price: { amount: 350, divisor: 100, currency_code: 'USD' },
+  });
+  assert(back.questionId === 55 && back.questionType === 'dropdown' && !back.isRequired, 'basic fields did not round-trip');
+  assert(back.addOnPrice === 3.5, `Money amount/divisor should collapse to a plain 3.5, got ${back.addOnPrice}`);
+  assert(JSON.stringify(back.options) === JSON.stringify(['Serif']), 'options did not round-trip');
+});
+
+await check('auto-update defaults to on -- only an explicit opt-out turns it off', async () => {
+  const { enabledByDefault } = await import('../server/src/scheduler.js');
+  for (const on of [undefined, '', '1', 'true', 'yes', 'on', 'garbage']) {
+    assert(enabledByDefault(on) === true, `expected ${JSON.stringify(on)} to be enabled by default`);
+  }
+  for (const off of ['0', 'false', 'no', 'off', 'FALSE', 'Off']) {
+    assert(enabledByDefault(off) === false, `expected ${JSON.stringify(off)} to be disabled`);
+  }
+});
+
+await check('a listing Etsy no longer has is pruned from the local cache on the next sync', async () => {
+  // Regression: syncListings only ever upserted what Etsy returned; nothing
+  // ever removed a listing this shop used to have once it was deleted on
+  // Etsy, so it kept showing up here forever.
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const sync = await import('../server/src/services/sync.js');
+  await initDb();
+  const db = getDb();
+
+  const shopId = 960133;
+  db.prepare('DELETE FROM listings WHERE shop_id = ?').run(shopId);
+  db.prepare(`INSERT INTO listings (listing_id, shop_id, title, state) VALUES
+    (5551001, ?, 'Kept listing', 'active'), (5551002, ?, 'Deleted on Etsy', 'active')`).run(shopId, shopId);
+
+  try {
+    const removed = sync.pruneMissingListings(shopId, new Set([5551001]));
+    assert(removed === 1, `expected 1 removed, got ${removed}`);
+    const left = db.prepare('SELECT listing_id FROM listings WHERE shop_id = ?').all(shopId).map((r) => r.listing_id);
+    assert(left.length === 1 && left[0] === 5551001, `expected only 5551001 left, got ${JSON.stringify(left)}`);
+  } finally {
+    db.prepare('DELETE FROM listings WHERE shop_id = ?').run(shopId);
+  }
+});
+
+await check('saveImages/saveVideos/saveInventory never hit a foreign key error, whatever order they run in', async () => {
+  // Regression: listing_images and listing_products both carry a foreign key
+  // onto listings(listing_id); any of these three being the first thing to
+  // touch a listing_id that was never cached (a listing born from a local
+  // draft, or one reached through a narrower path than a full sync) threw a
+  // raw "FOREIGN KEY constraint failed" instead of just writing the row.
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const sync = await import('../server/src/services/sync.js');
+  await initDb();
+  const db = getDb();
+
+  const listingId = 960134;
+  db.prepare('DELETE FROM listing_images WHERE listing_id = ?').run(listingId);
+  db.prepare('DELETE FROM listing_products WHERE listing_id = ?').run(listingId);
+  db.prepare('DELETE FROM listing_videos WHERE listing_id = ?').run(listingId);
+  db.prepare('DELETE FROM listings WHERE listing_id = ?').run(listingId);
+
+  try {
+    sync.saveImages(listingId, [{ listing_image_id: 700001, rank: 1, url_570xN: 'https://img.example.com/a.jpg' }]);
+    sync.saveVideos(listingId, [{ video_id: 700002, video_url: 'https://img.example.com/a.mp4' }]);
+    sync.saveInventory(listingId, { products: [{ product_id: 700003, sku: 'SKU-1', offerings: [{ offering_id: 1, price: { amount: 1000, divisor: 100, currency_code: 'USD' }, quantity: 5 }] }] });
+    const row = db.prepare('SELECT listing_id, first_image_url FROM listings WHERE listing_id = ?').get(listingId);
+    assert(row, 'no listings row exists even after all three writes');
+    assert(row.first_image_url === 'https://img.example.com/a.jpg', 'first_image_url was not backfilled');
+  } finally {
+    db.prepare('DELETE FROM listing_images WHERE listing_id = ?').run(listingId);
+    db.prepare('DELETE FROM listing_products WHERE listing_id = ?').run(listingId);
+    db.prepare('DELETE FROM listing_videos WHERE listing_id = ?').run(listingId);
+    db.prepare('DELETE FROM listings WHERE listing_id = ?').run(listingId);
   }
 });
 

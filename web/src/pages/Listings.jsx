@@ -8,6 +8,7 @@ import {
   useAsync, useDebounced, useToast, useErrorToast, fmtMoney, fmtDate, STATE_BADGE, DecimalInput,
 } from '../components/ui.jsx';
 import { CategoryPicker } from './NewListing.jsx';
+import { PersonalizationEditor } from '../components/Personalization.jsx';
 
 const LIMIT = 50;
 const STATES = ['active', 'inactive', 'draft', 'expired', 'sold_out'];
@@ -77,12 +78,13 @@ export default function Listings() {
     try {
       const r = await api.syncListings({ withInventory: true });
       const failed = r.errors?.length ?? 0;
+      const removed = r.removed ? ` ${r.removed} removed here -- Etsy no longer has them.` : '';
       toast({
         kind: failed ? 'warn' : 'ok',
         title: 'Listings synced',
         body: failed
-          ? `${r.listings} listings, ${r.products} variations — ${failed} listing(s) could not be read, so their photos/variants may be missing: ${r.errors.slice(0, 3).map((e) => `#${e.listingId} (${e.message})`).join('; ')}${failed > 3 ? '…' : ''}`
-          : `${r.listings} listings, ${r.products} variations`,
+          ? `${r.listings} listings, ${r.products} variations — ${failed} listing(s) could not be read, so their photos/variants may be missing: ${r.errors.slice(0, 3).map((e) => `#${e.listingId} (${e.message})`).join('; ')}${failed > 3 ? '…' : ''}${removed}`
+          : `${r.listings} listings, ${r.products} variations.${removed}`,
       });
       reload();
     } catch (err) { showError(err, 'Sync failed'); } finally { setSyncing(false); }
@@ -138,8 +140,8 @@ export default function Listings() {
           )}
           <button className="btn xs" onClick={() => quickAction('listing.activate')}>Activate</button>
           <button className="btn xs" onClick={() => quickAction('listing.deactivate')}>Deactivate</button>
-          <button className="btn xs" title="Ask Etsy again for each selected listing's photos -- fixes a blank thumbnail here"
-                  onClick={() => quickAction('listing.refresh_images')}>Fetch photos</button>
+          <button className="btn xs" title="Ask Etsy again for every selected listing's photos -- fixes a blank thumbnail here"
+                  onClick={() => quickAction('listing.refresh_images')}>↻ Ask Etsy again (photos)</button>
           <button className="btn xs" onClick={() => setBulkOpen(true)}>More actions…</button>
           <button className="btn xs danger" onClick={() => quickAction('listing.delete')}>Delete</button>
           <div className="spacer" />
@@ -320,6 +322,142 @@ function ListingMedia({ listingId, images, videos, onChanged }) {
   );
 }
 
+// Every language Etsy currently supports translating a listing into.
+const TRANSLATION_LANGUAGES = ['de', 'en-GB', 'en-IN', 'en-US', 'es', 'fr', 'it', 'ja', 'nl', 'pl', 'pt', 'ru', 'sv'];
+
+/**
+ * Etsy shows buyers whichever of these matches their own site language,
+ * falling back to the listing's own title/description/tags when nothing is
+ * set for that language. Each language is its own resource on Etsy's side
+ * (get 404s until a first save), so this saves straight away rather than
+ * joining the rest of the drawer's stage-then-confirm flow -- there is
+ * nothing to preview here that isn't already just "the text in the boxes".
+ */
+function TranslationsEditor({ listingId }) {
+  const [lang, setLang] = useState('es');
+  const [form, setForm] = useState({ title: '', description: '', tags: '' });
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const showError = useErrorToast();
+
+  const { data, loading } = useAsync(
+    () => api.get(`/listings/${listingId}/translations/${lang}`).catch((err) => (err.status === 404 ? null : Promise.reject(err))),
+    [listingId, lang],
+  );
+
+  useEffect(() => {
+    setForm({ title: data?.title ?? '', description: data?.description ?? '', tags: (data?.tags ?? []).join(', ') });
+  }, [data]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.put(`/listings/${listingId}/translations/${lang}`, {
+        title: form.title,
+        description: form.description,
+        tags: form.tags.split(',').map((t) => t.trim()).filter(Boolean),
+      });
+      toast({ kind: 'ok', title: `Saved the ${lang} translation` });
+    } catch (err) { showError(err, 'Etsy rejected the translation'); } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="mb16">
+      <div className="section-title">Translations</div>
+      <div className="field">
+        <label>Language</label>
+        <select className="select" value={lang} onChange={(e) => setLang(e.target.value)}>
+          {TRANSLATION_LANGUAGES.map((l) => <option key={l} value={l}>{l}</option>)}
+        </select>
+      </div>
+      {loading ? <Spinner /> : (
+        <>
+          <div className="field">
+            <label>Title</label>
+            <input className="input" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
+          </div>
+          <div className="field">
+            <label>Description</label>
+            <textarea className="textarea" rows={4} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+          </div>
+          <div className="field">
+            <label>Tags (comma separated)</label>
+            <input className="input" value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} />
+          </div>
+          <button className="btn sm primary" onClick={save} disabled={busy}>
+            {busy ? <Spinner /> : `Save the ${lang} translation`}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A download/both listing sells a file, not (only) a physical object --
+ * Etsy hands buyers whatever is uploaded here the moment they pay. A
+ * physical listing has nothing to show here (getAllListingFiles just comes
+ * back empty for one), so the caller only renders this for download/both.
+ */
+function DigitalFiles({ listingId }) {
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const showError = useErrorToast();
+  const { data, loading, reload } = useAsync(() => api.get(`/listings/${listingId}/files`), [listingId]);
+
+  const upload = async (file) => {
+    setBusy(true);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('name', file.name);
+      await api.upload(`/listings/${listingId}/files`, form);
+      toast({ kind: 'ok', title: `${file.name} uploaded` });
+      reload();
+    } catch (err) { showError(err, 'Etsy rejected that file'); } finally { setBusy(false); }
+  };
+
+  const remove = async (fileId) => {
+    setBusy(true);
+    try {
+      await api.del(`/listings/${listingId}/files/${fileId}`);
+      reload();
+    } catch (err) { showError(err, 'Could not remove that file'); } finally { setBusy(false); }
+  };
+
+  const files = data?.results ?? [];
+
+  return (
+    <div className="mb16">
+      <div className="flex gap4" style={{ alignItems: 'center', justifyContent: 'space-between' }}>
+        <div className="section-title" style={{ margin: 0 }}>Digital files ({files.length})</div>
+        <label className="btn xs ghost" style={{ cursor: busy ? 'not-allowed' : 'pointer' }}>
+          + Upload
+          <input type="file" style={{ display: 'none' }} disabled={busy}
+                 onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) upload(f); }} />
+        </label>
+      </div>
+      <div className="hint mb8">What a buyer receives the moment they pay. Etsy replaces nothing automatically -- remove a file before uploading its replacement if you want only one on offer.</div>
+      {loading ? <Spinner /> : files.length === 0 ? (
+        <div className="small dim">No files uploaded yet.</div>
+      ) : (
+        <table className="data">
+          <thead><tr><th>File</th><th>Size</th><th className="col-tight" /></tr></thead>
+          <tbody>
+            {files.map((f) => (
+              <tr key={f.listing_file_id}>
+                <td className="small">{f.filename}</td>
+                <td className="small dim">{f.filesize}</td>
+                <td><button className="btn xs ghost" disabled={busy} onClick={() => remove(f.listing_file_id)}>Remove</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 function ListingDetail({ id, onClose, onChanged }) {
   const { data, loading, reload } = useAsync(() => (id ? api.get(`/listings/${id}`) : null), [id], { immediate: !!id });
   // Etsy asks for these by numeric id; nobody knows them by heart -- same
@@ -328,7 +466,7 @@ function ListingDetail({ id, onClose, onChanged }) {
   const { data: properties } = useAsync(
     () => (id ? api.get(`/listings/${id}/properties`).catch(() => ({ results: [] })) : null), [id], { immediate: !!id });
   const { data: personalizationData } = useAsync(
-    () => (id ? api.get(`/listings/${id}/personalization`).catch(() => ({ personalization_questions: [] })) : null),
+    () => (id ? api.get(`/listings/${id}/personalization`).catch(() => ({ isPersonalizable: false, questions: [] })) : null),
     [id], { immediate: !!id });
 
   const [edit, setEdit] = useState({});
@@ -362,14 +500,7 @@ function ListingDetail({ id, onClose, onChanged }) {
 
   if (!id) return null;
 
-  const existingQuestion = personalizationData?.personalization_questions?.[0];
-  const pers = personalization ?? {
-    isPersonalizable: data?.isPersonalizable ?? false,
-    isRequired: existingQuestion?.required ?? false,
-    charCountMax: existingQuestion?.max_allowed_characters ?? 256,
-    instructions: existingQuestion?.instructions ?? '',
-    questionText: existingQuestion?.question_text ?? 'Personalization',
-  };
+  const pers = personalization ?? personalizationData ?? { isPersonalizable: data?.isPersonalizable ?? false, questions: [] };
 
   const nothingToSend = !Object.keys(edit).length && !attrTouched && !personalization && readinessStateId == null;
 
@@ -447,6 +578,8 @@ function ListingDetail({ id, onClose, onChanged }) {
       {loading || !data ? <Spinner /> : (
         <>
           <ListingMedia listingId={id} images={data.images} videos={data.videos} onChanged={async () => { await reload(); onChanged(); }} />
+
+          {(edit.type ?? data.type) !== 'physical' && <DigitalFiles listingId={id} />}
 
           <Pictures listingId={data.listingId ?? data.listing_id} />
 
@@ -562,6 +695,27 @@ function ListingDetail({ id, onClose, onChanged }) {
             </div>
           </div>
 
+          {(choices?.productionPartners ?? []).length > 0 && (
+            <div className="field">
+              <label>Production partner</label>
+              <div className="pill-row">
+                {choices.productionPartners.map((p) => {
+                  const picked = (edit.production_partner_ids ?? []).includes(p.id);
+                  return (
+                    <button key={p.id} type="button" className={`btn xs ${picked ? 'primary' : ''}`}
+                            onClick={() => {
+                              const current = edit.production_partner_ids ?? [];
+                              setEdit({ ...edit, production_partner_ids: picked ? current.filter((x) => x !== p.id) : [...current, p.id] });
+                            }}>
+                      {p.name}{p.location ? ` (${p.location})` : ''}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="hint">Required on an active listing when someone other than you makes it.</div>
+            </div>
+          )}
+
           <div className="section-title">Weight &amp; dimensions</div>
           <div className="split">
             <div className="field">
@@ -616,28 +770,9 @@ function ListingDetail({ id, onClose, onChanged }) {
           )}
 
           <div className="section-title">Personalization</div>
-          <Checkbox checked={pers.isPersonalizable} onChange={(v) => setPersonalization({ ...pers, isPersonalizable: v })}
-                    label="Buyers can personalize this listing" />
-          {pers.isPersonalizable && (
-            <>
-              <div className="field">
-                <label>Question shown to the buyer</label>
-                <input className="input" value={pers.questionText} onChange={(e) => setPersonalization({ ...pers, questionText: e.target.value })} />
-              </div>
-              <div className="field">
-                <label>Instructions</label>
-                <input className="input" value={pers.instructions} onChange={(e) => setPersonalization({ ...pers, instructions: e.target.value })} />
-              </div>
-              <div className="split">
-                <Checkbox checked={pers.isRequired} onChange={(v) => setPersonalization({ ...pers, isRequired: v })} label="Required" />
-                <div className="field">
-                  <label>Max characters</label>
-                  <input className="input" type="number" value={pers.charCountMax}
-                         onChange={(e) => setPersonalization({ ...pers, charCountMax: Number(e.target.value) })} />
-                </div>
-              </div>
-            </>
-          )}
+          <PersonalizationEditor value={pers} changed={!!personalization} onChange={setPersonalization} />
+
+          <TranslationsEditor listingId={id} />
 
           <div className="section-title">Variations ({data.variations.length})</div>
           <table className="data">

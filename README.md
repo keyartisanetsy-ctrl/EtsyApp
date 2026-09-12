@@ -140,13 +140,26 @@ The app is local-first and deliberately quiet:
 ### Listings
 Every Etsy state — active, inactive, draft, expired, sold out — with activate,
 deactivate, delete, and full field editing: category (a text-search picker,
-never a raw numeric id — see Draft desk below), who made it/when/type/supply,
-shipping profile, return policy, shop section, weight and dimensions with
-units, tax and auto-renew, featured rank, and a real personalization question
-(not a single yes/no flag). "Review changes" shows exactly what is about to
-change before anything reaches Etsy. Upload images and video with an instant
-local preview while they upload, manage digital files, translations and
-category properties.
+never a raw numeric id — see Draft desk below, with its attributes in a
+popup opened from a button under the picker, not always expanded inline),
+who made it/when/type/supply, shipping profile, return policy, shop section,
+production partner, weight and dimensions with units, tax and auto-renew,
+featured rank, and up to five personalization questions — text, dropdown or
+file upload, each optionally required and optionally carrying an extra
+charge, not a single yes/no flag. "Review changes" shows exactly what is
+about to change before anything reaches Etsy. Upload images and video —
+several at once, with an instant local preview while they upload, capped at
+Etsy's own 20/2 limit with the rest left out and named if a pick overflows
+it — manage digital files for download/both listings, per-language
+translations, and category properties.
+
+Select several (or every) listing at once for a **"Missing photos" filter**
+plus a one-click **"↻ Ask Etsy again (photos)"** that re-asks Etsy for each
+selected listing's images — the same action the single-listing "Ask Etsy
+again" button runs, fixed to actually re-fetch a listing's plain photos even
+when it has no per-variation image pinning configured (the common case),
+which it used to skip entirely. A full Sync also drops any listing Etsy no
+longer has (deleted there) instead of leaving it behind forever.
 
 ### Draft desk
 A listing you started on Etsy — or one you start here — edited across as many
@@ -254,7 +267,7 @@ npm start &
 npm run verify
 ```
 
-123 end-to-end checks over the operation catalogue, the SKU grid and pricing
+129 end-to-end checks over the operation catalogue, the SKU grid and pricing
 maths, the tracking parser and alert lifecycle, the prompt library, the bulk
 dry-run, every Excel export, path-traversal protection, the draft desk's
 staging/push/autofill logic, the public-link tunnel's own reconnect loop, and
@@ -325,9 +338,18 @@ the app stays open).
 instead of each running its own copy with its own database. `deploy/setup-vds.ps1`
 (Windows) or `deploy/setup-vds.sh` (Linux) install Node, build the app,
 generate a password, and register it as a real service (NSSM / systemd) with
-its own Cloudflare Tunnel, so it survives reboots. Combined with `AUTO_UPDATE=1`
-(on by default from these scripts), a fix pushed to this repo reaches that VDS
-within 30 minutes with nobody re-running anything by hand.
+its own Cloudflare Tunnel, so it survives reboots.
+
+**Auto-update is on by default everywhere**, not opt-in: the moment this
+starts, and every 30 minutes after, it checks its own branch on GitHub and
+pulls in a newer commit on its own, restarting itself to actually run it —
+no re-running anything by hand for every fix, on a VDS or on your own PC.
+That restart is safe on every launch path this app ships: `START-WINDOWS.bat`
+and `START-MAC-LINUX.command` both loop and relaunch `npm start` the instant
+it exits, same as the NSSM/systemd service the VDS scripts install. Set
+`AUTO_UPDATE=0` in `.env` to turn the whole thing off, or `AUTO_UPDATE_RESTART=0`
+specifically if you run `npm start` directly in a terminal without either
+wrapper script, since nothing there relaunches it for you.
 
 ## When the browser says the site cannot be reached
 

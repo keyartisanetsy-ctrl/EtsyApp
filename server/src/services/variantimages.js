@@ -19,6 +19,7 @@ import { call } from '../etsy/client.js';
 import { getDb } from '../db/index.js';
 import { requireShopId } from '../etsy/shop.js';
 import { createLogger } from '../lib/logger.js';
+import { saveImages } from './sync.js';
 
 const log = createLogger('variant-images');
 
@@ -41,8 +42,24 @@ function listingsMissingImages(receiptIds) {
  * Ask Etsy for one listing's variation images and its image URLs, and store
  * both, so later lookups are a local join.
  */
-export async function syncListing(listingId) {
+export async function syncListing(listingId, { forceImages = false } = {}) {
   const db = getDb();
+
+  // Make sure the base photos are on hand -- unconditionally when asked to,
+  // otherwise only when nothing is cached yet. This used to run only after
+  // finding at least one variation-image pair below, which meant a listing
+  // with no per-variation photo assignments on Etsy (most listings: that
+  // pairing is opt-in) never got its plain photos fetched here at all, no
+  // matter how many times "ask Etsy again" was pressed.
+  const known = db.prepare('SELECT COUNT(*) AS c FROM listing_images WHERE listing_id = ?').get(listingId).c;
+  if (forceImages || !known) {
+    try {
+      const res = await call('getListingImages', { listing_id: listingId });
+      saveImages(listingId, res?.results ?? []);
+    } catch (err) {
+      log.warn(`could not read images of listing ${listingId}: ${err.message}`);
+    }
+  }
 
   let pairs = [];
   try {
@@ -53,25 +70,6 @@ export async function syncListing(listingId) {
     return { listingId, mapped: 0 };
   }
   if (!pairs.length) return { listingId, mapped: 0 };
-
-  // Make sure the URLs behind those image ids are on hand too.
-  const known = db.prepare('SELECT COUNT(*) AS c FROM listing_images WHERE listing_id = ?').get(listingId).c;
-  if (!known) {
-    try {
-      const res = await call('getListingImages', { listing_id: listingId });
-      const ins = db.prepare(`
-        INSERT INTO listing_images (listing_image_id, listing_id, rank, url_75x75, url_570xN, url_fullxfull, alt_text, raw)
-        VALUES (?,?,?,?,?,?,?,?)
-        ON CONFLICT(listing_image_id) DO UPDATE SET
-          url_570xN = excluded.url_570xN, url_fullxfull = excluded.url_fullxfull`);
-      for (const i of res?.results ?? []) {
-        ins.run(i.listing_image_id, listingId, i.rank ?? null, i.url_75x75 ?? null,
-          i.url_570xN ?? null, i.url_fullxfull ?? null, i.alt_text ?? null, JSON.stringify(i));
-      }
-    } catch (err) {
-      log.warn(`could not read images of listing ${listingId}: ${err.message}`);
-    }
-  }
 
   const ins = db.prepare(`INSERT OR REPLACE INTO variation_images (listing_id, property_id, value_id, image_id)
                           VALUES (?,?,?,?)`);

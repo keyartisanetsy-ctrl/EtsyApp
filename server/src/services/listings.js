@@ -366,32 +366,63 @@ export const deleteFile = (listingId, fileId) =>
   call('deleteListingFile', { shop_id: requireShopId(), listing_id: listingId, listing_file_id: fileId });
 
 /**
- * Etsy's personalization is a list of questions, not the single
- * flag-plus-instructions pair this used to send -- is_personalizable,
- * personalization_is_required, personalization_char_count_max and
- * personalization_instructions have never been fields this endpoint
- * accepts. The desk still edits the simple case (one free-text question),
- * built here into the one-question array Etsy actually wants.
- * isPersonalizable: false routes to deleteListingPersonalization, the real
- * way to turn personalization off, instead of sending an empty question list.
+ * Etsy's personalization is a list of up to 5 questions, each with its own
+ * type -- is_personalizable, personalization_is_required,
+ * personalization_char_count_max and personalization_instructions have
+ * never been fields updateListing accepts; this is the only real path.
+ *
+ * supports_multiple_personalization_questions is sent on every write:
+ * without it Etsy accepts (and assumes the caller only understands) a
+ * single text_input question, silently dropping anything else a seller
+ * configured through etsy.com itself the next time this app touches it.
  */
+export const PERSONALIZATION_QUESTION_TYPES = ['text_input', 'dropdown', 'unlabeled_upload', 'labeled_upload'];
+export const MAX_PERSONALIZATION_QUESTIONS = 5;
+
+export const fromEtsyQuestion = (q) => ({
+  questionId: q.question_id ?? null,
+  questionText: q.question_text ?? '',
+  instructions: q.instructions ?? '',
+  questionType: PERSONALIZATION_QUESTION_TYPES.includes(q.question_type) ? q.question_type : 'text_input',
+  isRequired: !!q.required,
+  charCountMax: q.max_allowed_characters ?? null,
+  maxFiles: q.max_allowed_files ?? null,
+  addOnPrice: q.add_on_price ? q.add_on_price.amount / (q.add_on_price.divisor || 100) : null,
+  options: q.options ?? [],
+});
+
+export const toEtsyQuestion = (q) => {
+  const type = PERSONALIZATION_QUESTION_TYPES.includes(q.questionType) ? q.questionType : 'text_input';
+  const out = {
+    question_text: q.questionText || 'Personalization',
+    instructions: q.instructions ?? '',
+    question_type: type,
+    required: !!q.isRequired,
+  };
+  if (type === 'text_input') out.max_allowed_characters = q.charCountMax ?? 256;
+  if (type === 'unlabeled_upload' || type === 'labeled_upload') out.max_allowed_files = q.maxFiles ?? 1;
+  if (type === 'dropdown') out.options = (q.options ?? []).map((o) => String(o).trim()).filter(Boolean);
+  if (q.addOnPrice) out.add_on_price = Number(q.addOnPrice);
+  return out;
+};
+
+/** isPersonalizable: false (or no questions) routes to
+ *  deleteListingPersonalization, the real way to turn personalization off,
+ *  instead of sending an empty question list. */
 export const setPersonalization = (listingId, opts) => {
-  if (opts.isPersonalizable === false) return removePersonalization(listingId);
-  return call('updateListingPersonalization', { shop_id: requireShopId(), listing_id: listingId }, {
-    body: {
-      personalization_questions: [{
-        question_text: opts.questionText || 'Personalization',
-        instructions: opts.instructions ?? '',
-        question_type: 'text_input',
-        required: !!opts.isRequired,
-        max_allowed_characters: opts.charCountMax ?? 256,
-      }],
-    },
-  });
+  if (opts.isPersonalizable === false || !opts.questions?.length) return removePersonalization(listingId);
+  return call('updateListingPersonalization',
+    { shop_id: requireShopId(), listing_id: listingId, supports_multiple_personalization_questions: true }, {
+      body: { personalization_questions: opts.questions.slice(0, MAX_PERSONALIZATION_QUESTIONS).map(toEtsyQuestion) },
+    });
 };
 
 /** No shop_id in this one -- Etsy's own path for it is listing-only. */
-export const getPersonalization = (listingId) => call('getListingPersonalization', { listing_id: listingId });
+export async function getPersonalization(listingId) {
+  const raw = await call('getListingPersonalization', { listing_id: listingId });
+  const questions = (raw?.personalization_questions ?? []).map(fromEtsyQuestion);
+  return { isPersonalizable: questions.length > 0, questions };
+}
 
 export const removePersonalization = (listingId) =>
   call('deleteListingPersonalization', { shop_id: requireShopId(), listing_id: listingId });

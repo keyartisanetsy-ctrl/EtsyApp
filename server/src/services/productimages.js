@@ -207,7 +207,9 @@ export function variantUrlForTransaction(txn) {
 export async function refreshVariationImages(listingId) {
   const db = getDb();
   const id = Number(listingId);
-  const { mapped } = await syncListing(id);
+  // "Ask Etsy again" means what it says -- always re-pull the base photos,
+  // not only when this listing has never had any cached.
+  const { mapped } = await syncListing(id, { forceImages: true });
 
   const products = db.prepare('SELECT product_id, property_values FROM listing_products WHERE listing_id = ?').all(id);
   let updated = 0;
