@@ -187,6 +187,44 @@ export function Checkbox({ checked, onChange, label, indeterminate }) {
   );
 }
 
+/**
+ * A locale-independent stand-in for <input type="number" step="0.01">.
+ * Chrome and Firefox pick the accepted decimal separator for a native number
+ * input from the browser's own locale -- under a Turkish (or any
+ * comma-decimal) locale, the "." key is silently rejected, so a price like
+ * 199.99 can never be typed. This takes either "." or "," as the separator,
+ * always reports a plain "199.99"-style string upward (or "" once cleared,
+ * which a native number input can also refuse to settle on), and the typed
+ * text itself never gets rewritten mid-keystroke.
+ */
+export function DecimalInput({ value, onChange, className = 'input', placeholder, ...rest }) {
+  const [local, setLocal] = useState(value == null ? '' : String(value));
+  useEffect(() => { setLocal(value == null ? '' : String(value)); }, [value]);
+
+  const onType = (raw) => {
+    let cleaned = raw.replace(/[^0-9.,]/g, '');
+    const firstSep = cleaned.search(/[.,]/);
+    if (firstSep !== -1) {
+      cleaned = cleaned.slice(0, firstSep + 1) + cleaned.slice(firstSep + 1).replace(/[.,]/g, '');
+    }
+    setLocal(cleaned);
+    onChange(cleaned === '' ? '' : cleaned.replace(',', '.'));
+  };
+
+  return (
+    <input
+      {...rest}
+      className={className}
+      type="text"
+      inputMode="decimal"
+      autoComplete="off"
+      placeholder={placeholder}
+      value={local}
+      onChange={(e) => onType(e.target.value)}
+    />
+  );
+}
+
 export function Thumb({ src, alt, size = '', fallback = '□' }) {
   const [broken, setBroken] = useState(false);
   if (!src || broken) return <div className={`thumb ${size} placeholder`}>{fallback}</div>;

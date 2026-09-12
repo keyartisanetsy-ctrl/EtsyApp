@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import api from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import {
-  Spinner, Banner, Empty, Stat, useAsync, useToast, useErrorToast, useDebounced, fmtMoney,
+  Spinner, Banner, Empty, Stat, useAsync, useToast, useErrorToast, useDebounced, fmtMoney, DecimalInput,
 } from '../components/ui.jsx';
 
 /**
@@ -276,8 +276,7 @@ function AdSpend({ data, currency, onSaved }) {
       <div className="split">
         <div className="field">
           <label>Spent</label>
-          <input className="input" type="number" step="0.01" value={amount}
-                 onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
+          <DecimalInput value={amount} onChange={setAmount} placeholder="0.00" />
         </div>
         <div className="field">
           <label>Currency</label>

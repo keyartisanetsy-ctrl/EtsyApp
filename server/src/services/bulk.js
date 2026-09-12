@@ -69,6 +69,19 @@ export const HANDLERS = {
     describe: (id, p) => `Set taxonomy ${p.taxonomyId} on listing ${id}`,
     run: (id, p) => listings.updateListing(id, { taxonomy_id: Number(p.taxonomyId) }),
   },
+  // Etsy's own bulk listing pull is lighter than a single getListing with
+  // includes=Images, so a shop synced a while back (or via that lighter
+  // path) can be sitting on a listing with no cached image at all -- this
+  // asks Etsy for that one listing's photos again and re-caches them,
+  // without touching anything else about the listing.
+  'listing.refresh_images': {
+    label: 'Re-fetch photos from Etsy',
+    describe: (id) => `Re-fetch listing ${id}'s photos from Etsy`,
+    run: async (id) => {
+      const images = await listings.refreshImages(id);
+      return { images: images.length };
+    },
+  },
 
   'listing.tags': {
     label: 'Edit tags',

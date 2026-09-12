@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../lib/api.js';
 import Page from '../components/Page.jsx';
-import { Spinner, Banner, Thumb, useAsync, useToast, useErrorToast, useDebounced } from '../components/ui.jsx';
+import { Spinner, Banner, Thumb, useAsync, useToast, useErrorToast, useDebounced, DecimalInput, Modal } from '../components/ui.jsx';
 import { MakeProcessingProfile } from './Drafts.jsx';
 
 const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007', '2000_2006',
@@ -175,7 +175,7 @@ export default function NewListing() {
           <div className="split">
             <div className="field">
               <label>Price</label>
-              <input className="input" type="number" step="0.01" value={form.price} onChange={(e) => set('price', e.target.value)} />
+              <DecimalInput value={form.price} onChange={(v) => set('price', v)} />
             </div>
             <div className="field">
               <label>Quantity</label>
@@ -294,7 +294,21 @@ export default function NewListing() {
           <div className="field">
             <label>Images</label>
             <input className="input" type="file" accept="image/*" multiple
-                   onChange={(e) => setImages([...images, ...e.target.files])} />
+                   onChange={(e) => {
+                     const picked = [...e.target.files];
+                     const room = Math.max(0, 20 - images.length);
+                     const accepted = picked.slice(0, room);
+                     if (picked.length > accepted.length) {
+                       toast({
+                         kind: 'warn',
+                         title: 'Etsy allows 20 images per listing',
+                         body: accepted.length
+                           ? `Added the first ${accepted.length} of ${picked.length} picked; the rest were left out.`
+                           : `Already at 20 of 20 -- none of the ${picked.length} picked were added.`,
+                       });
+                     }
+                     setImages([...images, ...accepted]);
+                   }} />
             <div className="hint">Uploaded right after the draft is created, in the order shown below.</div>
             {images.length > 0 && (
               <div className="flex gap4 mt8" style={{ flexWrap: 'wrap' }}>
@@ -329,6 +343,7 @@ export function CategoryPicker({ value, onPick, attributes, onAttributes }) {
   const [search, setSearch] = useState('');
   const debounced = useDebounced(search);
   const [open, setOpen] = useState(false);
+  const [attrsOpen, setAttrsOpen] = useState(false);
 
   const { data: found, loading } = useAsync(
     () => (debounced.trim() ? api.get('/research/taxonomy/search', { q: debounced, limit: 8 }) : null),
@@ -461,36 +476,64 @@ export function CategoryPicker({ value, onPick, attributes, onAttributes }) {
                 </div>
               )}
 
-              {detail.required.length > 0 && (
-                <>
-                  <div className="section-title">Etsy requires these</div>
-                  {detail.required.map(propertyField)}
-                </>
-              )}
-
-              {detail.occasions.length > 0 && (
-                <>
-                  <div className="section-title">Occasion &amp; recipient</div>
-                  <div className="hint mb8">
-                    These are what put a listing into Etsy&rsquo;s gift guides and seasonal pages. They are optional,
-                    and they are the ones most often left blank.
+              {(() => {
+                const withOptions = (p) => p.values.length > 0;
+                const requiredWithOptions = detail.required.filter(withOptions);
+                const requiredDone = requiredWithOptions.filter((p) => picked(p.propertyId).length > 0).length;
+                const totalOptional = detail.occasions.length + detail.attributes.length;
+                return (
+                  <div className="flex gap8 mt8" style={{ alignItems: 'center' }}>
+                    <button type="button" className="btn sm" onClick={() => setAttrsOpen(true)}>
+                      Attributes &amp; details…
+                    </button>
+                    {requiredWithOptions.length > 0 && (
+                      <span className={`badge ${requiredDone === requiredWithOptions.length ? 'green' : 'amber'}`}>
+                        {requiredDone}/{requiredWithOptions.length} required set
+                      </span>
+                    )}
+                    {totalOptional > 0 && <span className="small dim">+{totalOptional} optional</span>}
+                    {detail.propertyError && (
+                      <span className="small dim">Etsy returned no attributes for this category ({detail.propertyError}).</span>
+                    )}
                   </div>
-                  {detail.occasions.map(propertyField)}
-                </>
-              )}
+                );
+              })()}
 
-              {detail.attributes.length > 0 && (
-                <>
-                  <div className="section-title">Other attributes</div>
-                  {detail.attributes.map(propertyField)}
-                </>
-              )}
+              <Modal open={attrsOpen} onClose={() => setAttrsOpen(false)} lg
+                     title={`Attributes for ${detail.name}`}>
+                {detail.required.length > 0 && (
+                  <>
+                    <div className="section-title">Etsy requires these</div>
+                    {detail.required.map(propertyField)}
+                  </>
+                )}
 
-              {detail.propertyError && (
-                <div className="small dim mt8">
-                  Etsy returned no attributes for this category ({detail.propertyError}).
-                </div>
-              )}
+                {detail.occasions.length > 0 && (
+                  <>
+                    <div className="section-title">Occasion &amp; recipient</div>
+                    <div className="hint mb8">
+                      These are what put a listing into Etsy&rsquo;s gift guides and seasonal pages. They are optional,
+                      and they are the ones most often left blank.
+                    </div>
+                    {detail.occasions.map(propertyField)}
+                  </>
+                )}
+
+                {detail.attributes.length > 0 && (
+                  <>
+                    <div className="section-title">Other attributes</div>
+                    {detail.attributes.map(propertyField)}
+                  </>
+                )}
+
+                {!detail.required.length && !detail.occasions.length && !detail.attributes.length && (
+                  <div className="small dim">
+                    {detail.propertyError
+                      ? `Etsy returned no attributes for this category (${detail.propertyError}).`
+                      : 'Etsy has no extra attributes for this category.'}
+                  </div>
+                )}
+              </Modal>
             </>
           )}
         </div>

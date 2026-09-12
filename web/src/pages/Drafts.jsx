@@ -4,7 +4,7 @@ import api from '../lib/api.js';
 import { TablePage } from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Checkbox, Drawer, Modal, Thumb, CopyButton, Tabs,
-  useAsync, useToast, useErrorToast, fmtMoney, fmtAgo,
+  useAsync, useToast, useErrorToast, fmtMoney, fmtAgo, DecimalInput,
 } from '../components/ui.jsx';
 import { CategoryPicker } from './NewListing.jsx';
 
@@ -482,7 +482,7 @@ function DraftEditor({ id, onClose, onChanged }) {
           {field('title', 'Title', { hint: `${(merged.title ?? '').length} of 140 characters` })}
           {field('description', 'Description', { textarea: true, rows: 8 })}
           <div className="split">
-            {field('price', 'Price', { type: 'number', step: '0.01' })}
+            {field('price', 'Price', { type: 'decimal' })}
             {field('quantity', 'Stock', { type: 'number', min: 1, max: 999, hint: 'Etsy allows a quantity from 1 to 999.' })}
           </div>
           {field('tags', 'Tags', { hint: 'Comma separated, up to 13, each at most 20 characters' })}
@@ -577,8 +577,7 @@ function DraftEditor({ id, onClose, onChanged }) {
                 {isChanged('item_weight') && <span className="badge amber" style={{ marginLeft: 6 }}>changed</span>}
               </label>
               <div className="flex gap4">
-                <input className="input" type="number" step="0.01" value={merged.item_weight ?? ''}
-                       onChange={(e) => save({ item_weight: e.target.value })} />
+                <DecimalInput value={merged.item_weight} onChange={(v) => save({ item_weight: v })} />
                 <select className="select" value={merged.item_weight_unit ?? ''}
                         onChange={(e) => save({ item_weight_unit: e.target.value })}>
                   <option value="">unit</option>
@@ -596,9 +595,9 @@ function DraftEditor({ id, onClose, onChanged }) {
             </div>
           </div>
           <div className="flex gap12">
-            {field('item_length', 'Length', { type: 'number', step: '0.01' })}
-            {field('item_width', 'Width', { type: 'number', step: '0.01' })}
-            {field('item_height', 'Height', { type: 'number', step: '0.01' })}
+            {field('item_length', 'Length', { type: 'decimal' })}
+            {field('item_width', 'Width', { type: 'decimal' })}
+            {field('item_height', 'Height', { type: 'decimal' })}
           </div>
 
           <div className="section-title">Settings</div>
@@ -697,8 +696,10 @@ function Field({ name, label, value, changed, etsyValue, save, textarea, rows, o
               <option value="">—</option>
               {options.map((o) => <option key={o} value={o}>{String(o).replace(/_/g, ' ')}</option>)}
             </select>
-          : <input className="input" type={type ?? 'text'} step={step} min={min} max={max}
-                   value={local} onChange={(e) => onType(e.target.value)} />}
+          : type === 'decimal'
+            ? <DecimalInput value={local} onChange={onType} />
+            : <input className="input" type={type ?? 'text'} step={step} min={min} max={max}
+                     value={local} onChange={(e) => onType(e.target.value)} />}
       {hint && <div className="hint">{hint}</div>}
     </div>
   );
@@ -817,6 +818,7 @@ function PersonalizationEditor({ value, changed, onChange }) {
  */
 function MediaManager({ draft, onChanged }) {
   const [busy, setBusy] = useState(false);
+  const toast = useToast();
   // A freshly picked file used to show nothing at all until the upload
   // finished and the whole draft came back from the server -- on a slow
   // connection that could be several seconds of "did that work?" with no
@@ -871,6 +873,26 @@ function MediaManager({ draft, onChanged }) {
     }
   };
 
+  /** Etsy's own cap is per-listing, not per-upload, so a batch that would
+   *  overflow it is trimmed to whatever room is actually left rather than
+   *  rejected outright -- the rest just were not picked this time. */
+  const addFiles = async (kind, files) => {
+    const max = kind === 'image' ? maxImages : maxVideos;
+    const have = (kind === 'image' ? images.length : videos.length) + pending.filter((p) => p.kind === kind).length;
+    const room = Math.max(0, max - have);
+    const accepted = files.slice(0, room);
+    if (files.length > accepted.length) {
+      toast({
+        kind: 'warn',
+        title: `Etsy allows ${max} ${kind === 'image' ? 'images' : 'video(s)'} per listing`,
+        body: accepted.length
+          ? `Added the first ${accepted.length} of ${files.length} picked; the rest were left out.`
+          : `Already at ${max} of ${max} -- none of the ${files.length} picked were added.`,
+      });
+    }
+    for (const file of accepted) await addFile(kind, file);
+  };
+
   const remove = async (kind, mediaId) => {
     setBusy(true);
     try {
@@ -895,9 +917,9 @@ function MediaManager({ draft, onChanged }) {
             <button className="btn xs ghost" disabled={busy || count >= max} onClick={() => addUrl(kind)}>+ By URL</button>
             <label className="btn xs ghost" style={{ cursor: count >= max ? 'not-allowed' : 'pointer', opacity: count >= max ? 0.5 : 1 }}>
               + Upload
-              <input type="file" accept={kind === 'image' ? 'image/*' : 'video/*'} style={{ display: 'none' }}
+              <input type="file" accept={kind === 'image' ? 'image/*' : 'video/*'} multiple style={{ display: 'none' }}
                      disabled={busy || count >= max}
-                     onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) addFile(kind, f); }} />
+                     onChange={(e) => { const files = [...(e.target.files ?? [])]; e.target.value = ''; if (files.length) addFiles(kind, files); }} />
             </label>
           </div>
         </div>

@@ -3,7 +3,7 @@ import api from '../lib/api.js';
 import { TablePage } from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Modal, Drawer, Stat, useAsync, useDebounced,
-  useToast, useErrorToast, fmtMoney,
+  useToast, useErrorToast, fmtMoney, DecimalInput,
 } from '../components/ui.jsx';
 
 /**
@@ -198,8 +198,7 @@ function SupplyEditor({ item, onClose, onSaved }) {
       <div className="split3">
         <div className="field">
           <label>Unit price</label>
-          <input className="input" type="number" step="0.01" value={form.price ?? ''}
-                 onChange={(e) => setForm({ ...form, price: e.target.value })} />
+          <DecimalInput value={form.price} onChange={(v) => setForm({ ...form, price: v })} />
         </div>
         <div className="field">
           <label>Currency</label>
@@ -210,8 +209,7 @@ function SupplyEditor({ item, onClose, onSaved }) {
         </div>
         <div className="field">
           <label>Shipping per unit</label>
-          <input className="input" type="number" step="0.01" value={form.shippingCost ?? ''}
-                 onChange={(e) => setForm({ ...form, shippingCost: e.target.value })} />
+          <DecimalInput value={form.shippingCost} onChange={(v) => setForm({ ...form, shippingCost: v })} />
           <div className="hint">To your forwarder.</div>
         </div>
       </div>

@@ -6,7 +6,7 @@ import Pictures from '../components/Pictures.jsx';
 import { TablePage } from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Checkbox, Thumb, Pager, SortTh, Drawer, Modal, CopyButton,
-  useAsync, useDebounced, useToast, useErrorToast, fmtMoney, STATE_BADGE,
+  useAsync, useDebounced, useToast, useErrorToast, fmtMoney, STATE_BADGE, DecimalInput,
 } from '../components/ui.jsx';
 
 const LIMIT = 100;
@@ -284,8 +284,8 @@ export default function Skus() {
                   </td>
                   <td className="small dim" style={{ maxWidth: 190 }}>{r.variation || '—'}</td>
                   <td className="num">
-                    <input className="input sm right" style={{ width: 84 }} type="number" step="0.01" value={price ?? ''}
-                           onChange={(e) => stage(r.productId, 'price', e.target.value)} />
+                    <DecimalInput className="input sm right" style={{ width: 84 }} value={price}
+                           onChange={(v) => stage(r.productId, 'price', v)} />
                   </td>
                   <td className="num" title={`${pct}% off the non-discount price`}>
                     <span className="badge orange">{discounted ?? '—'}</span>
@@ -482,7 +482,7 @@ function SkuDetail({ row, pct, onClose, onSaved }) {
         </div>
         <div className="field">
           <label>Estimated unit cost</label>
-          <input className="input" type="number" step="0.01" value={meta.supplyCost ?? ''} onChange={(e) => setMeta({ ...meta, supplyCost: e.target.value })} />
+          <DecimalInput value={meta.supplyCost} onChange={(v) => setMeta({ ...meta, supplyCost: v })} />
           <div className="hint">An estimate, used for the margin figure until you enter the real cost.</div>
         </div>
         <div className="field">

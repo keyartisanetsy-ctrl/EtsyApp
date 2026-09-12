@@ -4,7 +4,7 @@ import api from '../lib/api.js';
 import { TablePage } from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Checkbox, Pager, Drawer, Modal, CopyButton, Stat,
-  useAsync, useDebounced, useToast, useErrorToast, fmtDateTime, fmtAgo, TRACK_BADGE,
+  useAsync, useDebounced, useToast, useErrorToast, fmtDateTime, fmtAgo, TRACK_BADGE, DecimalInput,
 } from '../components/ui.jsx';
 
 const LIMIT = 100;
@@ -288,14 +288,12 @@ function ShippingCostCell({ row, onSaved }) {
 
   return (
     <span className="flex gap4">
-      <input
+      <DecimalInput
         className="input sm"
         style={{ width: 78 }}
         autoFocus
-        type="number"
-        step="0.01"
         value={value}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={setValue}
         onKeyDown={(e) => {
           if (e.key === 'Enter') save();
           if (e.key === 'Escape') setEditing(false);

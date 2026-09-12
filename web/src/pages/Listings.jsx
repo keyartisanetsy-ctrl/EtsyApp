@@ -5,7 +5,7 @@ import Pictures from '../components/Pictures.jsx';
 import { TablePage } from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Checkbox, Pager, SortTh, Drawer, Modal, Thumb, CopyButton,
-  useAsync, useDebounced, useToast, useErrorToast, fmtMoney, fmtDate, STATE_BADGE,
+  useAsync, useDebounced, useToast, useErrorToast, fmtMoney, fmtDate, STATE_BADGE, DecimalInput,
 } from '../components/ui.jsx';
 import { CategoryPicker } from './NewListing.jsx';
 
@@ -24,6 +24,7 @@ export default function Listings() {
   const [search, setSearch] = useState('');
   const debounced = useDebounced(search);
   const [state, setState] = useState(params.get('state') ?? '');
+  const [missingImages, setMissingImages] = useState(false);
   const [sort, setSort] = useState('updated');
   const [dir, setDir] = useState('desc');
   const [offset, setOffset] = useState(0);
@@ -31,6 +32,7 @@ export default function Listings() {
   const [detailId, setDetailId] = useState(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [selectingAll, setSelectingAll] = useState(false);
 
   const nav = useNavigate();
   const toast = useToast();
@@ -47,8 +49,8 @@ export default function Listings() {
     setParams(next, { replace: true });
   }, [params, setParams]);
 
-  const query = useMemo(() => ({ search: debounced, state, sort, dir, limit: LIMIT, offset }),
-    [debounced, state, sort, dir, offset]);
+  const query = useMemo(() => ({ search: debounced, state, missingImages: missingImages || undefined, sort, dir, limit: LIMIT, offset }),
+    [debounced, state, missingImages, sort, dir, offset]);
   const { data, loading, error, reload } = useAsync(() => api.get('/listings', query), [query]);
 
   const rows = data?.rows ?? [];
@@ -58,6 +60,17 @@ export default function Listings() {
     const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
   const allSelected = rows.length > 0 && rows.every((r) => selected.has(r.listingId));
+  const allMatchingSelected = data?.total > 0 && selected.size === data.total;
+
+  /** Every listing matching the current filters, not just this page -- for
+   *  "select all 158", not just the 50 on screen. */
+  const selectAllMatching = async () => {
+    setSelectingAll(true);
+    try {
+      const all = await api.get('/listings', { ...query, limit: 5000, offset: 0 });
+      setSelected(new Set((all.rows ?? []).map((r) => r.listingId)));
+    } catch (err) { showError(err, 'Could not select every matching listing'); } finally { setSelectingAll(false); }
+  };
 
   const sync = async () => {
     setSyncing(true);
@@ -110,6 +123,7 @@ export default function Listings() {
             <option value="">All states ({data?.total ?? 0})</option>
             {STATES.map((s) => <option key={s} value={s}>{s} ({counts[s] ?? 0})</option>)}
           </select>
+          <Checkbox checked={missingImages} onChange={(v) => { setMissingImages(v); setOffset(0); }} label="Missing photos" />
           <div className="spacer" />
           <span className="small muted">−{data?.discountPercent ?? 30}% column shows the sale price</span>
         </>
@@ -117,8 +131,15 @@ export default function Listings() {
       selection={selected.size > 0 && (
         <div className="selection-bar">
           <span className="count">{selected.size} selected</span>
+          {allSelected && !allMatchingSelected && data?.total > rows.length && (
+            <button className="btn xs ghost" onClick={selectAllMatching} disabled={selectingAll}>
+              {selectingAll ? <Spinner /> : `Select all ${data.total} matching`}
+            </button>
+          )}
           <button className="btn xs" onClick={() => quickAction('listing.activate')}>Activate</button>
           <button className="btn xs" onClick={() => quickAction('listing.deactivate')}>Deactivate</button>
+          <button className="btn xs" title="Ask Etsy again for each selected listing's photos -- fixes a blank thumbnail here"
+                  onClick={() => quickAction('listing.refresh_images')}>Fetch photos</button>
           <button className="btn xs" onClick={() => setBulkOpen(true)}>More actions…</button>
           <button className="btn xs danger" onClick={() => quickAction('listing.delete')}>Delete</button>
           <div className="spacer" />
@@ -203,6 +224,7 @@ function ListingMedia({ listingId, images, videos, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState([]); // { id, kind, previewUrl }
   const showError = useErrorToast();
+  const toast = useToast();
 
   const addFile = async (kind, file) => {
     setBusy(true);
@@ -219,6 +241,22 @@ function ListingMedia({ listingId, images, videos, onChanged }) {
       setPending((p) => p.filter((x) => x.id !== tempId));
       URL.revokeObjectURL(previewUrl);
     }
+  };
+
+  const addFiles = async (kind, files, max) => {
+    const have = (kind === 'image' ? images.length : videos.length) + pending.filter((p) => p.kind === kind).length;
+    const room = Math.max(0, max - have);
+    const accepted = files.slice(0, room);
+    if (files.length > accepted.length) {
+      toast({
+        kind: 'warn',
+        title: `Etsy allows ${max} ${kind === 'image' ? 'images' : 'video(s)'} per listing`,
+        body: accepted.length
+          ? `Added the first ${accepted.length} of ${files.length} picked; the rest were left out.`
+          : `Already at ${max} of ${max} -- none of the ${files.length} picked were added.`,
+      });
+    }
+    for (const file of accepted) await addFile(kind, file);
   };
 
   const remove = async (kind, mediaId) => {
@@ -238,9 +276,9 @@ function ListingMedia({ listingId, images, videos, onChanged }) {
           <span className="small dim">{kind === 'image' ? 'Images' : 'Video'} — {count} of {max}</span>
           <label className="btn xs ghost" style={{ cursor: count >= max ? 'not-allowed' : 'pointer', opacity: count >= max ? 0.5 : 1 }}>
             + Upload
-            <input type="file" accept={kind === 'image' ? 'image/*' : 'video/*'} style={{ display: 'none' }}
+            <input type="file" accept={kind === 'image' ? 'image/*' : 'video/*'} multiple style={{ display: 'none' }}
                    disabled={busy || count >= max}
-                   onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) addFile(kind, f); }} />
+                   onChange={(e) => { const files = [...(e.target.files ?? [])]; e.target.value = ''; if (files.length) addFiles(kind, files, max); }} />
           </label>
         </div>
         {count > 0 && (
@@ -529,8 +567,7 @@ function ListingDetail({ id, onClose, onChanged }) {
             <div className="field">
               <label>Weight</label>
               <div className="flex gap4">
-                <input className="input" type="number" step="0.01" value={edit.item_weight ?? data.itemWeight ?? ''}
-                       onChange={(e) => setEdit({ ...edit, item_weight: e.target.value })} />
+                <DecimalInput value={edit.item_weight ?? data.itemWeight} onChange={(v) => setEdit({ ...edit, item_weight: v })} />
                 <select className="select" value={edit.item_weight_unit ?? data.itemWeightUnit ?? ''}
                         onChange={(e) => setEdit({ ...edit, item_weight_unit: e.target.value })}>
                   <option value="">unit</option>
@@ -549,16 +586,13 @@ function ListingDetail({ id, onClose, onChanged }) {
           </div>
           <div className="flex gap12">
             <div className="field"><label>Length</label>
-              <input className="input" type="number" step="0.01" value={edit.item_length ?? data.itemLength ?? ''}
-                     onChange={(e) => setEdit({ ...edit, item_length: e.target.value })} />
+              <DecimalInput value={edit.item_length ?? data.itemLength} onChange={(v) => setEdit({ ...edit, item_length: v })} />
             </div>
             <div className="field"><label>Width</label>
-              <input className="input" type="number" step="0.01" value={edit.item_width ?? data.itemWidth ?? ''}
-                     onChange={(e) => setEdit({ ...edit, item_width: e.target.value })} />
+              <DecimalInput value={edit.item_width ?? data.itemWidth} onChange={(v) => setEdit({ ...edit, item_width: v })} />
             </div>
             <div className="field"><label>Height</label>
-              <input className="input" type="number" step="0.01" value={edit.item_height ?? data.itemHeight ?? ''}
-                     onChange={(e) => setEdit({ ...edit, item_height: e.target.value })} />
+              <DecimalInput value={edit.item_height ?? data.itemHeight} onChange={(v) => setEdit({ ...edit, item_height: v })} />
             </div>
           </div>
 

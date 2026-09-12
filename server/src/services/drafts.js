@@ -25,6 +25,7 @@ import { createLogger } from '../lib/logger.js';
 import * as listings from './listings.js';
 import * as draftmedia from './draftmedia.js';
 import * as inventory from './inventory.js';
+import { saveListing } from './sync.js';
 import * as ai from './ai/index.js';
 import * as research from './research.js';
 import * as undo from './undo.js';
@@ -824,6 +825,15 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
       await applyAttributes(newId);
       await applyPersonalization(newId);
 
+      // listing_images/listing_products carry a foreign key onto listings(listing_id),
+      // and this listing has never been cached there - it was only ever a
+      // listing_drafts row. Seeding it now, from the bare create response,
+      // means the image/video uploads just below (which cache what they
+      // upload into that same listing_images table) have a parent row to
+      // point at, instead of failing with a raw "FOREIGN KEY constraint
+      // failed" the moment the first photo goes up.
+      try { saveListing(result); } catch (err) { log.warn(`could not seed the listings cache for ${newId}: ${err.message}`); }
+
       // Etsy hands out the listing_id only now, so photos/video staged before
       // this point could not be uploaded until this moment - do that first,
       // then ask Etsy for the whole listing back so the snapshot this app
@@ -832,6 +842,7 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
       let snapshot = result;
       try {
         snapshot = await caller('getListing', { listing_id: newId, includes: ['Images', 'Videos', 'Shipping', 'Inventory'] });
+        saveListing(snapshot);
       } catch (err) { log.warn(`could not re-fetch listing ${newId} with images/video after creating it: ${err.message}`); }
 
       // The desk row now belongs to a real Etsy listing. Any staged photo/video

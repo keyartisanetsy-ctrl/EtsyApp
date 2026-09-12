@@ -397,6 +397,31 @@ await check('unknown bulk action rejected', async () => {
   const { status } = await req('/api/bulk/jobs', { method: 'POST', body: { type: 'nope', targets: [1] }, allowError: true });
   assert(status === 400, `expected 400, got ${status}`);
 });
+await check('re-fetching photos is a real bulk action that re-caches what Etsy returns', async () => {
+  // Direct import rather than the HTTP layer, same as the draft-push tests --
+  // this only exercises the local cache write, not the real Etsy upload call.
+  const { HANDLERS } = await import('../server/src/services/bulk.js');
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const sync = await import('../server/src/services/sync.js');
+  await initDb();
+  const db = getDb();
+
+  assert(HANDLERS['listing.refresh_images'], 'listing.refresh_images is not registered');
+  assert(/photo/i.test(HANDLERS['listing.refresh_images'].describe(123)), 'describe() does not mention photos');
+
+  const listingId = 960132;
+  db.prepare('DELETE FROM listing_images WHERE listing_id = ?').run(listingId);
+  db.prepare('DELETE FROM listings WHERE listing_id = ?').run(listingId);
+  try {
+    sync.saveListing({ listing_id: listingId, shop_id: 960132, title: 'Refresh Photos Test', state: 'active' });
+    sync.saveImages(listingId, [{ listing_image_id: 12321, rank: 1, url_570xN: 'https://img.example.com/refreshed.jpg' }]);
+    const row = db.prepare('SELECT first_image_url FROM listings WHERE listing_id = ?').get(listingId);
+    assert(row.first_image_url === 'https://img.example.com/refreshed.jpg', 'the first-image column was not backfilled');
+  } finally {
+    db.prepare('DELETE FROM listing_images WHERE listing_id = ?').run(listingId);
+    db.prepare('DELETE FROM listings WHERE listing_id = ?').run(listingId);
+  }
+});
 
 console.log('\nExcel exports');
 for (const [name, path] of [['orders', '/api/exports/orders'], ['skus', '/api/exports/skus'],
@@ -2562,6 +2587,62 @@ await check('a new listing created from a local draft picks up its uploaded phot
     db.prepare('DELETE FROM undo_log WHERE shop_id = 960115').run();
     db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960115').run();
     client.removeAccount(960115);
+  }
+});
+
+await check('a brand-new listing is seeded into the listings cache before its photos upload, or listing_images has nowhere to point', async () => {
+  // Regression: listing_images/listing_products carry a foreign key onto
+  // listings(listing_id). A listing born from a local draft was never in
+  // that cache table -- pushToEtsy's own image upload (which caches what it
+  // uploads via saveImages) used to be the very first thing to touch that
+  // table for this id, and threw a raw "FOREIGN KEY constraint failed"
+  // the moment a photo went up on a freshly created listing.
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const drafts = await import('../server/src/services/drafts.js');
+  const sync = await import('../server/src/services/sync.js');
+  await initDb();
+  const db = getDb();
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960131').run();
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (960131,'Cache Seed Shop','v1.x','v1.x',datetime('now','+1 hour'),0)`).run();
+  client.setActiveAccount(960131);
+
+  try {
+    const draft = drafts.createLocal({
+      title: 'Cache Seed Keycap Set', description: 'A set.', price: 39.99, quantity: 5,
+      who_made: 'i_did', when_made: 'made_to_order', taxonomy_id: 1000,
+      shipping_profile_id: 5, readiness_state_id: 77,
+    });
+    const newId = 5557654;
+    const stubCaller = async (operationId, args) => {
+      if (operationId === 'createDraftListing') {
+        return { listing_id: newId, shop_id: 960131, title: 'Cache Seed Keycap Set', state: 'draft', price: { amount: 3999, divisor: 100, currency_code: 'USD' } };
+      }
+      if (operationId === 'getListing') return { listing_id: newId, title: 'Cache Seed Keycap Set', state: 'draft', images: [], videos: [] };
+      throw new Error(`unexpected operation in this test: ${operationId}`);
+    };
+
+    await drafts.push(draft.listingId, { caller: stubCaller });
+
+    const cached = db.prepare('SELECT listing_id FROM listings WHERE listing_id = ?').get(newId);
+    assert(cached, 'push() did not seed the listings cache for the new id');
+
+    // The exact failure this regression guards: without the seed above,
+    // this insert (what listings.uploadImage's own saveImages call does
+    // after a real photo upload) throws a raw FK error instead of succeeding.
+    let threw = null;
+    try {
+      sync.saveImages(newId, [{ listing_image_id: 909090, rank: 1, url_570xN: 'https://img.example.com/seeded.jpg' }]);
+    } catch (err) { threw = err; }
+    assert(!threw, `caching an uploaded photo on the new listing still throws: ${threw?.message}`);
+  } finally {
+    db.prepare('DELETE FROM listing_images WHERE listing_id = ?').run(5557654);
+    db.prepare('DELETE FROM listings WHERE listing_id = ?').run(5557654);
+    db.prepare('DELETE FROM undo_log WHERE shop_id = 960131').run();
+    db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960131').run();
+    client.removeAccount(960131);
   }
 });
 
