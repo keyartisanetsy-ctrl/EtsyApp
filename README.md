@@ -139,9 +139,42 @@ The app is local-first and deliberately quiet:
 
 ### Listings
 Every Etsy state — active, inactive, draft, expired, sold out — with activate,
-deactivate, delete, and full field editing. Create listings from scratch, upload
-images and video, manage digital files, personalisation, translations and
-properties.
+deactivate, delete, and full field editing: category (a text-search picker,
+never a raw numeric id — see Draft desk below), who made it/when/type/supply,
+shipping profile, return policy, shop section, weight and dimensions with
+units, tax and auto-renew, featured rank, and a real personalization question
+(not a single yes/no flag). "Review changes" shows exactly what is about to
+change before anything reaches Etsy. Upload images and video with an instant
+local preview while they upload, manage digital files, translations and
+category properties.
+
+### Draft desk
+A listing you started on Etsy — or one you start here — edited across as many
+sittings as you like; nothing touches Etsy until you press Send. What Etsy has
+and what you changed are shown side by side, so an abandoned edit never
+quietly becomes the truth, and a draft Etsy no longer has (deleted there)
+disappears from the desk on the next pull instead of lingering as a ghost row.
+
+- **One button fills in whatever is still missing** — most often a product
+  handed over from **Product Studio** (the Taobao/1688 companion app) with a
+  title, price and photos but no materials, category or description. *Fill
+  with AI* asks the configured provider, which can also write a description.
+  *Fill without AI* uses plain lookups instead — a materials dictionary, the
+  title's own words filtered through a stopword list, and Etsy's own taxonomy
+  search — no API key, no cost, at the price of not being able to write prose.
+- **Both check this shop's own saved defaults first.** A seller who lists the
+  same kind of thing over and over (this shop's keycaps) picks the same
+  category, materials, who/when-made, shipping/return/section and settings on
+  nearly every listing — "⚙ Usual defaults" saves that once, and "fill the
+  gaps" means "use what I always use" before either engine guesses at
+  anything from the title.
+- **Category attributes** (occasion, required specs — whatever Etsy asks for
+  under the chosen category) are staged and pushed the same way every other
+  field is, through the same picker that sets the category itself.
+- Photos and video for a not-yet-real draft are staged locally and uploaded
+  the moment the draft is sent, since Etsy's upload endpoints need a real
+  listing id that does not exist until then; a freshly picked file previews
+  immediately instead of waiting on that upload to finish.
 
 ### Bulk actions
 23 action types over any selection: activate, deactivate, delete, price changes
@@ -187,12 +220,16 @@ server/src/
   etsy/       operations.generated.js  all 105 operations, generated from the spec
               client.js                auth refresh, 10 req/s token bucket, retry, call log
               oauth.js                 OAuth2 authorization-code + PKCE
-  services/   sync, inventory, listings, orders, tracking/, ai/, research, bulk, excel
-  routes/     one router per surface, plus the raw operation explorer
-  db/         SQLite schema (27 tables) and access helpers
-web/src/      React + Vite; 14 screens
-scripts/      generate-operations.mjs, verify.mjs, demo-data.mjs, package-dist.mjs
+  services/   drafts, listings, inventory, sync, orders, tracking/, ai/, research,
+              bulk, excel, productstudio, taobao, undo, settings, and 14 more
+  routes/     one router per surface (21 total), plus the raw operation explorer
+  db/         SQLite schema (38 tables) and access helpers
+web/src/      React + Vite; 17 screens
+scripts/      generate-operations.mjs, verify.mjs, demo-data.mjs, package-dist.mjs,
+              start.mjs, pinggy-tunnel.mjs, remote-access.mjs, self-update.mjs
 ```
+
+Every file's job, one line each: [`docs/PROJECT-FILES.md`](docs/PROJECT-FILES.md).
 
 **Storage.** Everything is local: SQLite at `data/etsy-command-center.db`, via
 Node's built-in `node:sqlite`. `better-sqlite3` is an optional fallback for
@@ -217,10 +254,14 @@ npm start &
 npm run verify
 ```
 
-39 end-to-end checks over the operation catalogue, the SKU grid and pricing maths,
-the tracking parser and alert lifecycle, the prompt library, the bulk dry-run,
-every Excel export, path-traversal protection, and the error paths that should
-fail cleanly when a shop is not connected.
+123 end-to-end checks over the operation catalogue, the SKU grid and pricing
+maths, the tracking parser and alert lifecycle, the prompt library, the bulk
+dry-run, every Excel export, path-traversal protection, the draft desk's
+staging/push/autofill logic, the public-link tunnel's own reconnect loop, and
+the error paths that should fail cleanly when a shop is not connected. (Run
+without `npm start` first and about 47 of those report `fetch failed` instead
+of running — they need the live server on `:4317`; that is the harness noticing
+it is missing, not the app.)
 
 ---
 
@@ -261,6 +302,32 @@ The two things worth knowing up front:
 Computed columns are never written to, select options are created as needed, values
 are converted to the target column's type, and empty values are skipped so a blank
 here never wipes something you typed in Airtable.
+
+## Remote access
+
+Still local-first by default — bound to `127.0.0.1`, reachable only from this
+machine. Two opt-in ways to open it from somewhere else. Full guide:
+[docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md).
+
+**A temporary link from your own one-click start.** Set `REMOTE_ACCESS=1` in
+`.env` and the next `npm start` opens a public link to itself and prints it
+in the terminal, gated by a password (generated automatically if you have not
+set one). [Pinggy](https://pinggy.io) is the default — no binary to download,
+just an outbound SSH connection — and it **renews itself automatically**:
+Pinggy's free tier closes that connection on its own after about an hour, and
+this notices and opens a fresh one with a new address, printed again in the
+same window, for as long as `npm start` keeps running. `TUNNEL_PROVIDER=cloudflare`
+switches to a Cloudflare Tunnel instead (a small binary, cached after the
+first run; its link changes on every restart but does not renew itself while
+the app stays open).
+
+**An always-on copy on a VDS**, so every computer just opens it in a browser
+instead of each running its own copy with its own database. `deploy/setup-vds.ps1`
+(Windows) or `deploy/setup-vds.sh` (Linux) install Node, build the app,
+generate a password, and register it as a real service (NSSM / systemd) with
+its own Cloudflare Tunnel, so it survives reboots. Combined with `AUTO_UPDATE=1`
+(on by default from these scripts), a fix pushed to this repo reaches that VDS
+within 30 minutes with nobody re-running anything by hand.
 
 ## When the browser says the site cannot be reached
 
