@@ -34,6 +34,7 @@ export default function Airtable() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [duplicating, setDuplicating] = useState(null);
 
   const connected = status.data?.connected;
 
@@ -114,8 +115,12 @@ export default function Airtable() {
       {/* ------------------------------------------------------ destinations */}
       <section className="card">
         <h3>2. Where the orders go</h3>
+        <p className="small muted">
+          Every destination in every connected shop shows here, whichever shop you are currently in -
+          switching shops never makes another one look like it disappeared.
+        </p>
         {status.loading && <Spinner />}
-        {status.data && status.data.destinations.length === 0 && (
+        {status.data && status.data.allDestinations.length === 0 && (
           <Empty
             icon="⇉"
             title={connected ? 'No destination yet' : 'Connect Airtable first'}
@@ -127,14 +132,14 @@ export default function Airtable() {
         )}
 
         <div className="grid c2">
-          {(status.data?.destinations ?? []).map((d) => (
+          {(status.data?.allDestinations ?? []).map((d) => (
             <div className="card" key={d.id}>
               <div className="flex">
                 <strong>{d.label}</strong>
                 <span className="flex">
                   <span className="badge muted">{d.channel === 'shopify' ? 'Shopify' : 'Etsy'}</span>
                   {d.isDefault && <span className="badge">default</span>}
-                  {d.shopId === null && <span className="badge muted">all shops</span>}
+                  {d.shopId === null ? <span className="badge muted">all shops</span> : d.shopName && <span className="badge muted">{d.shopName}</span>}
                 </span>
               </div>
               <div className="small muted">
@@ -149,6 +154,7 @@ export default function Airtable() {
               {d.lastPushAt && <div className="small muted">last sent {fmtDateTime(Date.parse(d.lastPushAt) / 1000)}</div>}
               <div className="flex mt8">
                 <button className="btn sm" onClick={() => setEditing(d)}>Edit mapping</button>
+                <button className="btn sm ghost" onClick={() => setDuplicating(d)}>Duplicate for another shop</button>
                 <button className="btn sm ghost danger" onClick={() => remove(d)}>Delete</button>
               </div>
             </div>
@@ -156,7 +162,7 @@ export default function Airtable() {
         </div>
       </section>
 
-      <ShopNames destinations={status.data?.destinations ?? []} />
+      <ShopNames destinations={status.data?.allDestinations ?? status.data?.destinations ?? []} />
 
       <RatesPanel />
 
@@ -170,7 +176,69 @@ export default function Airtable() {
           onSaved={() => { setEditing(null); status.reload(); }}
         />
       )}
+
+      {duplicating && (
+        <DuplicateDestinationModal
+          destination={duplicating}
+          onClose={() => setDuplicating(null)}
+          onDone={() => { setDuplicating(null); status.reload(); }}
+        />
+      )}
     </Page>
+  );
+}
+
+/**
+ * Copy a working mapping onto another shop (or make it an all-shops copy)
+ * without retyping the field mapping - only a name and a shop to pick.
+ */
+function DuplicateDestinationModal({ destination, onClose, onDone }) {
+  const toast = useToast();
+  const showError = useErrorToast();
+  const shops = useAsync(() => api.get('/airtable/shop-names'), []);
+  const [label, setLabel] = useState(`${destination.label} copy`);
+  const [target, setTarget] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const options = shops.data ?? [];
+
+  const go = async () => {
+    setBusy(true);
+    try {
+      const shopId = target === '' ? null : Number(target);
+      await api.post(`/airtable/destinations/${destination.id}/duplicate`, { shopId, label });
+      toast({ kind: 'ok', title: 'Destination duplicated', body: 'Same mapping, ready to send to as soon as you switch to that shop.' });
+      onDone();
+    } catch (err) { showError(err, 'Could not duplicate'); } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal open onClose={onClose} title={`Duplicate "${destination.label}"`}
+           footer={<>
+             <button className="btn ghost" onClick={onClose}>Cancel</button>
+             <button className="btn primary" onClick={go} disabled={busy || !label.trim()}>
+               {busy ? <Spinner /> : 'Duplicate'}
+             </button>
+           </>}>
+      <p className="dim">
+        Copies the base, table, and all {destination.fieldMap.length} mapped column(s) exactly. Nothing is
+        sent to Airtable by duplicating - it just saves rebuilding the mapping by hand for another shop.
+      </p>
+      <div className="field">
+        <label>Name</label>
+        <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} />
+      </div>
+      <div className="field">
+        <label>For which shop</label>
+        <select className="select" value={target} onChange={(e) => setTarget(e.target.value)}>
+          <option value="">All shops (not tied to one)</option>
+          {options.map((s) => <option key={s.shopId} value={s.shopId}>{s.shopName}</option>)}
+        </select>
+        <div className="hint">
+          You do not need to switch to that shop first - the copy is created for it directly.
+        </div>
+      </div>
+    </Modal>
   );
 }
 

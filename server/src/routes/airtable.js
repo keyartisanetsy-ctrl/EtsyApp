@@ -20,7 +20,14 @@ router.get('/status', asyncRoute(async (req, res) => {
     connected: !!token,
     tokenPreview: token ? maskSecret(token) : null,
     autoPush: readSetting('airtable.auto_push') === 'true',
+    // Scoped to the active shop - this is what decides where a push actually
+    // lands, so it must never show a destination that belongs to a shop you
+    // are not currently in.
     destinations: service.listDestinations(),
+    // Every destination across every connected shop, for the management
+    // list on the settings page, so switching shops never makes another
+    // shop's mapping look like it vanished.
+    allDestinations: service.listAllDestinations(),
     shop: currentShop(),
   });
 }));
@@ -56,6 +63,15 @@ router.put('/destinations/:id', asyncRoute(async (req, res) => {
 }));
 router.delete('/destinations/:id', asyncRoute(async (req, res) => {
   res.json(service.deleteDestination(Number(req.params.id)));
+}));
+
+/** Clone a working mapping for another shop, or as an all-shops copy. */
+router.post('/destinations/:id/duplicate', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(service.duplicateDestination(Number(req.params.id), {
+    shopId: b.shopId === undefined ? undefined : (b.shopId === null ? null : Number(b.shopId)),
+    label: b.label ?? null,
+  }));
 }));
 
 // ---------------------------------------------------------------- matching

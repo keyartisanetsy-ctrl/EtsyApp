@@ -1245,6 +1245,61 @@ await check('Airtable is disclosed as a destination and needs a token', async ()
   assert(status === 400 && /token/i.test(err.error), `expected a token complaint, got ${status} ${err.error}`);
 });
 
+await check('destinations stay visible across shops, but editing one never moves it to whichever shop is active', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const client = await import('../server/src/etsy/client.js');
+  const service = await import('../server/src/services/airtable.js');
+  await initDb();
+  const db = getDb();
+  const shopX = 970201;
+  const shopY = 970202;
+
+  for (const id of [shopX, shopY]) {
+    db.prepare('DELETE FROM etsy_accounts WHERE shop_id = ?').run(id);
+  }
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (?, 'Shop X', 'v1.x', 'v1.x', datetime('now','+1 hour'), 1)`).run(shopX);
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (?, 'Shop Y', 'v1.x', 'v1.x', datetime('now','+1 hour'), 0)`).run(shopY);
+
+  try {
+    client.setActiveAccount(shopX);
+    const destX = service.saveDestination({
+      label: 'Shop X sheet', baseId: 'appTEST', tableId: 'tblTEST',
+      fieldMap: [{ target: 'Order ID', source: 'order.id', confidence: 'manual' }],
+    });
+    assert(destX.shopId === shopX, `new destination should belong to the active shop, got ${destX.shopId}`);
+
+    client.setActiveAccount(shopY);
+    const visibleToY = service.listDestinations();
+    assert(!visibleToY.some((d) => d.id === destX.id), 'a push-time list must not show another shop\'s destination');
+    const everyone = service.listAllDestinations();
+    assert(everyone.some((d) => d.id === destX.id), "shop X's destination disappeared from the all-shops management list while shop Y is active");
+    const seen = everyone.find((d) => d.id === destX.id);
+    assert(seen.shopName === 'Shop X', `expected the owning shop's name attached, got ${JSON.stringify(seen.shopName)}`);
+
+    // The regression this guards: opening shop X's destination while shop Y
+    // is active and saving it (its own mapping, no shop picker in the editor)
+    // must not silently reassign it to shop Y.
+    const resaved = service.saveDestination({ id: destX.id, ...destX, allShops: false });
+    assert(resaved.shopId === shopX, `editing a destination while a different shop is active reassigned it to ${resaved.shopId}`);
+
+    const dup = service.duplicateDestination(destX.id, { shopId: shopY, label: 'Shop Y sheet' });
+    assert(dup.shopId === shopY && dup.label === 'Shop Y sheet', 'duplicate did not land on the requested shop/name');
+    assert(JSON.stringify(dup.fieldMap) === JSON.stringify(destX.fieldMap), 'duplicate should copy the field mapping exactly');
+    assert(dup.isDefault === false, 'a fresh duplicate should never silently become the default');
+
+    const allShopsCopy = service.duplicateDestination(destX.id, { shopId: null, label: 'Shared sheet' });
+    assert(allShopsCopy.shopId === null, 'an all-shops duplicate should have no shop tied to it');
+  } finally {
+    db.prepare('DELETE FROM airtable_destinations WHERE base_id = ?').run('appTEST');
+    for (const id of [shopX, shopY]) {
+      db.prepare('DELETE FROM etsy_accounts WHERE shop_id = ?').run(id);
+      client.removeAccount(id);
+    }
+  }
+});
+
 console.log('\nSKU generation');
 await check('rule-based SKUs number products and variants in order', async () => {
   const { initDb, getDb } = await import('../server/src/db/index.js');

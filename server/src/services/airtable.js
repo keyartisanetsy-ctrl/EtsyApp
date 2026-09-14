@@ -59,6 +59,24 @@ export function listDestinations() {
     ORDER BY is_default DESC, id`).all(shopId).map(shape);
 }
 
+/**
+ * Every destination across every connected shop, not just the one you
+ * happen to be looking at right now - so switching shops in the top nav
+ * never makes another shop's mapping look like it disappeared. Purely for
+ * display/management (the Airtable settings page); anything that actually
+ * pushes orders still goes through listDestinations()/defaultDestination(),
+ * which stay scoped to the active shop so an order can never land in a
+ * table meant for a different one.
+ */
+export function listAllDestinations() {
+  return getDb().prepare(`
+    SELECT d.*, a.shop_name AS owner_shop_name, a.airtable_name AS owner_airtable_name
+    FROM airtable_destinations d
+    LEFT JOIN etsy_accounts a ON a.shop_id = d.shop_id
+    ORDER BY d.shop_id IS NULL DESC, a.shop_name, d.is_default DESC, d.id`).all()
+    .map((row) => ({ ...shape(row), shopName: row.shop_id === null ? null : (row.owner_airtable_name || row.owner_shop_name || null) }));
+}
+
 export function getDestination(id) {
   const row = getDb().prepare('SELECT * FROM airtable_destinations WHERE id = ?').get(id);
   if (!row) throw notFound(`Airtable destination ${id} does not exist.`);
@@ -87,7 +105,15 @@ export function saveDestination(input = {}) {
   if (!['etsy', 'shopify'].includes(channel)) throw badRequest('channel must be "etsy" or "shopify".');
   if (mergeFields.length > 3) throw badRequest('Airtable can match on at most three columns.');
 
-  const shopId = allShops ? null : activeShopId();
+  // Editing an existing destination must never silently move it to whichever
+  // shop happens to be active right now - the settings page shows every
+  // shop's destinations together, so opening one that belongs to a different
+  // shop and pressing Save would otherwise reassign it out from under that
+  // shop. A destination that was already tied to a specific shop keeps that
+  // shop; only a brand-new one, or one that was "all shops" and is having
+  // that turned off right now, picks up the shop you are currently in.
+  const existingShopId = id ? getDb().prepare('SELECT shop_id FROM airtable_destinations WHERE id = ?').get(id)?.shop_id ?? null : null;
+  const shopId = allShops ? null : (id && existingShopId !== null ? existingShopId : activeShopId());
   const args = {
     shop_id: shopId,
     label: label.trim(),
@@ -147,6 +173,40 @@ export function deleteDestination(id) {
   db.prepare('DELETE FROM airtable_links WHERE destination_id = ?').run(id);
   db.prepare('DELETE FROM airtable_destinations WHERE id = ?').run(id);
   return { deleted: true, id };
+}
+
+/**
+ * Clone a working mapping for another shop instead of rebuilding it column
+ * by column - only the label and the owning shop change, everything else
+ * (base, table, field map, merge key, row mode) copies exactly.
+ * `shopId: null` clones it as an all-shops destination; a specific id ties
+ * the copy to that shop the same way creating one while it is active would,
+ * without having to switch shops first.
+ */
+export function duplicateDestination(id, { shopId = undefined, label = null } = {}) {
+  const source = getDestination(id);
+  const db = getDb();
+  const targetShopId = shopId === undefined ? source.shopId : shopId;
+  const args = {
+    shop_id: targetShopId,
+    label: (label?.trim()) || `${source.label} (copy)`,
+    base_id: source.baseId, base_name: source.baseName, table_id: source.tableId, table_name: source.tableName,
+    view_id: source.viewId, view_name: source.viewName, channel: source.channel, row_mode: source.rowMode,
+    match_mode: source.matchMode, field_map: JSON.stringify(source.fieldMap), merge_fields: JSON.stringify(source.mergeFields),
+    constants: JSON.stringify(source.constants), create_options: source.createOptions ? 1 : 0,
+    create_links: source.createLinks ? 1 : 0, send_empty: source.sendEmpty ? 1 : 0,
+    once_per_order: source.oncePerOrder ? 1 : 0,
+    // Never auto-default the copy: two destinations silently claiming "default"
+    // for the same shop is exactly the confusion this flag exists to prevent.
+    is_default: 0,
+  };
+  const res = db.prepare(`
+    INSERT INTO airtable_destinations
+      (shop_id, label, base_id, base_name, table_id, table_name, view_id, view_name, channel, row_mode, match_mode,
+       field_map, merge_fields, constants, create_options, create_links, send_empty, once_per_order, is_default)
+    VALUES (@shop_id, @label, @base_id, @base_name, @table_id, @table_name, @view_id, @view_name, @channel, @row_mode, @match_mode,
+            @field_map, @merge_fields, @constants, @create_options, @create_links, @send_empty, @once_per_order, @is_default)`).run(args);
+  return getDestination(Number(res.lastInsertRowid));
 }
 
 // -------------------------------------------------------- value conversion
