@@ -141,6 +141,11 @@ router.put('/:id/translations/:language', asyncRoute(async (req, res) => {
   res.json(await listings.upsertTranslation(Number(req.params.id), req.params.language, req.body ?? {}));
 }));
 
+/** Draft a translation with AI, from this listing's own text - review before saving. */
+router.post('/:id/translations/:language/ai', asyncRoute(async (req, res) => {
+  res.json(await listings.translateWithAi(Number(req.params.id), req.params.language, { provider: req.body?.provider }));
+}));
+
 // ------------------------------------------------------------- properties
 
 router.get('/:id/properties', asyncRoute(async (req, res) => res.json(await listings.listProperties(Number(req.params.id)))));

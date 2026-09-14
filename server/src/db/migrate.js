@@ -72,6 +72,9 @@ export function migrateSchema(db) {
   // What a parcel cost to send, typed in next to its tracking number.
   addColumn(db, 'tracking', 'shipping_cost', 'REAL');
   addColumn(db, 'tracking', 'shipping_cost_currency', 'TEXT');
+  // What the goods in it cost, typed in right beside the shipping cost.
+  addColumn(db, 'tracking', 'supply_cost', 'REAL');
+  addColumn(db, 'tracking', 'supply_cost_currency', 'TEXT');
 
   // Which Airtable sheet family a destination belongs to, so Etsy and Shopify
   // can each have their own default.
@@ -139,11 +142,16 @@ export function migrateSchema(db) {
         last_event_location TEXT, event_count INTEGER DEFAULT 0, days_since_move INTEGER,
         is_stale INTEGER NOT NULL DEFAULT 0, alert_reason TEXT DEFAULT '', alert_ack INTEGER NOT NULL DEFAULT 0,
         delivered_at TEXT, first_seen_at TEXT NOT NULL DEFAULT (datetime('now')), last_checked_at TEXT,
-        check_error TEXT, raw TEXT, PRIMARY KEY (shop_id, tracking_code))`);
+        check_error TEXT, raw TEXT, shipping_cost REAL, shipping_cost_currency TEXT,
+        supply_cost REAL, supply_cost_currency TEXT, PRIMARY KEY (shop_id, tracking_code))`);
+      // The addColumn() calls above already added shipping/supply cost to
+      // tracking_old (whichever of them existed on this database), so naming
+      // them here keeps that data instead of silently dropping it on rebuild.
       db.exec(`INSERT INTO tracking SELECT shop_id, tracking_code, receipt_id, carrier_name, provider, status,
         status_detail, origin_country, destination_country, last_event_at, last_event_text, last_event_location,
         event_count, days_since_move, is_stale, alert_reason, alert_ack, delivered_at, first_seen_at,
-        last_checked_at, check_error, raw FROM tracking_old`);
+        last_checked_at, check_error, raw, shipping_cost, shipping_cost_currency, supply_cost, supply_cost_currency
+        FROM tracking_old`);
       db.exec('DROP TABLE tracking_old');
     })();
     log.info('tracking rebuilt keyed by (shop_id, tracking_code)');

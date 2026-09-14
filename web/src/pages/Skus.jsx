@@ -80,9 +80,33 @@ export default function Skus() {
 
   /** Etsy replaces the whole inventory array per listing, so group edits by listing. */
   const saveAll = useCallback(async () => {
+    // Renaming a SKU that already has a value is worth pausing over: anything
+    // filed under the old string outside this app (a warehouse sheet, a
+    // supplier's own records) does not know the SKU changed. Setting a SKU
+    // that was blank needs no ceremony - it can only be a first-time entry.
+    const pendingRenames = Object.entries(edits)
+      .map(([productId, change]) => {
+        if (change.sku === undefined) return null;
+        const row = rows.find((r) => String(r.productId) === String(productId));
+        if (!row) return null;
+        const next = change.sku === null ? '' : String(change.sku).trim();
+        return row.sku && next && next !== row.sku ? { row, oldSku: row.sku, newSku: next } : null;
+      })
+      .filter(Boolean);
+
+    if (pendingRenames.length) {
+      const list = pendingRenames.map((r) => `${r.oldSku} → ${r.newSku}`).join('\n');
+      if (!confirm(`Renaming ${pendingRenames.length} SKU(s) that already have a value:\n\n${list}\n\n`
+        + 'Anything saved against the old SKU in this app (supply link, cost, images) moves with it '
+        + "automatically. Anywhere OUTSIDE this app that has the old SKU written down does not know it "
+        + 'changed. Continue?')) return;
+      if (!confirm('Are you sure? Once this reaches Etsy it is live on the listing immediately.')) return;
+    }
+
     setSaving(true);
     let ok = 0;
     let failed = 0;
+    const allRenames = [];
     try {
       const byListing = {};
       for (const [productId, change] of Object.entries(edits)) {
@@ -93,8 +117,12 @@ export default function Skus() {
 
       for (const [listingId, changes] of Object.entries(byListing)) {
         try {
-          await api.put(`/skus/inventory/${listingId}`, { changes });
+          const res = await api.put(`/skus/inventory/${listingId}`, { changes });
           ok += Object.keys(changes).length;
+          for (const r of res.renames ?? []) {
+            const row = rows.find((x) => String(x.productId) === String(r.productId));
+            allRenames.push({ ...r, title: row?.title, firstImageUrl: row?.firstImageUrl, variantImageUrl: row?.variantImageUrl });
+          }
         } catch (err) {
           failed += Object.keys(changes).length;
           showError(err, `Listing ${listingId} rejected`);
@@ -113,6 +141,15 @@ export default function Skus() {
           body: `${ok} variation(s) pushed to Etsy${supplyItems.length ? `, ${supplyItems.length} supply link(s) stored` : ''}${failed ? `, ${failed} failed` : ''}`,
         });
       }
+
+      if (allRenames.length) {
+        try {
+          const r = await api.post('/exports/sku-renames', { renames: allRenames });
+          window.location.href = `/api/exports/download/${encodeURIComponent(r.filename)}`;
+          toast({ kind: 'ok', title: 'SKU rename sheet ready', body: `${allRenames.length} rename(s) - old/new SKU and both images, for the warehouse or supplier.` });
+        } catch (err) { showError(err, 'Renamed on Etsy, but could not build the hand-off sheet'); }
+      }
+
       setEdits({});
       setSupplyEdits({});
       reload();

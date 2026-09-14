@@ -27,6 +27,7 @@ router.post('/skus', asyncRoute(async (req, res) => {
 }));
 
 router.post('/listings', asyncRoute(async (req, res) => res.json(await excel.exportListings(req.body ?? {}))));
+router.post('/sku-renames', asyncRoute(async (req, res) => res.json(await excel.exportSkuRenames(req.body?.renames ?? []))));
 router.post('/tracking', asyncRoute(async (req, res) => res.json(await excel.exportTracking())));
 router.post('/tracking-template', asyncRoute(async (req, res) => res.json(await excel.exportTrackingTemplate())));
 

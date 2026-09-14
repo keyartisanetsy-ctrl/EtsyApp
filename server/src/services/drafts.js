@@ -420,14 +420,14 @@ const AUTOFILL_FIELDS = ['materials', 'tags', 'taxonomy_id', 'description', 'who
 // shipping profile or a tax setting from a title, and should not.
 const DEFAULTABLE_FIELDS = ['who_made', 'when_made', 'materials', 'is_supply', 'type',
   'shipping_profile_id', 'return_policy_id', 'shop_section_id',
-  'item_weight_unit', 'item_dimensions_unit', 'is_taxable', 'should_auto_renew'];
+  'item_weight_unit', 'item_dimensions_unit', 'should_auto_renew'];
 
 const DEFAULT_FIELD_LABELS = {
   who_made: 'who made it', when_made: 'when made', materials: 'materials',
   is_supply: 'supply/finished', type: 'listing type',
   shipping_profile_id: 'shipping profile', return_policy_id: 'return policy',
   shop_section_id: 'shop section', item_weight_unit: 'weight unit',
-  item_dimensions_unit: 'dimensions unit', is_taxable: 'tax setting',
+  item_dimensions_unit: 'dimensions unit',
   should_auto_renew: 'renewal setting',
 };
 
@@ -477,7 +477,6 @@ function missingFields(merged) {
     shop_section_id: !merged.shop_section_id,
     item_weight_unit: !merged.item_weight_unit,
     item_dimensions_unit: !merged.item_dimensions_unit,
-    is_taxable: merged.is_taxable == null,
     should_auto_renew: merged.should_auto_renew == null,
   };
 }

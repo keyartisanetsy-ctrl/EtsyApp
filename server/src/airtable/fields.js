@@ -306,6 +306,15 @@ export const SOURCE_FIELDS = [
   { key: 'tracking.shipping_cost_usd', group: 'Tracking', label: 'Shipping cost in USD',
     hint: 'The shipping cost converted to USD at the rate of the order date',
     get: ({ order }) => round2(convert(order.shipping_cost, order.shipping_cost_currency || 'CNY', 'USD', isoDate(order.created_ts))) },
+  { key: 'tracking.supply_cost', group: 'Tracking', label: 'Supply cost you paid',
+    hint: 'What the goods in this parcel cost you, typed in next to the shipping cost, as a number',
+    get: ({ order }) => (order.supply_cost ?? null) },
+  { key: 'tracking.supply_cost_currency', group: 'Tracking', label: 'Supply cost currency',
+    hint: 'Currency of the supply cost you typed in, e.g. CNY, USD',
+    get: ({ order }) => clean(order.supply_cost_currency) },
+  { key: 'tracking.supply_cost_usd', group: 'Tracking', label: 'Supply cost in USD',
+    hint: 'The supply cost converted to USD at the rate of the order date',
+    get: ({ order }) => round2(convert(order.supply_cost, order.supply_cost_currency || 'CNY', 'USD', isoDate(order.created_ts))) },
 
   // ----------------------------------------------------------- offsite ads
   // Etsy does not report which orders came from an offsite ad, so this
@@ -415,6 +424,18 @@ export const REPEATED_ON_EVERY_ROW = new Set([
 /** True when this source should only be filled on an order's first row. */
 export const isOrderLevel = (key) => !String(key).startsWith('item.') && !REPEATED_ON_EVERY_ROW.has(key);
 
+/**
+ * True for any source that resolves to a picture (or a link to one). Airtable
+ * automations that turn such a link into an attachment (e.g. "Varyant
+ * Görsel") only fire on a genuine empty-to-value transition, so a column fed
+ * by one of these needs a clear-then-set write when it is merely overwritten
+ * with a different value on an existing row - see `push()` in
+ * services/airtable.js.
+ */
+export const isVariantImageSource = (key) => String(key).startsWith('item.variant_image')
+  || key === 'item.image_any' || key === 'item.first_image' || key === 'item.last_image'
+  || key === 'item.first_last_image' || key === 'item.all_images' || key === 'item.image_count';
+
 export const SOURCE_BY_KEY = new Map(SOURCE_FIELDS.map((f) => [f.key, f]));
 
 /** Resolve one source key against a row context. Unknown keys resolve to null. */
@@ -422,6 +443,44 @@ export function resolveSource(key, ctx) {
   const def = SOURCE_BY_KEY.get(key);
   if (!def) return null;
   try { return def.get(ctx); } catch { return null; }
+}
+
+const titleKey = (title) => String(title ?? '').toLowerCase().trim().replace(/\s+/g, ' ');
+
+/**
+ * When a SKU has no supply link of its own, most sellers still have one for
+ * some other variant of the exact same product - the supplier page is
+ * usually shared across colours/sizes. Look through this shop's other SKUs
+ * for a link already saved against the same listing, or (a listing can get
+ * deleted and relisted with a new id but the same title) the same title,
+ * and use whichever is found first. Mutates `items` in place.
+ */
+function backfillSupplyLinks(db, shopId, items) {
+  const missing = items.filter((it) => !it.supply_link && !it.variant_supply_link);
+  if (!missing.length) return;
+
+  const known = db.prepare(`
+    SELECT rt.listing_id, rt.title, m.supply_link, m.variant_supply_link, m.supplier_name
+    FROM sku_meta m
+    JOIN receipt_transactions rt ON rt.sku = m.sku AND rt.sku <> ''
+    WHERE m.shop_id IS ? AND (COALESCE(m.supply_link,'') <> '' OR COALESCE(m.variant_supply_link,'') <> '')
+    ORDER BY m.updated_at DESC`).all(shopId);
+
+  const byListing = new Map();
+  const byTitle = new Map();
+  for (const row of known) {
+    if (row.listing_id != null && !byListing.has(row.listing_id)) byListing.set(row.listing_id, row);
+    const key = titleKey(row.title);
+    if (key && !byTitle.has(key)) byTitle.set(key, row);
+  }
+
+  for (const it of missing) {
+    const found = (it.listing_id != null && byListing.get(it.listing_id)) || byTitle.get(titleKey(it.title));
+    if (!found) continue;
+    it.supply_link = found.supply_link || '';
+    it.variant_supply_link = found.variant_supply_link || '';
+    if (!it.supplier_name) it.supplier_name = found.supplier_name || '';
+  }
 }
 
 /**
@@ -440,7 +499,7 @@ export function loadRows(receiptIds, { rowMode = 'item' } = {}) {
            COALESCE(f.is_done, 0) AS is_done, COALESCE(f.supplier_ordered, 0) AS supplier_ordered,
            f.supplier_order_ref, f.notes,
            s.tracking_code, s.carrier_name, t.status AS tracking_status,
-           t.shipping_cost, t.shipping_cost_currency
+           t.shipping_cost, t.shipping_cost_currency, t.supply_cost, t.supply_cost_currency
     FROM receipts r
     LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
     LEFT JOIN (SELECT receipt_id, MAX(id) AS sid FROM shipments GROUP BY receipt_id) ls ON ls.receipt_id = r.receipt_id
@@ -456,6 +515,8 @@ export function loadRows(receiptIds, { rowMode = 'item' } = {}) {
     LEFT JOIN sku_meta m ON m.sku = x.sku AND m.shop_id IS ? AND x.sku <> ''
     WHERE x.receipt_id IN (${holes})
     ORDER BY x.transaction_id`).all(shopId, ...receiptIds);
+
+  backfillSupplyLinks(db, shopId, items);
 
   const byReceipt = new Map();
   for (const it of items) {

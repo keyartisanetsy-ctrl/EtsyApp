@@ -337,6 +337,7 @@ function TranslationsEditor({ listingId }) {
   const [lang, setLang] = useState('es');
   const [form, setForm] = useState({ title: '', description: '', tags: '' });
   const [busy, setBusy] = useState(false);
+  const [translating, setTranslating] = useState(false);
   const toast = useToast();
   const showError = useErrorToast();
 
@@ -361,6 +362,15 @@ function TranslationsEditor({ listingId }) {
     } catch (err) { showError(err, 'Etsy rejected the translation'); } finally { setBusy(false); }
   };
 
+  const translate = async () => {
+    setTranslating(true);
+    try {
+      const r = await api.post(`/listings/${listingId}/translations/${lang}/ai`, {});
+      setForm({ title: r.title, description: r.description, tags: (r.tags ?? []).join(', ') });
+      toast({ kind: 'ok', title: `Drafted the ${lang} translation`, body: 'Check it over, then save.' });
+    } catch (err) { showError(err, 'Could not draft a translation'); } finally { setTranslating(false); }
+  };
+
   return (
     <div className="mb16">
       <div className="section-title">Translations</div>
@@ -372,6 +382,12 @@ function TranslationsEditor({ listingId }) {
       </div>
       {loading ? <Spinner /> : (
         <>
+          <button className="btn sm" onClick={translate} disabled={translating}>
+            {translating ? <Spinner /> : `✨ Draft with AI`}
+          </button>
+          <div className="hint">
+            Keeps the same voice, including emoji and any stylised text - review before saving, nothing is sent to Etsy yet.
+          </div>
           <div className="field">
             <label>Title</label>
             <input className="input" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
@@ -751,8 +767,6 @@ function ListingDetail({ id, onClose, onChanged }) {
           </div>
 
           <div className="section-title">Settings</div>
-          <Checkbox checked={edit.is_taxable ?? data.isTaxable ?? false}
-                    onChange={(v) => setEdit({ ...edit, is_taxable: v })} label="Charge shop tax rates on this listing" />
           <Checkbox checked={edit.should_auto_renew ?? data.shouldAutoRenew ?? false}
                     onChange={(v) => setEdit({ ...edit, should_auto_renew: v })} label="Auto-renew for $0.20 when it expires" />
           <div className="field">

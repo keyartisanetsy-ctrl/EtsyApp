@@ -14,7 +14,7 @@ import { activeShopId, currentShop } from '../etsy/shop.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 import * as at from '../airtable/client.js';
-import { loadRows, resolveSource, SOURCE_FIELDS, isOrderLevel } from '../airtable/fields.js';
+import { loadRows, resolveSource, SOURCE_FIELDS, isOrderLevel, isVariantImageSource } from '../airtable/fields.js';
 import { matchByName, matchByAi, suggestMergeFields } from '../airtable/mapping.js';
 import { ensureRates } from './fx.js';
 import { syncForReceipts } from './variantimages.js';
@@ -213,9 +213,7 @@ async function prepareSources(destination, receiptIds) {
   const needsRates = [...used].some((k) => k.startsWith('rate.') || k.endsWith('_usd'));
   // Every column that resolves to a picture needs the variation map on hand,
   // or the cell arrives empty for the listings that have not been synced.
-  const needsVariantImages = [...used].some((k) => k.startsWith('item.variant_image')
-    || k === 'item.image_any' || k === 'item.first_image' || k === 'item.last_image'
-    || k === 'item.first_last_image' || k === 'item.all_images' || k === 'item.image_count');
+  const needsVariantImages = [...used].some(isVariantImageSource);
   // The buyer's email is worth chasing before a push: it is the column most
   // often blank, and the single-receipt endpoint usually has it.
   const needsEmail = [...used].some((k) => k.startsWith('buyer.email'));
@@ -406,6 +404,26 @@ export async function push({ destinationId, receiptIds = [], mode = 'upsert', dr
 
   try {
     if (withId.length) {
+      // An Airtable automation that turns this link into a picture (e.g. the
+      // user's own "Varyant Görsel" attachment automation) only fires on a
+      // genuine empty-to-value transition. Overwriting an already-filled cell
+      // with a different value in one PATCH does not always retrigger it -
+      // the same reason a manual delete-then-retype worked for them. Clear it
+      // first, in its own call, so the real write right after is a fresh
+      // transition Airtable can't mistake for a no-op.
+      const variantImageTargets = [...new Set(
+        destination.fieldMap.filter((e) => isVariantImageSource(e.source)).map((e) => e.target),
+      )];
+      if (variantImageTargets.length) {
+        const toClear = withId
+          .filter((r) => variantImageTargets.some((t) => r.fields[t] != null && r.fields[t] !== ''))
+          .map((r) => ({ id: r.id, fields: Object.fromEntries(variantImageTargets.map((t) => [t, null])) }));
+        if (toClear.length) {
+          try { await at.updateRecords(destination.baseId, destination.tableId, toClear, { typecast }); }
+          catch (err) { log.warn(`could not clear variant-image field before retrigger: ${err.message}`); }
+        }
+      }
+
       const updated = await at.updateRecords(
         destination.baseId, destination.tableId,
         withId.map((r) => ({ id: r.id, fields: r.fields })),

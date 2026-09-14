@@ -157,6 +157,15 @@ router.post('/costs', asyncRoute(async (req, res) => {
   res.json(tracking.setShippingCosts(req.body?.entries ?? []));
 }));
 
+/** What the goods in this parcel cost you, typed in next to the shipping cost. */
+router.post('/:code/supply-cost', asyncRoute(async (req, res) => {
+  res.json(tracking.setSupplyCost(req.params.code, { cost: req.body?.cost, currency: req.body?.currency }));
+}));
+
+router.post('/supply-costs', asyncRoute(async (req, res) => {
+  res.json(tracking.setSupplyCosts(req.body?.entries ?? []));
+}));
+
 router.post('/:code/acknowledge', asyncRoute(async (req, res) => {
   tracking.acknowledgeAlert(req.params.code, req.body?.ack !== false);
   res.json({ code: req.params.code, acknowledged: req.body?.ack !== false });

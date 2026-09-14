@@ -423,6 +423,46 @@ export function setShippingCosts(entries = []) {
   return { updated: out.filter((r) => r.ok).length, failed: out.filter((r) => !r.ok).length, results: out };
 }
 
+/**
+ * What the goods in this parcel actually cost you -- typed in right next to
+ * the shipping cost, for when the real invoiced supply cost is known and
+ * worth recording per shipment rather than only estimated once per SKU.
+ */
+export function setSupplyCost(code, { cost, currency } = {}) {
+  const db = getDb();
+  const shopId = activeShopId();
+  const amount = cost === null || cost === undefined || cost === '' ? null : Number(cost);
+  if (amount !== null && !Number.isFinite(amount)) throw badRequest(`"${cost}" is not a number.`);
+  const ccy = (currency || readSetting('orders.supply_cost_currency') || 'CNY').toUpperCase();
+
+  const done = db.prepare(`UPDATE tracking SET supply_cost = ?, supply_cost_currency = ?
+                           WHERE shop_id IS ? AND tracking_code = ?`)
+    .run(amount, amount === null ? null : ccy, shopId, code);
+  if (!done.changes) {
+    db.prepare(`INSERT INTO tracking (shop_id, tracking_code, provider, status, supply_cost, supply_cost_currency)
+                VALUES (?,?, 'manual', 'pre_shipped', ?, ?)
+                ON CONFLICT(shop_id, tracking_code) DO UPDATE SET
+                  supply_cost = excluded.supply_cost, supply_cost_currency = excluded.supply_cost_currency`)
+      .run(shopId, code, amount, amount === null ? null : ccy);
+  }
+  audit('tracking.supply_cost', { entity: 'tracking', entityId: code, detail: { cost: amount, currency: ccy } });
+  return board({ codes: [code] }).rows[0] ?? null;
+}
+
+/** Set the supply cost on many parcels at once. */
+export function setSupplyCosts(entries = []) {
+  const out = [];
+  for (const e of entries) {
+    try {
+      setSupplyCost(e.trackingCode ?? e.code, { cost: e.cost, currency: e.currency });
+      out.push({ code: e.trackingCode ?? e.code, ok: true });
+    } catch (err) {
+      out.push({ code: e.trackingCode ?? e.code, ok: false, error: err.message });
+    }
+  }
+  return { updated: out.filter((r) => r.ok).length, failed: out.filter((r) => !r.ok).length, results: out };
+}
+
 export function setManualStatus(code, { status, note = '' }) {
   if (!Object.values(STATUS).includes(status)) throw badRequest(`Unknown status "${status}"`);
   const db = getDb();
@@ -488,6 +528,8 @@ export function board({ status = '', alertsOnly = false, search = '', codes = nu
       provider: r.provider,
       shippingCost: r.shipping_cost ?? null,
       shippingCostCurrency: r.shipping_cost_currency ?? null,
+      supplyCost: r.supply_cost ?? null,
+      supplyCostCurrency: r.supply_cost_currency ?? null,
       status: r.status,
       statusLabel: STATUS_LABELS[r.status] ?? r.status,
       statusDetail: r.status_detail,

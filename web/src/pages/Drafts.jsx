@@ -292,15 +292,6 @@ function DraftDefaultsModal({ open, onClose }) {
 
           <div className="section-title">Settings</div>
           <div className="field">
-            <label>Tax</label>
-            <select className="select" value={f.is_taxable === true ? 'true' : f.is_taxable === false ? 'false' : ''}
-                    onChange={(e) => set({ is_taxable: e.target.value === '' ? null : e.target.value === 'true' })}>
-              <option value="">— keep guessing —</option>
-              <option value="true">Charge shop tax rates</option>
-              <option value="false">Do not charge tax</option>
-            </select>
-          </div>
-          <div className="field">
             <label>Renewal</label>
             <select className="select" value={f.should_auto_renew === true ? 'true' : f.should_auto_renew === false ? 'false' : ''}
                     onChange={(e) => set({ should_auto_renew: e.target.value === '' ? null : e.target.value === 'true' })}>
@@ -644,8 +635,6 @@ function DraftEditor({ id, onClose, onChanged }) {
               </label>
             </div>
           </div>
-          <Checkbox checked={merged.is_taxable ?? false} onChange={(v) => save({ is_taxable: v })}
-                    label="Charge shop tax rates on this listing" />
           {draft.isLocalOnly ? (
             <Checkbox checked={merged.is_customizable ?? false} onChange={(v) => save({ is_customizable: v })}
                       label="Buyers may contact you for a customized order" />

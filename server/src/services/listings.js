@@ -11,6 +11,7 @@ import { saveListing, saveImages, saveVideos, syncVariationImages, LISTING_STATE
 import { getDiscountPercent } from './settings.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
+import * as ai from './ai/index.js';
 
 const log = createLogger('listings');
 export { LISTING_STATES };
@@ -441,6 +442,57 @@ export const upsertTranslation = async (listingId, language, { title, descriptio
     throw err;
   }
 };
+
+const TRANSLATION_LANGUAGE_NAMES = {
+  de: 'German', 'en-GB': 'English (UK)', 'en-IN': 'English (India)', 'en-US': 'English (US)',
+  es: 'Spanish', fr: 'French', it: 'Italian', ja: 'Japanese', nl: 'Dutch', pl: 'Polish',
+  pt: 'Portuguese', ru: 'Russian', sv: 'Swedish',
+};
+
+/**
+ * Draft a translation with AI, from this listing's own English text - reported
+ * back for review, never written to Etsy on its own. Etsy's translation
+ * fields are the same title/description/tags shape as the listing itself, so
+ * the one instruction that matters is to keep the voice: emoji, line breaks
+ * and any stylised (fancy-Unicode) characters carry no meaning to translate
+ * and should pass through unchanged.
+ */
+export async function translateWithAi(listingId, language, { provider } = {}) {
+  const listing = localListing(listingId);
+  const languageName = TRANSLATION_LANGUAGE_NAMES[language] || language;
+
+  const promptOverride = `You translate Etsy listing text into ${languageName} (IETF tag "${language}").
+Rules:
+- Translate meaning naturally, the way a native-speaking shop owner would write it - not word for word.
+- Keep every emoji exactly where it is and unchanged. Emoji carry no words to translate.
+- Keep any decorative/stylised Unicode letters (e.g. "𝓯𝓪𝓷𝓬𝔂" script, small caps, bold Unicode) byte-for-byte
+  unchanged - they are typographic styling, not a foreign alphabet, and must not be transliterated or dropped.
+- Keep line breaks, bullet characters and overall formatting the same.
+- Keep brand names, SKUs and numbers as they are.
+- Tags are short keywords: translate each to a natural search term in the target language, not a literal gloss.
+Reply with JSON only, no commentary: {"title": "...", "description": "...", "tags": ["...", ...]}`;
+
+  const res = await ai.run({
+    kind: 'custom',
+    provider,
+    promptOverride,
+    userInput: JSON.stringify({ title: listing.title, description: listing.description, tags: listing.tags ?? [] }),
+    maxTokens: 4096,
+  });
+
+  const parsed = ai.parseJsonish(res.text) ?? {};
+  if (!parsed.title || !parsed.description) {
+    throw badRequest('The AI reply did not include both a title and a description - try again.');
+  }
+  return {
+    title: String(parsed.title),
+    description: String(parsed.description),
+    tags: Array.isArray(parsed.tags) ? parsed.tags.map(String).slice(0, 13) : [],
+    provider: res.provider,
+    model: res.model,
+    runId: res.runId,
+  };
+}
 
 export const listProperties = (listingId) => call('getListingProperties', { shop_id: requireShopId(), listing_id: listingId });
 export const setProperty = (listingId, propertyId, body) =>

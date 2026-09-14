@@ -295,6 +295,11 @@ CREATE TABLE IF NOT EXISTS tracking (
   -- number; the currency is stored with it so it can be converted later.
   shipping_cost    REAL,
   shipping_cost_currency TEXT,
+  -- What the goods in this parcel cost you, typed in right next to the
+  -- shipping cost -- a per-shipment figure, separate from the per-SKU
+  -- estimate in sku_meta, for when the real invoiced cost is known.
+  supply_cost      REAL,
+  supply_cost_currency TEXT,
   PRIMARY KEY (shop_id, tracking_code)
 );
 CREATE INDEX IF NOT EXISTS idx_tracking_status ON tracking(status);

@@ -234,10 +234,10 @@ export async function exportSkus(filters = {}) {
       qty: r.quantity, enabled: r.isEnabled ? 'YES' : 'NO',
       supply: r.supplyLink, supplier: r.supplierName, cost: r.supplyCost,
       margin: r.margin, marginPct: r.marginPercent,
-      image: r.firstImageUrl, vimage: r.variationImageUrl,
+      image: r.firstImageUrl, vimage: r.variantImageUrl,
       listingId: r.listingId, productId: r.productId, url: r.listingUrl,
     });
-    for (const [key, url] of [['supply', r.supplyLink], ['image', r.firstImageUrl], ['vimage', r.variationImageUrl], ['url', r.listingUrl]]) {
+    for (const [key, url] of [['supply', r.supplyLink], ['image', r.firstImageUrl], ['vimage', r.variantImageUrl], ['url', r.listingUrl]]) {
       if (!url) continue;
       row.getCell(key).value = { text: url, hyperlink: url };
       row.getCell(key).font = { color: { argb: 'FF2563EB' }, underline: true };
@@ -247,6 +247,41 @@ export async function exportSkus(filters = {}) {
 
   finalise(wb);
   return save(wb, `etsy-skus-${stamp()}.xlsx`);
+}
+
+/**
+ * A hand-off sheet for whoever re-keys the warehouse/supplier side after a
+ * SKU gets renamed here: old and new SKU side by side with both images, so
+ * nothing needs to be looked up by hand. Bilingual headers because the
+ * supplier side of this shop's supply chain reads Chinese.
+ */
+export async function exportSkuRenames(renames = []) {
+  const wb = new ExcelJS.Workbook();
+  const sheet = wb.addWorksheet('SKU renames');
+
+  styleSheet(sheet, [
+    { header: 'Old SKU / 旧SKU', key: 'oldSku', width: 24 },
+    { header: 'New SKU / 新SKU', key: 'newSku', width: 24 },
+    { header: 'Title / 标题', key: 'title', width: 44 },
+    { header: 'First image / 首图', key: 'image', width: 44 },
+    { header: 'Variant image / 变体图', key: 'vimage', width: 44 },
+  ]);
+
+  for (const r of renames) {
+    const row = sheet.addRow({
+      oldSku: r.oldSku, newSku: r.newSku, title: r.title || '',
+      image: r.firstImageUrl || '', vimage: r.variantImageUrl || '',
+    });
+    for (const key of ['image', 'vimage']) {
+      const url = row.getCell(key).value;
+      if (!url) continue;
+      row.getCell(key).value = { text: url, hyperlink: url };
+      row.getCell(key).font = { color: { argb: 'FF2563EB' }, underline: true };
+    }
+  }
+
+  finalise(wb);
+  return save(wb, `sku-renames-${stamp()}.xlsx`);
 }
 
 // ---------------------------------------------------------------- listings

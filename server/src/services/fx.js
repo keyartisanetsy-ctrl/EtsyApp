@@ -94,8 +94,12 @@ export async function ensureRates() {
   const newest = latestDay();
   if (newest) {
     const ageDays = (Date.now() - Date.parse(`${newest}T00:00:00Z`)) / 86_400_000;
-    // The ECB skips weekends and holidays, so only chase it after a few days.
-    if (ageDays < 3.5) return { ok: true, cached: true, newest };
+    // Skip only when today's fetch already happened - the ECB itself only
+    // publishes on business days, so on a weekend this still re-checks and
+    // simply re-upserts Friday's numbers, which is cheap and keeps "refreshed
+    // every day" true rather than letting the cache go stale for days between
+    // real checks.
+    if (ageDays < 1) return { ok: true, cached: true, newest };
   }
   return refreshRates();
 }

@@ -254,50 +254,12 @@ export const searchShops = (shopName, { limit = 25, offset = 0 } = {}) =>
  */
 
 /** Words that carry no meaning in a category search. */
-const NOISE = new Set(['set', 'sets', 'kit', 'kits', 'pack', 'the', 'and', 'for', 'with', 'a', 'of',
-  'takim', 'takimi', 'seti', 'icin', 've']);
+const NOISE = new Set(['set', 'sets', 'kit', 'kits', 'pack', 'the', 'and', 'for', 'with', 'a', 'of']);
 
-/**
- * Etsy publishes the taxonomy in English only, so typing "klavye" finds
- * nothing at all. These are the words this shop actually sells in, translated
- * once so the box answers in either language.
- */
-const TR_EN = {
-  klavye: 'keyboard', tus: 'key', tuslar: 'keys', 'tus takimi': 'keycap',
-  kapak: 'cap', yuzuk: 'ring', kolye: 'necklace', bileklik: 'bracelet',
-  kupe: 'earring', mumluk: 'candle holder', mum: 'candle', tablo: 'wall art',
-  poster: 'poster', canta: 'bag', cuzdan: 'wallet', anahtarlik: 'keychain',
-  hediye: 'gift', dugun: 'wedding', nisan: 'engagement', 'yil donumu': 'anniversary',
-  dogumgunu: 'birthday', bebek: 'baby', ev: 'home', mutfak: 'kitchen',
-  masa: 'desk', 'masa altligi': 'desk mat', altlik: 'mat', lamba: 'lamp',
-  sticker: 'sticker', cikartma: 'sticker', defter: 'notebook', kalem: 'pen',
-  oyuncak: 'toy', kupa: 'mug', bardak: 'cup', tisort: 'shirt', tshirt: 'shirt',
-};
-
-/**
- * Split into meaningful words, and add the English word for any Turkish one,
- * so "klavye tus takimi" searches for keyboard and keycap as well.
- */
+/** Split into meaningful words. Etsy's taxonomy is English-only, so the search stays English-only too. */
 function tokens(text) {
   const base = normalise(text);
-  const out = base.split(' ').filter((t) => t && !NOISE.has(t));
-
-  // Two-word phrases first, so "tus takimi" beats "tus" on its own.
-  for (const [tr, en] of Object.entries(TR_EN)) {
-    if (tr.includes(' ') ? base.includes(tr) : out.includes(tr)) {
-      for (const word of en.split(' ')) if (!out.includes(word)) out.push(word);
-    }
-  }
-  return out;
-}
-
-/** The search text with any Turkish words swapped for their English equivalent. */
-function englishise(query) {
-  let text = normalise(query);
-  for (const [tr, en] of Object.entries(TR_EN)) {
-    if (text.includes(tr)) text = text.replace(new RegExp(`\\b${tr}\\b`, 'g'), en);
-  }
-  return text.replace(/\s+/g, ' ').trim();
+  return base.split(' ').filter((t) => t && !NOISE.has(t));
 }
 
 /**
@@ -341,9 +303,6 @@ export async function searchTaxonomy(query, { limit = 12, related = 6 } = {}) {
   if (!q) return { query: '', results: [], total: nodes.length };
 
   const queryTokens = tokens(query);
-  // Score against the English form too, so a Turkish search still matches the
-  // English category names Etsy publishes.
-  const qEnglish = englishise(query);
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const childrenOf = new Map();
   for (const n of nodes) {
@@ -353,11 +312,7 @@ export async function searchTaxonomy(query, { limit = 12, related = 6 } = {}) {
   }
 
   const scored = nodes
-    .map((n) => ({
-      node: n,
-      score: Math.max(scoreNode(n, q, queryTokens),
-        qEnglish === q ? 0 : scoreNode(n, qEnglish, queryTokens)),
-    }))
+    .map((n) => ({ node: n, score: scoreNode(n, q, queryTokens) }))
     .filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score || (a.node.path.length - b.node.path.length));
 

@@ -1156,9 +1156,22 @@ await check('an order can be delivered and still carry a warning', async () => {
     .find((s) => s.id === 'delivered');
   assert(/review/i.test(delivered.hint), 'the delivered chip should mention asking for a review');
 
-  // A number that is not YunExpress cannot be followed automatically; say so.
-  const foreign = statusesFor({ tracking_code: 'AB12', days_since_move: 6 }).find((s) => s.id.startsWith('idle'));
-  assert(/not a YunExpress/i.test(foreign.hint), 'a non-YunExpress number should be called out');
+  // A number that is not YunExpress-shaped cannot be followed automatically;
+  // say so immediately, not only once it has also gone idle.
+  const foreign = statusesFor({ tracking_code: 'AB12' }).find((s) => s.id === 'tracking_format');
+  assert(foreign && /doesn't look like a YunExpress number/i.test(foreign.hint),
+    'a non-YunExpress-shaped number should be called out as soon as it is added');
+  assert('YT1234567890123456'.length === 18, 'test fixture drifted from an 18-character code');
+  assert(!statusesFor({ tracking_code: 'YT1234567890123456' }).some((s) => s.id === 'tracking_format'),
+    'a real 18-character YT number should not be flagged');
+  assert(statusesFor({ tracking_code: 'YT12345' }).some((s) => s.id === 'tracking_format'),
+    'a YT-prefixed number of the wrong length should still be flagged');
+
+  // Etsy's own "completed" status should win over the default "New" chip even
+  // when nothing has happened on this app's side yet.
+  assert(ids({ status: 'completed' }).includes('completed'), 'an Etsy-completed order should say Completed');
+  assert(!ids({ status: 'completed' }).includes('new'), 'a completed order should not still read as new');
+  assert(ids({ status: 'open' }).includes('new'), 'an order Etsy still calls open, with nothing else recorded, is still new');
 });
 
 await check("Etsy's offsite ads fee follows the published rules", async () => {
@@ -1507,7 +1520,7 @@ await check('the AI status reader refuses invented parcels and low confidence', 
 });
 
 console.log('\nListing depth');
-await check('category search finds the neighbourhood, in either language', async () => {
+await check('category search finds the neighbourhood', async () => {
   const { initDb, getDb, json } = await import('../server/src/db/index.js');
   const research = await import('../server/src/services/research.js');
   await initDb();
@@ -1536,9 +1549,10 @@ await check('category search finds the neighbourhood, in either language', async
     assert(related.includes('Keyboards'), `related categories missing the keyboard branch: ${related.join(', ')}`);
     assert(hit.results[0].parent.name === 'Keyboards & Mice', 'the branch above was not reported');
 
-    // Etsy's taxonomy is English only, so a Turkish search has to be translated.
+    // Category search is English-only, matching what Etsy's taxonomy publishes -
+    // no Turkish-word translation layer in between to second-guess the match.
     const tr = await research.searchTaxonomy('klavye', { limit: 2 });
-    assert(tr.results.some((r) => r.name === 'Keyboards'), 'a Turkish search found nothing');
+    assert(!tr.results.some((r) => r.name === 'Keyboards'), 'a Turkish word should not match an English category name');
   } finally {
     if (previous) {
       db.prepare("UPDATE reference_cache SET payload = ? WHERE key = 'seller_taxonomy'").run(previous.payload);
@@ -3049,7 +3063,7 @@ await check('saved shop defaults win over guessing, and cover fields neither eng
       is_supply: false, type: 'physical',
       shipping_profile_id: 42, return_policy_id: 7, shop_section_id: 3,
       item_weight_unit: 'g', item_dimensions_unit: 'cm',
-      is_taxable: true, should_auto_renew: true,
+      should_auto_renew: true,
     });
 
     // Title still says "Resin" -- proving the saved materials default wins
@@ -3065,7 +3079,7 @@ await check('saved shop defaults win over guessing, and cover fields neither eng
     const result = await drafts.autofillMissing(listingId, { useAI: true });
     for (const label of ['materials', 'category', 'category attributes', 'who made it', 'when made',
       'listing type', 'supply/finished', 'shipping profile', 'return policy', 'shop section',
-      'weight unit', 'dimensions unit', 'tax setting', 'renewal setting']) {
+      'weight unit', 'dimensions unit', 'renewal setting']) {
       assert(result.filled.includes(label), `expected "${label}" in filled, got ${JSON.stringify(result.filled)}`);
     }
 
@@ -3081,7 +3095,7 @@ await check('saved shop defaults win over guessing, and cover fields neither eng
     assert(after.merged.shipping_profile_id === 42 && after.merged.return_policy_id === 7 && after.merged.shop_section_id === 3,
       'shipping/return/section defaults not applied');
     assert(after.merged.item_weight_unit === 'g' && after.merged.item_dimensions_unit === 'cm', 'unit defaults not applied');
-    assert(after.merged.is_taxable === true && after.merged.should_auto_renew === true, 'tax/renewal defaults not applied');
+    assert(after.merged.should_auto_renew === true, 'renewal default not applied');
   } finally {
     deleteSetting('drafts.defaults');
     db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960128').run();
@@ -3341,6 +3355,58 @@ await check('adding tracking without a carrier or note falls back to the shop de
     db.prepare('DELETE FROM tracking WHERE shop_id = 960119').run();
     db.prepare('DELETE FROM etsy_accounts WHERE shop_id = 960119').run();
     client.removeAccount(960119);
+  }
+});
+
+console.log('\nSKU rename hand-off');
+await check('renaming a SKU moves its supply record instead of orphaning it', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const inventory = await import('../server/src/services/inventory.js');
+  const client = await import('../server/src/etsy/client.js');
+  await initDb();
+  const db = getDb();
+  const shopId = 960140;
+
+  db.prepare('DELETE FROM etsy_accounts WHERE shop_id = ?').run(shopId);
+  db.prepare(`INSERT INTO etsy_accounts (shop_id, shop_name, access_token, refresh_token, expires_at, is_active)
+              VALUES (?, 'Rename Shop', 'v1.x', 'v1.x', datetime('now','+1 hour'), 1)`).run(shopId);
+  client.setActiveAccount(shopId);
+  db.prepare('DELETE FROM sku_meta WHERE shop_id = ?').run(shopId);
+
+  try {
+    db.prepare(`INSERT INTO sku_meta (shop_id, sku, supply_link, supplier_name, supply_cost, updated_at)
+                VALUES (?, 'OLD-SKU-1', 'https://supplier.example/a', 'Acme', 1.5, datetime('now'))`).run(shopId);
+    db.prepare(`INSERT INTO sku_meta (shop_id, sku, supply_link, updated_at)
+                VALUES (?, 'OLD-SKU-2', 'https://supplier.example/b', datetime('now'))`).run(shopId);
+    // NEW-SKU-2 already has its own curated record - it should win over the
+    // renamed-away one rather than being clobbered by it.
+    db.prepare(`INSERT INTO sku_meta (shop_id, sku, supply_link, updated_at)
+                VALUES (?, 'NEW-SKU-2', 'https://supplier.example/curated', datetime('now'))`).run(shopId);
+
+    inventory.rekeySupplyRecords([
+      { oldSku: 'OLD-SKU-1', newSku: 'NEW-SKU-1' },
+      { oldSku: 'OLD-SKU-2', newSku: 'NEW-SKU-2' },
+      { oldSku: 'NEVER-HAD-ONE', newSku: 'STILL-NONE' },
+    ]);
+
+    const moved = db.prepare('SELECT * FROM sku_meta WHERE shop_id = ? AND sku = ?').get(shopId, 'NEW-SKU-1');
+    assert(moved && moved.supply_link === 'https://supplier.example/a' && moved.supplier_name === 'Acme',
+      `supply record did not move to the new SKU: ${JSON.stringify(moved)}`);
+    const goneOld = db.prepare('SELECT 1 FROM sku_meta WHERE shop_id = ? AND sku = ?').get(shopId, 'OLD-SKU-1');
+    assert(!goneOld, 'the old SKU key should no longer exist once moved');
+
+    const clashWinner = db.prepare('SELECT supply_link FROM sku_meta WHERE shop_id = ? AND sku = ?').get(shopId, 'NEW-SKU-2');
+    assert(clashWinner.supply_link === 'https://supplier.example/curated',
+      `a SKU already curated under its new name should not be overwritten by the renamed-away record, got ${clashWinner.supply_link}`);
+    const goneOld2 = db.prepare('SELECT 1 FROM sku_meta WHERE shop_id = ? AND sku = ?').get(shopId, 'OLD-SKU-2');
+    assert(!goneOld2, 'the old SKU should still be cleaned up even when the new name already had a record');
+
+    const untouched = db.prepare('SELECT 1 FROM sku_meta WHERE shop_id = ? AND sku = ?').get(shopId, 'STILL-NONE');
+    assert(!untouched, 'a SKU with no supply record to begin with should not gain one from nowhere');
+  } finally {
+    db.prepare('DELETE FROM sku_meta WHERE shop_id = ?').run(shopId);
+    db.prepare('DELETE FROM etsy_accounts WHERE shop_id = ?').run(shopId);
+    client.removeAccount(shopId);
   }
 });
 

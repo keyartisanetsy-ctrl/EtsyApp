@@ -267,7 +267,7 @@ npm start &
 npm run verify
 ```
 
-129 end-to-end checks over the operation catalogue, the SKU grid and pricing
+131 end-to-end checks over the operation catalogue, the SKU grid and pricing
 maths, the tracking parser and alert lifecycle, the prompt library, the bulk
 dry-run, every Excel export, path-traversal protection, the draft desk's
 staging/push/autofill logic, the public-link tunnel's own reconnect loop, and

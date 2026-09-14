@@ -413,8 +413,8 @@ export function CategoryPicker({ value, onPick, attributes, onAttributes }) {
                onChange={(e) => { setSearch(e.target.value); setOpen(true); }}
                onFocus={() => setOpen(true)} />
         <div className="hint">
-          Turkish works too — &ldquo;klavye&rdquo; finds Keyboards. Each result shows the branch it sits in
-          and what is next to it, so you can see the neighbourhood before you commit.
+          Each result shows the branch it sits in and what is next to it, so you can see the
+          neighbourhood before you commit.
         </div>
 
         {loading && <div className="small dim mt8"><Spinner /> searching…</div>}

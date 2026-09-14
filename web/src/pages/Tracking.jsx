@@ -186,6 +186,7 @@ export default function Tracking() {
                 <th>Status</th>
                 <th>Last scan</th>
                 <th className="right">Shipping cost</th>
+                <th className="right">Supply cost</th>
                 <th className="right">Idle</th>
                 <th>Alert</th>
                 <th className="col-tight" />
@@ -216,6 +217,9 @@ export default function Tracking() {
                   </td>
                   <td className="right">
                     <ShippingCostCell row={t} onSaved={reload} />
+                  </td>
+                  <td className="right">
+                    <SupplyCostCell row={t} onSaved={reload} />
                   </td>
                   <td className="num">
                     <span className={t.isStale ? 'badge red' : 'small dim'}>{t.daysSinceMove ?? '—'}d</span>
@@ -282,6 +286,62 @@ function ShippingCostCell({ row, onSaved }) {
         {row.shippingCost === null || row.shippingCost === undefined
           ? <span className="muted">add</span>
           : <>{row.shippingCost} <span className="muted">{row.shippingCostCurrency || ''}</span></>}
+      </button>
+    );
+  }
+
+  return (
+    <span className="flex gap4">
+      <DecimalInput
+        className="input sm"
+        style={{ width: 78 }}
+        autoFocus
+        value={value}
+        onChange={setValue}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') save();
+          if (e.key === 'Escape') setEditing(false);
+        }}
+      />
+      <button className="btn xs primary" onClick={save} disabled={busy}>✓</button>
+      <button className="btn xs ghost" onClick={() => setEditing(false)}>✕</button>
+    </span>
+  );
+}
+
+/**
+ * What the goods in this parcel cost you, typed in right next to the shipping
+ * cost -- the real invoiced figure, for when it is worth recording per
+ * shipment instead of only as a per-SKU estimate.
+ */
+function SupplyCostCell({ row, onSaved }) {
+  const showError = useErrorToast();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(row.supplyCost ?? '');
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.post(`/tracking/${encodeURIComponent(row.trackingCode)}/supply-cost`, {
+        cost: value === '' ? null : Number(value),
+        currency: row.supplyCostCurrency || undefined,
+      });
+      setEditing(false);
+      onSaved?.();
+    } catch (err) { showError(err, 'Could not save the supply cost'); } finally { setBusy(false); }
+  };
+
+  if (!editing) {
+    return (
+      <button
+        className="btn xs ghost"
+        title="Click to set what the goods in this parcel cost you"
+        onClick={() => { setValue(row.supplyCost ?? ''); setEditing(true); }}
+      >
+        {row.supplyCost === null || row.supplyCost === undefined
+          ? <span className="muted">add</span>
+          : <>{row.supplyCost} <span className="muted">{row.supplyCostCurrency || ''}</span></>}
       </button>
     );
   }

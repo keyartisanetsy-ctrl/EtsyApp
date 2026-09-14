@@ -94,13 +94,21 @@ export async function updateVariations(listingId, changes, { dryRun = false } = 
   const order = (live.products || []).filter((p) => !p.is_deleted);
 
   const applied = [];
+  const renames = [];
   order.forEach((product, index) => {
     const change = changes[product.product_id] ?? changes[String(product.product_id)];
     if (!change) return;
     const target = payload.products[index];
 
     if (change.sku !== undefined) {
-      target.sku = change.sku === null ? '' : String(change.sku).trim();
+      const next = change.sku === null ? '' : String(change.sku).trim();
+      // A rename (not a first-time set or a clear) is the case worth tracking:
+      // supply/warehouse records are keyed by the old string and would
+      // otherwise silently point at a SKU nothing sells under any more.
+      if (product.sku && next && next !== product.sku) {
+        renames.push({ productId: product.product_id, oldSku: product.sku, newSku: next });
+      }
+      target.sku = next;
     }
     if (change.price !== undefined && change.price !== null && change.price !== '') {
       const price = Number(change.price);
@@ -124,7 +132,34 @@ export async function updateVariations(listingId, changes, { dryRun = false } = 
   await writeInventory(listingId, payload);
   audit('inventory.update', { entity: 'listing', entityId: listingId, detail: { applied } });
   log.info(`listing ${listingId}: updated ${applied.length} variation(s)`);
-  return { listingId, applied, count: applied.length };
+
+  if (renames.length) rekeySupplyRecords(renames);
+
+  return { listingId, applied, count: applied.length, renames };
+}
+
+/**
+ * A renamed SKU keeps its supply/warehouse record instead of orphaning it
+ * under a string nothing sells under any more - moves sku_meta (supply link,
+ * cost, supplier, saved variant image) from the old key to the new one.
+ * A sku_meta row already sitting on the new SKU wins (it is the one someone
+ * is actively curating); the old row is simply dropped in that case.
+ */
+export function rekeySupplyRecords(renames) {
+  const db = getDb();
+  const shopId = activeShopId();
+  const moved = [];
+  db.transaction(() => {
+    for (const { oldSku, newSku } of renames) {
+      const existing = db.prepare('SELECT 1 FROM sku_meta WHERE shop_id IS ? AND sku = ?').get(shopId, oldSku);
+      if (!existing) continue;
+      const clash = db.prepare('SELECT 1 FROM sku_meta WHERE shop_id IS ? AND sku = ?').get(shopId, newSku);
+      if (clash) { db.prepare('DELETE FROM sku_meta WHERE shop_id IS ? AND sku = ?').run(shopId, oldSku); continue; }
+      db.prepare('UPDATE sku_meta SET sku = ? WHERE shop_id IS ? AND sku = ?').run(newSku, shopId, oldSku);
+      moved.push(`${oldSku} -> ${newSku}`);
+    }
+  })();
+  if (moved.length) log.info(`supply records moved to their new SKU: ${moved.join(', ')}`);
 }
 
 /** Clear the SKU string on one or more variations (keeps the variation itself). */

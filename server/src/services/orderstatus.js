@@ -29,6 +29,12 @@ export const idleTier = (days) => (days === null || days === undefined
   ? null
   : IDLE_TIERS.find((t) => days >= t.days) ?? null);
 
+/** A real YunExpress tracking number starts "YT" and is exactly 18 characters. */
+export const looksLikeYunTrack = (code) => {
+  const c = String(code ?? '').trim().toUpperCase();
+  return c.startsWith('YT') && c.length === 18;
+};
+
 /**
  * The chips for one order row.
  *
@@ -40,6 +46,14 @@ export function statusesFor(row = {}) {
 
   if (row.was_canceled) {
     add('canceled', 'Canceled', 'muted', 'Etsy reports this order as cancelled.');
+  }
+
+  // Etsy's own receipt status is the one signal this app never invented -
+  // trust it over "nothing happened locally yet" so an order Etsy calls
+  // done does not sit tagged "New" forever just because it was fulfilled
+  // outside this app (or before it was installed).
+  if (String(row.status ?? '').toLowerCase() === 'completed') {
+    add('completed', 'Completed', 'ok', 'Etsy reports this order as completed.');
   }
 
   if (row.airtable_pushed_at) {
@@ -71,6 +85,15 @@ export function statusesFor(row = {}) {
       'The parcel arrived. Good moment to ask the buyer for a review.');
   }
 
+  // Shown the moment a tracking number is added, not just once it goes idle -
+  // a malformed number is worth catching before waiting days to notice it
+  // never scans anywhere.
+  if (row.tracking_code && !looksLikeYunTrack(row.tracking_code)) {
+    add('tracking_format', 'Check tracking number', 'warn',
+      `"${row.tracking_code}" doesn't look like a YunExpress number (should start with YT and be 18 characters) - `
+      + 'the app cannot follow it automatically, so check it with the carrier by hand.');
+  }
+
   const problem = row.problem_state ?? PROBLEM.NONE;
   if (problem === PROBLEM.OUT_OF_STOCK) {
     add('out_of_stock', 'Out of stock', 'bad',
@@ -87,11 +110,7 @@ export function statusesFor(row = {}) {
   // An idle parcel is a problem whether or not anyone marked it as one.
   const tier = row.tracking_code && !delivered ? idleTier(row.days_since_move) : null;
   if (tier && problem !== PROBLEM.SOLVED) {
-    const nonYun = !String(row.tracking_code || '').toUpperCase().startsWith('YT');
-    add(`idle_${tier.level}`, tier.label, tier.level === 'watch' ? 'warn' : 'bad',
-      nonYun
-        ? `${tier.hint} This number is not a YunExpress one, so the app cannot follow it automatically — check it with the carrier.`
-        : tier.hint);
+    add(`idle_${tier.level}`, tier.label, tier.level === 'watch' ? 'warn' : 'bad', tier.hint);
   }
 
   if (!out.length) {
