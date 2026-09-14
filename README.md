@@ -323,15 +323,19 @@ machine. Two opt-in ways to open it from somewhere else. Full guide:
 [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md).
 
 **A temporary link from your own one-click start.** Set `REMOTE_ACCESS=1` in
-`.env` and the next `npm start` opens a public link to itself and prints it
-in the terminal, gated by a password (generated automatically if you have not
-set one). [Pinggy](https://pinggy.io) is the default — no binary to download,
-just an outbound SSH connection — and it **renews itself automatically**:
-Pinggy's free tier closes that connection on its own after about an hour, and
-this notices and opens a fresh one with a new address, printed again in the
-same window, for as long as `npm start` keeps running. `TUNNEL_PROVIDER=cloudflare`
-switches to a Cloudflare Tunnel instead (a small binary, cached after the
-first run; its link changes on every restart but does not renew itself while
+`.env` and the next `npm start` opens a public link to itself, gated by a
+password (generated automatically if you have not set one). It's printed in
+the terminal **and** shown inside the app itself — Settings → Remote access
+— with a copy button for both the link and the password, so you never have
+to go hunting through a terminal window for it. [Pinggy](https://pinggy.io)
+is the default — no binary to download, just an outbound SSH connection —
+and it **renews itself automatically**: Pinggy's free tier closes that
+connection on its own after about an hour, and this notices and opens a
+fresh one with a new address; the Settings tab polls every few seconds, so
+what it shows is always the current link, not a stale one from an hour ago.
+`TUNNEL_PROVIDER=cloudflare` switches to a Cloudflare Tunnel instead (a small
+binary, cached after the first run; its link changes on every restart but
+does not renew itself while
 the app stays open).
 
 **An always-on copy on a VDS**, so every computer just opens it in a browser

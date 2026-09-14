@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import api from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import { Spinner, Banner, Tabs, CopyButton, useAsync, useToast, useErrorToast, fmtAgo } from '../components/ui.jsx';
 
 const GROUPS = [
   { id: 'etsy', label: 'Etsy shops', prefix: 'etsy.' },
+  { id: 'remote', label: 'Remote access', prefix: null },
   { id: 'privacy', label: 'Privacy', prefix: 'privacy.' },
   { id: 'ai', label: 'AI providers', prefix: 'ai.' },
   { id: 'tracking', label: 'Tracking', prefix: 'tracking.' },
@@ -73,7 +74,7 @@ export default function Settings() {
   if (loading || !data) return <Page title="Settings"><Spinner /></Page>;
 
   const group = GROUPS.find((g) => g.id === tab);
-  const prefixes = Array.isArray(group.prefix) ? group.prefix : [group.prefix];
+  const prefixes = group.prefix == null ? [] : Array.isArray(group.prefix) ? group.prefix : [group.prefix];
   const rows = data.settings.filter((s) => prefixes.some((p) => s.key.startsWith(p)));
 
   return (
@@ -248,6 +249,8 @@ export default function Settings() {
         </div>
       )}
 
+      {tab === 'remote' && <RemoteAccessPanel />}
+
       {tab === 'privacy' && privacy && (
         <>
           <div className="card mb16">
@@ -342,6 +345,7 @@ export default function Settings() {
         </Banner>
       )}
 
+      {rows.length > 0 && (
       <div className="card">
         {rows.map((s) => (
           <div className="field" key={s.key}>
@@ -390,6 +394,7 @@ export default function Settings() {
           </div>
         ))}
       </div>
+      )}
 
       <div className="section-title">Storage</div>
       <div className="card">
@@ -418,6 +423,80 @@ export default function Settings() {
  * Left blank, a job just uses the provider's own default, so this is a
  * refinement rather than something you have to fill in.
  */
+/**
+ * The public tunnel link, straight from this running server -- previously
+ * only ever printed to whatever terminal window started the app, gone the
+ * moment that window scrolled away or got lost. Polls every 10s because a
+ * Pinggy link renews itself on its own about once an hour with no user
+ * action at all, so a stale link sitting on screen would otherwise look
+ * like a bug the next time someone opens this tab.
+ */
+function RemoteAccessPanel() {
+  const { data, reload } = useAsync(() => api.get('/settings/remote-access'), []);
+
+  useEffect(() => {
+    const t = setInterval(reload, 10000);
+    return () => clearInterval(t);
+  }, [reload]);
+
+  if (!data) return <Spinner />;
+
+  if (!data.enabled) {
+    return (
+      <Banner kind="info">
+        <div>
+          Not turned on for this run. Set <code className="mono">REMOTE_ACCESS=1</code> in{' '}
+          <code className="mono">.env</code> and restart the app (close this window and double-click
+          <code className="mono"> START-WINDOWS.bat</code> / <code className="mono">START-MAC-LINUX.command</code> again)
+          to get a link here.
+        </div>
+      </Banner>
+    );
+  }
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h3>Open this app from anywhere</h3>
+        <div className="spacer" />
+        <span className={`badge ${data.url ? 'green' : 'amber'}`}>
+          {data.url ? 'connected' : data.connecting ? 'connecting…' : 'not connected'}
+        </span>
+      </div>
+
+      {data.url ? (
+        <>
+          <div className="field">
+            <label>Link</label>
+            <div className="flex gap4">
+              <input className="input mono" readOnly value={data.url} onFocus={(e) => e.target.select()} />
+              <CopyButton text={data.url} label="Copy" className="btn sm" />
+              <a className="btn sm" href={data.url} target="_blank" rel="noreferrer">Open ↗</a>
+            </div>
+          </div>
+          <div className="field">
+            <label>Password</label>
+            <div className="flex gap4">
+              <input className="input mono" readOnly value={data.password ?? ''} onFocus={(e) => e.target.select()} />
+              <CopyButton text={data.password ?? ''} label="Copy" className="btn sm" />
+            </div>
+          </div>
+          <div className="hint">
+            {data.provider === 'pinggy'
+              ? 'Renews itself automatically about every hour, on its own -- this page checks every few seconds, so what is shown here is always the current link.'
+              : 'This address changes the next time the app restarts.'}
+            {' '}Anyone with this link and password can open the app — do not share one without the other.
+          </div>
+        </>
+      ) : (
+        <Banner kind="warn">
+          {data.connecting ? 'Opening a tunnel now…' : 'The tunnel is not up right now.'} This page checks again on its own.
+        </Banner>
+      )}
+    </div>
+  );
+}
+
 function ModelPicker({ draft, setDraft }) {
   const { data } = useAsync(() => api.get('/ai/models'), []);
   const providers = data?.providers ?? [];

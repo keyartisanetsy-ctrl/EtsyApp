@@ -5,6 +5,7 @@ import { providerStatus } from '../services/ai/index.js';
 import { getDb } from '../db/index.js';
 import config from '../config.js';
 import { DESTINATIONS, USER_AGENT } from '../lib/outbound.js';
+import { getRemoteAccessStatus } from '../services/remoteAccessStatus.js';
 
 const router = Router();
 
@@ -30,6 +31,17 @@ router.put('/', asyncRoute(async (req, res) => {
 router.put('/:key', asyncRoute(async (req, res) => {
   required(req.body ?? {}, ['value']);
   res.json({ key: req.params.key, value: writeSetting(req.params.key, req.body.value) });
+}));
+
+/**
+ * The public tunnel link and password, straight from this running process --
+ * previously only ever visible in the terminal window that started it, gone
+ * the moment that window scrolled or was lost. Polled by the Settings screen
+ * while its Remote access tab is open, since a Pinggy link can renew itself
+ * at any moment without anyone touching the app.
+ */
+router.get('/remote-access', asyncRoute(async (req, res) => {
+  res.json(getRemoteAccessStatus());
 }));
 
 /**

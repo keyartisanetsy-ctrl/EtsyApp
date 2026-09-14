@@ -18,6 +18,7 @@ import crypto from 'node:crypto';
 import net from 'node:net';
 import { spawn, execSync } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
+import { setRemoteAccessStatus } from '../server/src/services/remoteAccessStatus.js';
 
 // Cloudflare's quick-tunnel hostnames are always several dictionary words
 // joined by hyphens (e.g. "warm-glass-cats-slowly.trycloudflare.com") -- a
@@ -219,6 +220,7 @@ export async function startRemoteAccess({ root, port }) {
     }
 
     console.log('\nStarting a temporary public link (Cloudflare Tunnel)...');
+    setRemoteAccessStatus({ enabled: true, provider: 'cloudflare', url: null, password, connecting: true });
     let last = null;
     const MAX_ATTEMPTS = 3;
     for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
@@ -232,6 +234,7 @@ export async function startRemoteAccess({ root, port }) {
         console.log(rule);
         console.log('  This address changes every time the app restarts -- check this window if it stops working.');
         console.log('  Anyone with this link and password can open the app. Do not share one without the other.\n');
+        setRemoteAccessStatus({ enabled: true, provider: 'cloudflare', url, password, connecting: false });
         return { url, password };
       } catch (err) {
         last = err;

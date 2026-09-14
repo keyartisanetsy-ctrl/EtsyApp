@@ -92,13 +92,18 @@ download, just an outbound SSH connection — and prints a box like:
 `APP_PASSWORD` is generated automatically the first time this runs if you
 had not already set one. That link works from any browser, anywhere.
 
+**It also shows up inside the app itself**, not just that terminal window —
+open Settings → Remote access from any browser already looking at the app
+(including through the tunnel link itself, once you have it once) to see
+the current link and password again, each with its own copy button.
+
 **It renews itself automatically.** Pinggy's free tier closes the
 connection on its own after about an hour — this notices right away and
 opens a fresh one with a new address, printed in the same terminal window
-again, for as long as `npm start` keeps running. Nothing to re-run by hand;
-just keep an eye on this window for the next address once it renews. Closing
-the window (or restarting the app) ends the link the same as before — the
-next start opens a new one.
+again. Nothing to re-run by hand; the Settings tab polls every few seconds,
+so whatever it shows is always the current address, never a stale one from
+before the last renewal. Closing the window (or restarting the app) ends
+the link the same as before — the next start opens a new one.
 
 Needs an `ssh` command on this machine — Windows 10/11 already include one
 (OpenSSH Client, on by default since 2018); if it's genuinely missing, the

@@ -20,6 +20,7 @@
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { ensureAppPassword, waitForPort, isReachable } from './remote-access.mjs';
+import { setRemoteAccessStatus } from '../server/src/services/remoteAccessStatus.js';
 
 // Pinggy's own subdomain shape has changed more than once (plain
 // *.free.pinggy.link, region-prefixed *.a.free.pinggy.link...) -- matching
@@ -115,10 +116,12 @@ export function runForever(port, password) {
           console.log('Pinggy needs an SSH client -- Windows 10/11 include one (OpenSSH Client, on by');
           console.log('default since 2018), or install Git for Windows, which bundles its own.');
           console.log('The app still runs normally on this machine.\n');
+          setRemoteAccessStatus({ enabled: true, provider: 'pinggy', url: null, password, connecting: false });
           onFirst?.(null);
           return;
         }
         console.log(`[Pinggy] could not connect (${result.error.message}). Retrying in 5s...`);
+        setRemoteAccessStatus({ enabled: true, provider: 'pinggy', url: null, password, connecting: true });
         await sleep(5000);
         continue;
       }
@@ -127,13 +130,17 @@ export function runForever(port, password) {
       const ok = await isReachable(result.url);
       if (!ok) console.log(`[Pinggy] warning: ${result.url} did not answer yet -- it may still need a moment.`);
       printBanner(result.url, password);
+      setRemoteAccessStatus({ enabled: true, provider: 'pinggy', url: result.url, password, connecting: false });
       onFirst?.(result.url);
       onFirst = null;
 
       // Runs until this connection ends -- the ~60 minute free-tier cutoff,
       // a network blip, anything -- then loops straight back to reconnect.
       await result.exited;
-      if (!stopped) console.log('\n[Pinggy] the tunnel closed -- reconnecting automatically...');
+      if (!stopped) {
+        console.log('\n[Pinggy] the tunnel closed -- reconnecting automatically...');
+        setRemoteAccessStatus({ enabled: true, provider: 'pinggy', url: null, password, connecting: true });
+      }
     }
   };
 
@@ -158,11 +165,13 @@ export function runForever(port, password) {
 export async function startRemoteAccess({ root, port }) {
   try {
     const password = ensureAppPassword(path.join(root, '.env'));
+    setRemoteAccessStatus({ enabled: true, provider: 'pinggy', url: null, password, connecting: true });
 
     const up = await waitForPort(port);
     if (!up) {
       console.log(`\nCould not start the public link: nothing answered on 127.0.0.1:${port} within 15s.`);
       console.log('The app still runs normally on this machine.\n');
+      setRemoteAccessStatus({ enabled: true, provider: 'pinggy', url: null, password, connecting: false });
       return null;
     }
 
@@ -173,6 +182,7 @@ export async function startRemoteAccess({ root, port }) {
   } catch (err) {
     console.log(`\nCould not start the public link: ${err.message}`);
     console.log('The app still runs normally on this machine.\n');
+    setRemoteAccessStatus({ enabled: true, provider: 'pinggy', url: null, password: null, connecting: false });
     return null;
   }
 }

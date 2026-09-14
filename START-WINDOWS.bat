@@ -31,13 +31,22 @@ echo.
 
 :run
 call npm start
+set EXITCODE=%errorlevel%
+
+if "%EXITCODE%"=="0" (
+  echo.
+  echo Installed an automatic update -- restarting in a few seconds...
+  timeout /t 5 >nul
+  goto run
+)
 
 echo.
 echo ------------------------------------------------------------
-echo The app just stopped. If that was an automatic update, it
-echo restarts itself below in a few seconds. If something actually
-echo crashed, read the error above -- closing this window stops
-echo the restart loop.
+echo The app stopped with an error (code %EXITCODE%) instead of a
+echo planned restart -- read the message above. A common one is
+echo "port already in use": either this app is already running (try
+echo opening the address it printed before), or something else on
+echo this computer is using that port -- set PORT=4400 (or any other
+echo number) in .env and run this again.
 echo ------------------------------------------------------------
-timeout /t 5 >nul
-goto run
+pause

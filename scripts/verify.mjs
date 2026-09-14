@@ -447,6 +447,33 @@ await check('path traversal on download is blocked', async () => {
 });
 
 console.log('\nSettings');
+await check('remote-access status is readable from the app, not just the terminal that started it', async () => {
+  // Regression: the Pinggy/Cloudflare tunnel link only ever appeared in
+  // whatever terminal window ran "npm start" -- gone the moment that window
+  // scrolled away, and impossible to see from a different computer at all.
+  const { setRemoteAccessStatus, getRemoteAccessStatus } = await import('../server/src/services/remoteAccessStatus.js');
+
+  assert(getRemoteAccessStatus().enabled === false, 'should start disabled before any tunnel script runs');
+
+  setRemoteAccessStatus({ enabled: true, provider: 'pinggy', url: null, password: 'abc123', connecting: true });
+  let status = getRemoteAccessStatus();
+  assert(status.enabled && status.connecting && !status.url, 'connecting state not reflected');
+
+  setRemoteAccessStatus({ enabled: true, provider: 'pinggy', url: 'https://foo.free.pinggy.link', password: 'abc123', connecting: false });
+  status = getRemoteAccessStatus();
+  assert(status.url === 'https://foo.free.pinggy.link' && !status.connecting, 'connected state not reflected');
+  assert(status.password === 'abc123', 'password should be readable back, same as the terminal already prints it');
+
+  // A reconnect drops the url but keeps the password -- the same tunnel
+  // renewing, not a different one starting cold.
+  setRemoteAccessStatus({ url: null, connecting: true });
+  status = getRemoteAccessStatus();
+  assert(status.password === 'abc123' && !status.url && status.connecting, 'reconnect should clear the url without losing the password');
+
+  // Reset for any later check that assumes a clean slate.
+  setRemoteAccessStatus({ enabled: false, provider: null, url: null, password: null, connecting: false });
+});
+
 await check('settings expose sources and mask secrets', async () => {
   const { body } = await req('/api/settings');
   assert(body.settings.length >= 15, 'too few settings');

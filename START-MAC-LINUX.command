@@ -29,12 +29,22 @@ echo
 
 while true; do
   npm start
+  code=$?
+  if [ "$code" -eq 0 ]; then
+    echo
+    echo "Installed an automatic update -- restarting in a few seconds..."
+    sleep 5
+    continue
+  fi
   echo
   echo "------------------------------------------------------------"
-  echo "The app just stopped. If that was an automatic update, it"
-  echo "restarts itself below in a few seconds. If something actually"
-  echo "crashed, read the error above -- closing this window stops"
-  echo "the restart loop."
+  echo "The app stopped with an error (code $code) instead of a"
+  echo "planned restart -- read the message above. A common one is"
+  echo "\"port already in use\": either this app is already running (try"
+  echo "opening the address it printed before), or something else on"
+  echo "this computer is using that port -- set PORT=4400 (or any other"
+  echo "number) in .env and run this again."
   echo "------------------------------------------------------------"
-  sleep 5
+  read -r -p "Press Enter to close..."
+  break
 done
