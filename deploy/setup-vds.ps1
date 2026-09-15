@@ -2,28 +2,33 @@
 # reachable over real HTTPS from any browser -- with no domain, no DNS step,
 # and no GitHub login (the repo is public, downloaded as a plain zip).
 #
-# Two ways to expose it, pick one:
+# Run this ON THE VDS, in a PowerShell window running as Administrator:
 #
-#   A) No public IP, or you cannot open inbound ports (the common case):
-#        irm https://raw.githubusercontent.com/keyartisanetsy-ctrl/EtsyApp/claude/etsy-bulk-management-app-q3enu5/deploy/setup-vds.ps1 -OutFile setup-vds.ps1
-#        powershell -ExecutionPolicy Bypass -File .\setup-vds.ps1
-#      Uses a Cloudflare Tunnel: cloudflared makes only an OUTBOUND
-#      connection to Cloudflare, which hands back a public HTTPS address.
-#      No inbound port, no provider panel needed at all -- but that address
-#      is a randomly-named *.trycloudflare.com link that CHANGES every time
-#      the tunnel service restarts. Fine for browsing the app day to day;
-#      not something you can register once with an OAuth provider (Etsy,
-#      Shopify) and forget, since a restart breaks that registration.
+#   irm https://raw.githubusercontent.com/keyartisanetsy-ctrl/EtsyApp/claude/etsy-bulk-management-app-q3enu5/deploy/setup-vds.ps1 -OutFile setup-vds.ps1
+#   powershell -ExecutionPolicy Bypass -File .\setup-vds.ps1
 #
-#   B) You have a static public IP and can open inbound 80/443 (needed for
-#      a redirect URI that never changes, e.g. Shopify's OAuth app setup):
-#        powershell -ExecutionPolicy Bypass -File .\setup-vds.ps1 -PublicIp 203.0.113.45
-#      Fronts the app with Caddy instead, using a free nip.io hostname that
-#      maps straight back to that IP (no domain purchase needed) -- Caddy
-#      gets and renews its own certificate, and the resulting
-#      https://203-0-113-45.nip.io address never changes, across restarts
-#      or reboots, for as long as the VDS keeps that IP. This is the one to
-#      register as a redirect/callback URL with an OAuth provider.
+# That's it -- no IP to look up or type in. The script asks a public "what
+# is my IP" service from inside the VDS itself for this machine's real
+# internet-facing address, which is what actually matters here and is not
+# always the same as whatever a hosting panel's dashboard shows (that field
+# is sometimes an internal/management IP instead). It then fronts the app
+# with Caddy, using a free nip.io hostname that maps straight back to that
+# IP (no domain purchase, no DNS step) -- Caddy gets and renews its own
+# certificate, and the resulting https://<ip-with-dashes>.nip.io address
+# never changes, across restarts or reboots, for as long as the VDS keeps
+# that IP. This is the one to register as a redirect/callback URL with an
+# OAuth provider (Shopify, Etsy) once, and forget -- and since it is
+# detected fresh every run, the exact same command works unmodified on any
+# of several different VDSs, each getting its own correct, permanent address.
+#
+# Two optional overrides:
+#   -PublicIp 203.0.113.45   Skip auto-detection and use this IP instead
+#                            (only needed if detection ever guesses wrong).
+#   -NoPublicIp              Use a Cloudflare Tunnel instead: no inbound
+#                            port needed at all, but the address it hands
+#                            back CHANGES every time that service restarts,
+#                            so it is not usable as an OAuth redirect URI.
+#                            For a VDS that genuinely cannot open 80/443.
 #
 # Either way: installs Node.js if missing, downloads the app (no git
 # needed), builds it, generates a random app password, and registers the
@@ -31,11 +36,31 @@
 # they survive reboots. Safe to re-run.
 
 param(
-  # A static public IPv4 for this VDS. When given, fronts the app with Caddy
-  # (a permanent https://<ip-with-dashes>.nip.io address) instead of a
-  # Cloudflare quick tunnel. Omit this for the no-inbound-port path.
-  [string]$PublicIp = ''
+  # A static public IPv4 for this VDS. Leave empty (the default) to have the
+  # script detect it automatically from inside the VDS -- see above for why
+  # that is preferred over reading it off a hosting panel.
+  [string]$PublicIp = '',
+  # Explicit opt-out of the permanent-address path, for a VDS that cannot
+  # open inbound 80/443. Falls back to a Cloudflare quick tunnel, whose
+  # address changes on every restart.
+  [switch]$NoPublicIp
 )
+
+# Asks a public echo service what IP this machine is reaching the internet
+# as -- the only reliable way to know, since a hosting panel's own "IP
+# Adresi" field is sometimes an internal/NAT address rather than the real
+# public one (three different providers can each show a different kind of
+# address there). Tries a few providers in case one is unreachable or rate
+# limiting; the first plain, valid IPv4 response wins.
+function Get-PublicIp {
+  foreach ($url in 'https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com') {
+    try {
+      $candidate = (Invoke-RestMethod -Uri $url -TimeoutSec 8).ToString().Trim()
+      if ($candidate -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') { return $candidate }
+    } catch { }
+  }
+  return $null
+}
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is much faster without a progress bar.
@@ -207,6 +232,18 @@ function Install-OrRestart-Service($name, $exe, $argString, $workDir) {
 
 Section "Registering the app as a Windows service..."
 Install-OrRestart-Service -name 'EtsyCommandCenter' -exe $nodeExe -argString 'scripts\start.mjs' -workDir $AppDir
+
+if (-not $PublicIp -and -not $NoPublicIp) {
+  Section "Detecting this VDS's real public IP..."
+  $PublicIp = Get-PublicIp
+  if ($PublicIp) {
+    Write-Host "  Detected: $PublicIp"
+  } else {
+    Write-Host "  Could not reach any IP-detection service -- falling back to a Cloudflare" -ForegroundColor Yellow
+    Write-Host "  tunnel instead (its address changes on every restart). Pass -PublicIp" -ForegroundColor Yellow
+    Write-Host "  <your VDS's real public IP> to force the permanent-address path." -ForegroundColor Yellow
+  }
+}
 
 if ($PublicIp) {
   # --- Caddy (a permanent HTTPS address, needs inbound 80/443 open) ---------

@@ -34,45 +34,48 @@ installed and just rebuilds the app.
 the same job with Windows-native tools (an MSI install of Node, a plain zip
 download of the app so no Git installation is needed, everything registered
 as real Windows services via NSSM so it restarts on reboot). Open
-PowerShell **as Administrator** on the VDS, then pick one:
-
-**No public IP, or you can't open inbound ports (fine for browsing, not for OAuth):**
+PowerShell **as Administrator** on the VDS, then:
 
 ```powershell
 irm https://raw.githubusercontent.com/keyartisanetsy-ctrl/EtsyApp/claude/etsy-bulk-management-app-q3enu5/deploy/setup-vds.ps1 -OutFile setup-vds.ps1
 powershell -ExecutionPolicy Bypass -File .\setup-vds.ps1
 ```
 
-No public IP to pass in and no inbound port to open, on Windows or at the
-VDS provider's own level: [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
-(`cloudflared`) makes only an *outbound* connection to Cloudflare, which
-hands back a public `https://<random-words>.trycloudflare.com` address
-(printed at the end, along with the password). **That address changes
-every time the tunnel service restarts** -- fine for browsing the app day
-to day, but not something you can register once as a redirect/callback URL
-with Shopify or Etsy and forget, since a restart breaks the registration.
-Check the log (`C:\EtsyAppTools\logs\EtsyTunnel-err.log`) if it stops
-responding.
+No IP to look up or type in -- the script asks a public "what is my IP"
+service from inside the VDS itself, which is what actually matters here.
+**This is deliberately not the IP a hosting panel's own dashboard shows**:
+that field is sometimes an internal/management address rather than the
+real internet-facing one, and it can differ between providers (one VPS
+panel might show a private `166.x.x.x`-style address while the machine's
+real public IP, as seen by an outside "what's my IP" check, is something
+else entirely). Detecting it fresh from inside the machine sidesteps that
+mismatch, and means the exact same command works unmodified across several
+different VDSs, each getting its own correct address.
 
-**You have a static public IP and can open inbound 80/443 (needed for a
-redirect URI that never changes, e.g. connecting Shopify):**
+It then fronts the app with [Caddy](https://caddyserver.com/), using a
+free `nip.io` hostname that maps straight back to that IP -- no domain
+purchase, no DNS step. Caddy gets and renews its own certificate, and the
+resulting `https://<ip-with-dashes>.nip.io` address **never changes**,
+across restarts or reboots, for as long as the VDS keeps that IP -- this
+is the one to paste into Shopify's "Allowed redirection URL(s)" (as
+`.../api/shopify/oauth/callback`) or any other OAuth provider's callback
+setting, once, and forget. The script opens 80/443 in the Windows Firewall
+automatically; if the VDS provider also has its own network
+firewall/security-group panel, open 80/443 there too.
 
-```powershell
-irm https://raw.githubusercontent.com/keyartisanetsy-ctrl/EtsyApp/claude/etsy-bulk-management-app-q3enu5/deploy/setup-vds.ps1 -OutFile setup-vds.ps1
-powershell -ExecutionPolicy Bypass -File .\setup-vds.ps1 -PublicIp 203.0.113.45
-```
+Two optional overrides, if you ever need them:
 
-(replace `203.0.113.45` with your VDS's own public IP). This fronts the app
-with [Caddy](https://caddyserver.com/) instead of a tunnel, using a free
-`nip.io` hostname that maps straight back to that IP -- no domain purchase,
-no DNS step. Caddy gets and renews its own certificate, and the resulting
-`https://203-0-113-45.nip.io` address **never changes**, across restarts or
-reboots, for as long as the VDS keeps that IP -- this is the one to paste
-into Shopify's "Allowed redirection URL(s)" (as
-`https://203-0-113-45.nip.io/api/shopify/oauth/callback`) or any other
-OAuth provider's callback setting, once, and forget. The script opens
-80/443 in the Windows Firewall automatically; if the VDS provider also has
-its own network firewall/security-group panel, open 80/443 there too.
+- `-PublicIp 203.0.113.45` -- skip auto-detection and use this IP instead
+  (only needed if detection ever guesses wrong, e.g. a VDS with several
+  network interfaces).
+- `-NoPublicIp` -- for a VDS that genuinely cannot open inbound 80/443:
+  falls back to a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+  instead, an *outbound*-only connection that hands back a public
+  `https://<random-words>.trycloudflare.com` address. Fine for browsing the
+  app day to day, but **that address changes every time the tunnel service
+  restarts**, so it is not something you can register once with an OAuth
+  provider and forget. Check the log
+  (`C:\EtsyAppTools\logs\EtsyTunnel-err.log`) if it stops responding.
 
 The `-ExecutionPolicy Bypass` only applies to this one run; it does not
 change anything system-wide. Check the services any time with
