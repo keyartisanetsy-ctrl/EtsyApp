@@ -271,12 +271,17 @@ export function coerce(value, field, { createLinks = false } = {}) {
 async function prepareSources(destination, receiptIds) {
   const used = new Set((destination.fieldMap ?? []).map((e) => e.source));
   const needsRates = [...used].some((k) => k.startsWith('rate.') || k.endsWith('_usd'));
+  // These two only make sense for Etsy orders - a Shopify destination's
+  // receiptIds are Shopify order GIDs, not Etsy receipt ids, so chasing
+  // Etsy-specific variant images or buyer-email enrichment for them would be
+  // wasted work at best and a wrong-shaped query at worst.
+  const isEtsy = destination.channel !== 'shopify';
   // Every column that resolves to a picture needs the variation map on hand,
   // or the cell arrives empty for the listings that have not been synced.
-  const needsVariantImages = [...used].some(isVariantImageSource);
+  const needsVariantImages = isEtsy && [...used].some(isVariantImageSource);
   // The buyer's email is worth chasing before a push: it is the column most
   // often blank, and the single-receipt endpoint usually has it.
-  const needsEmail = [...used].some((k) => k.startsWith('buyer.email'));
+  const needsEmail = isEtsy && [...used].some((k) => k.startsWith('buyer.email'));
 
   if (needsRates) {
     try { await ensureRates(); } catch (err) { log.warn(`rates unavailable: ${err.message}`); }
@@ -304,7 +309,7 @@ async function prepareSources(destination, receiptIds) {
 export async function buildRecords(destination, receiptIds, { table: known = null } = {}) {
   const table = known ?? await at.getTable(destination.baseId, destination.tableId);
   const byName = new Map(table.fields.map((f) => [f.name, f]));
-  const rows = loadRows(receiptIds, { rowMode: destination.rowMode });
+  const rows = loadRows(receiptIds, { rowMode: destination.rowMode, channel: destination.channel });
 
   if (!rows.length) throw badRequest('None of those orders are in this shop. Sync orders first, or switch shop.');
 
@@ -559,13 +564,13 @@ async function remove(destination, receiptIds, dryRun) {
 // ---------------------------------------------------------------- matching
 
 /** Propose a mapping for a table, either by name or with the AI. */
-export async function proposeMapping({ baseId, tableId, mode = 'name', provider, rowMode = 'item' }) {
+export async function proposeMapping({ baseId, tableId, mode = 'name', provider, rowMode = 'item', channel = 'etsy' }) {
   const table = await at.getTable(baseId, tableId);
   const shop = currentShop();
 
   const result = mode === 'ai'
     ? await matchByAi({ table: table.name, fields: table.fields, provider,
-      shopName: shop?.airtableName || shop?.shopName, rowMode })
+      shopName: shop?.airtableName || shop?.shopName, rowMode, channel })
     : matchByName(table.fields);
 
   const mergeFields = result.mergeFields?.length ? result.mergeFields : suggestMergeFields(result.map, table.fields);

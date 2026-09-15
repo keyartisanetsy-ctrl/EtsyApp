@@ -15,6 +15,7 @@ import Research from './pages/Research.jsx';
 import BulkJobs from './pages/BulkJobs.jsx';
 import Exports from './pages/Exports.jsx';
 import Airtable from './pages/Airtable.jsx';
+import Shopify from './pages/Shopify.jsx';
 import Analytics from './pages/Analytics.jsx';
 import Drafts from './pages/Drafts.jsx';
 import Supply from './pages/Supply.jsx';
@@ -49,6 +50,7 @@ const NAV = [
       { to: '/tracking', icon: '➤', label: 'Tracking', badge: 'alerts', badgeKind: 'alert' },
       { to: '/exports', icon: '⤓', label: 'Excel exports' },
       { to: '/airtable', icon: '⇉', label: 'Airtable sync' },
+      { to: '/shopify', icon: '🛍', label: 'Shopify' },
     ],
   },
   {
@@ -203,6 +205,7 @@ export default function App() {
             <Route path="/jobs" element={<BulkJobs />} />
             <Route path="/exports" element={<Exports />} />
             <Route path="/airtable" element={<Airtable />} />
+            <Route path="/shopify" element={<Shopify />} />
             <Route path="/analytics" element={<Analytics />} />
             <Route path="/drafts" element={<Drafts />} />
             <Route path="/supply" element={<Supply />} />

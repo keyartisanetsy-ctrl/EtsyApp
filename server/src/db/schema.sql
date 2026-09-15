@@ -18,6 +18,16 @@ CREATE TABLE IF NOT EXISTS oauth_state (
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Shopify's OAuth has no PKCE step, but the shop domain has to survive the
+-- round trip to the callback the same way Etsy's redirect_uri does.
+CREATE TABLE IF NOT EXISTS shopify_oauth_state (
+  state          TEXT PRIMARY KEY,
+  shop_domain    TEXT NOT NULL,
+  redirect_uri   TEXT NOT NULL,
+  scopes         TEXT NOT NULL,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- One row per connected Etsy shop. Several shops can be connected at once;
 -- exactly one is active, and the active shop scopes what the screens show.
 CREATE TABLE IF NOT EXISTS etsy_accounts (
@@ -682,5 +692,114 @@ CREATE TABLE IF NOT EXISTS draft_media (
   alt_text    TEXT,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (listing_id) REFERENCES listing_drafts(listing_id) ON DELETE CASCADE
+);
+
+-- ----------------------------------------------------------------- Shopify
+-- One connected store, unlike Etsy's multi-shop accounts table - there is
+-- only ever one Shopify shop to switch between, so no active/inactive
+-- bookkeeping is needed here; connection state lives in `settings`.
+
+CREATE TABLE IF NOT EXISTS shopify_products (
+  product_id        TEXT PRIMARY KEY,   -- Shopify GID, e.g. gid://shopify/Product/123
+  title             TEXT,
+  handle            TEXT,
+  status            TEXT,               -- ACTIVE | ARCHIVED | DRAFT
+  vendor            TEXT,
+  product_type      TEXT,
+  tags              TEXT,               -- JSON array
+  description_html  TEXT,
+  first_image_url   TEXT,
+  raw               TEXT,
+  synced_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_shopify_products_title ON shopify_products(title);
+
+CREATE TABLE IF NOT EXISTS shopify_variants (
+  variant_id          TEXT PRIMARY KEY,  -- gid://shopify/ProductVariant/123
+  product_id          TEXT NOT NULL,
+  inventory_item_id   TEXT,
+  title               TEXT,              -- e.g. "Black / Large"
+  sku                 TEXT,
+  price_amount        REAL,
+  compare_at_amount   REAL,
+  currency            TEXT,
+  cost_amount         REAL,              -- inventoryItem.unitCost, Shopify's own "cost per item"
+  inventory_quantity  INTEGER,
+  image_url           TEXT,
+  position            INTEGER,
+  raw                 TEXT,
+  synced_at           TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (product_id) REFERENCES shopify_products(product_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_shopify_variants_product ON shopify_variants(product_id);
+CREATE INDEX IF NOT EXISTS idx_shopify_variants_sku ON shopify_variants(sku);
+
+-- Supply link/supplier, the same idea as sku_meta for Etsy SKUs - kept as its
+-- own table rather than reused because sku_meta is keyed by (shop_id, sku)
+-- for real Etsy shop ids, and Shopify is a single store with no shop_id of
+-- that kind to key on.
+CREATE TABLE IF NOT EXISTS shopify_variant_meta (
+  sku             TEXT PRIMARY KEY,
+  supply_link     TEXT DEFAULT '',
+  supplier_name   TEXT DEFAULT '',
+  supply_currency TEXT DEFAULT 'CNY',
+  notes           TEXT DEFAULT '',
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS shopify_orders (
+  order_id                TEXT PRIMARY KEY,   -- gid://shopify/Order/123
+  name                    TEXT,               -- "#1001"
+  email                   TEXT,
+  phone                   TEXT,
+  financial_status        TEXT,
+  fulfillment_status      TEXT,
+  currency                TEXT,
+  subtotal_amount         REAL,
+  total_tax_amount        REAL,
+  total_shipping_amount   REAL,
+  total_discounts_amount  REAL,
+  total_amount            REAL,
+  customer_name           TEXT,
+  ship_name TEXT, ship_address1 TEXT, ship_address2 TEXT, ship_city TEXT,
+  ship_province TEXT, ship_zip TEXT, ship_country TEXT, ship_phone TEXT,
+  note                    TEXT,
+  tags                    TEXT,
+  created_at_shopify      TEXT,
+  cancelled_at            TEXT,
+  raw                     TEXT,
+  synced_at               TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_shopify_orders_created ON shopify_orders(created_at_shopify DESC);
+
+CREATE TABLE IF NOT EXISTS shopify_order_line_items (
+  line_item_id   TEXT PRIMARY KEY,   -- gid://shopify/LineItem/123
+  order_id       TEXT NOT NULL,
+  product_id     TEXT,
+  variant_id     TEXT,
+  sku            TEXT,
+  title          TEXT,
+  variant_title  TEXT,
+  quantity       INTEGER,
+  price_amount   REAL,
+  currency       TEXT,
+  image_url      TEXT,
+  FOREIGN KEY (order_id) REFERENCES shopify_orders(order_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_shopify_li_order ON shopify_order_line_items(order_id);
+
+-- What you paid to ship a Shopify order, and the tracking you added. Kept
+-- separate from Etsy's `tracking` table (shaped around polling YunTrack)
+-- since pushing a Shopify fulfillment is a one-way "tell Shopify" action.
+CREATE TABLE IF NOT EXISTS shopify_fulfillments (
+  order_id                TEXT PRIMARY KEY,
+  fulfillment_id          TEXT,              -- set once pushed to Shopify
+  tracking_number         TEXT,
+  tracking_company        TEXT,
+  tracking_url            TEXT,
+  shipping_cost           REAL,
+  shipping_cost_currency  TEXT,
+  pushed_at               TEXT,
+  FOREIGN KEY (order_id) REFERENCES shopify_orders(order_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_draft_media_listing ON draft_media(listing_id, kind, rank);

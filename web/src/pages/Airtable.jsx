@@ -304,7 +304,7 @@ function DestinationEditor({ destination, sources, onClose, onSaved }) {
     if (!baseId || !tableId) { toast({ kind: 'warn', title: 'Pick a base and a table first' }); return; }
     setMatching(mode);
     try {
-      const r = await api.post('/airtable/match', { baseId, tableId, mode, rowMode });
+      const r = await api.post('/airtable/match', { baseId, tableId, mode, rowMode, channel });
       setFieldMap(r.map ?? []);
       setConstants(r.constants ?? {});
       setMergeFields(r.mergeFields ?? []);
@@ -741,7 +741,7 @@ function RunHistory() {
  * The one-click sender used from the Orders screen. Shows exactly what will be
  * written before anything leaves the machine.
  */
-export function SendToAirtable({ receiptIds, onClose, onDone }) {
+export function SendToAirtable({ receiptIds, onClose, onDone, channel = 'etsy' }) {
   const toast = useToast();
   const showError = useErrorToast();
   const status = useAsync(() => api.get('/airtable/status'), []);
@@ -750,7 +750,13 @@ export function SendToAirtable({ receiptIds, onClose, onDone }) {
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  const destinations = status.data?.destinations ?? [];
+  // Shopify destinations are not tied to any one Etsy shop, so the
+  // cross-shop management list is what has them all - the plain, active-shop
+  // list is only right for Etsy. Either way, filtered to the channel these
+  // receiptIds actually belong to: an Etsy order can never go to a Shopify
+  // sheet or back.
+  const destinations = (channel === 'shopify' ? (status.data?.allDestinations ?? []) : (status.data?.destinations ?? []))
+    .filter((d) => d.channel === channel);
   const chosen = destinationId ?? destinations.find((d) => d.isDefault)?.id ?? destinations[0]?.id ?? null;
 
   useEffect(() => {

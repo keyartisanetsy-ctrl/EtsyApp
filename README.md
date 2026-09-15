@@ -267,13 +267,14 @@ npm start &
 npm run verify
 ```
 
-131 end-to-end checks over the operation catalogue, the SKU grid and pricing
+135 end-to-end checks over the operation catalogue, the SKU grid and pricing
 maths, the tracking parser and alert lifecycle, the prompt library, the bulk
 dry-run, every Excel export, path-traversal protection, the draft desk's
-staging/push/autofill logic, the public-link tunnel's own reconnect loop, and
-the error paths that should fail cleanly when a shop is not connected. (Run
-without `npm start` first and about 47 of those report `fetch failed` instead
-of running — they need the live server on `:4317`; that is the harness noticing
+staging/push/autofill logic, the public-link tunnel's own reconnect loop,
+Shopify's OAuth HMAC check and its Airtable pipeline, and the error paths
+that should fail cleanly when a shop is not connected. (Run without
+`npm start` first and about 47 of those report `fetch failed` instead of
+running — they need the live server on `:4317`; that is the harness noticing
 it is missing, not the app.)
 
 ---
@@ -315,6 +316,31 @@ The two things worth knowing up front:
 Computed columns are never written to, select options are created as needed, values
 are converted to the target column's type, and empty values are skipped so a blank
 here never wipes something you typed in Airtable.
+
+## Shopify (optional)
+
+A second, independent selling channel alongside Etsy — one store, connected once
+under the **Shopify** tab, either through a Dev Dashboard OAuth app or by pasting
+a custom app's Admin API access token directly.
+
+- **Products & SKUs**, variant by variant, the same shape as the Etsy SKU grid:
+  edit SKU, price, compare-at price and cost-per-item (Shopify's own field, so it
+  matches what Shopify's own reports use) inline, plus a supply link/supplier per
+  SKU. Editing a product's title, description, vendor, type, tags or status pushes
+  straight back with `productUpdate`.
+- **Orders**, with a shipping-cost cell next to each one and a tracking-number
+  box that creates a real Shopify fulfillment (`fulfillmentCreate` against the
+  order's open fulfillment orders) — the Shopify equivalent of adding tracking
+  to an Etsy order.
+- **Airtable**: a destination's *channel* decides whether it reads Etsy or
+  Shopify orders — the same field-mapping engine, the same push button, applied
+  to whichever channel the destination belongs to. A Shopify order shows up
+  under the same source-field catalogue (order id, buyer, totals, item, tracking,
+  shop name); Etsy-only columns (offsite ads, personalization…) simply resolve
+  empty on a Shopify destination, exactly as if you had not mapped them.
+
+Etsy's own tracking-to-Etsy push (the Orders screen's tracking box) already
+existed before Shopify was added — this only adds the equivalent for Shopify.
 
 ## Remote access
 

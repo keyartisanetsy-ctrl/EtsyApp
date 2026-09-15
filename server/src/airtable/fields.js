@@ -483,12 +483,92 @@ function backfillSupplyLinks(db, shopId, items) {
   }
 }
 
+const toCents = (decimalString) => {
+  const n = Number(decimalString);
+  return Number.isFinite(n) ? Math.round(n * 100) : null;
+};
+const toUnixSeconds = (isoString) => (isoString ? Math.floor(Date.parse(isoString) / 1000) : null);
+
+/**
+ * Shopify's own equivalent of loadRows() below - same output shape (order/
+ * item objects carrying the same property names: created_ts as unix seconds,
+ * grandtotal_amount/divisor/currency, tracking_code, etc.) so the entire
+ * SOURCE_FIELDS catalogue and buildRecords() work unchanged for either
+ * channel. Etsy-only fields (offsite ads, listing URLs, personalization)
+ * simply resolve to null for a Shopify destination, which is correct: no one
+ * would map an Etsy-only column onto a Shopify sheet.
+ */
+function loadShopifyRows(orderIds, { rowMode = 'item' } = {}) {
+  const db = getDb();
+  const shopDomain = readSetting('shopify.shop_domain');
+  const shop = {
+    shopId: null, shopName: shopDomain,
+    airtableName: readSetting('shopify.airtable_name') || shopDomain,
+  };
+  const holes = orderIds.map(() => '?').join(',');
+
+  const orders = db.prepare(`
+    SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency
+    FROM shopify_orders o
+    LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
+    WHERE o.order_id IN (${holes})
+    ORDER BY o.created_at_shopify DESC`).all(...orderIds);
+
+  const items = db.prepare(`
+    SELECT x.*, m.supply_link, m.supplier_name, m.supply_currency
+    FROM shopify_order_line_items x
+    LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND x.sku <> ''
+    WHERE x.order_id IN (${holes})
+    ORDER BY x.line_item_id`).all(...orderIds);
+
+  const byOrder = new Map();
+  for (const it of items) {
+    if (!byOrder.has(it.order_id)) byOrder.set(it.order_id, []);
+    byOrder.get(it.order_id).push({
+      receipt_id: it.order_id, transaction_id: it.line_item_id, listing_id: it.product_id, product_id: it.variant_id,
+      sku: it.sku, title: it.title, variations: null, image_url: it.image_url, is_digital: 0,
+      quantity: it.quantity, price_amount: toCents(it.price_amount), price_divisor: 100, price_currency: it.currency,
+      supply_link: it.supply_link, variant_supply_link: it.supply_link, supplier_name: it.supplier_name,
+      supply_cost: null, supply_currency: it.supply_currency, saved_variant_image_url: it.image_url,
+    });
+  }
+
+  const rows = [];
+  for (const o of orders) {
+    const lines = byOrder.get(o.order_id) ?? [];
+    const order = {
+      receipt_id: o.order_id, shop_id: null, status: (o.financial_status || '').toLowerCase(),
+      name: o.customer_name, buyer_email: o.email, first_line: o.ship_address1, second_line: o.ship_address2,
+      city: o.ship_city, state: o.ship_province, zip: o.ship_zip, country_iso: o.ship_country,
+      formatted_address: [o.ship_address1, o.ship_address2, o.ship_city, o.ship_province, o.ship_zip, o.ship_country].filter(Boolean).join(', '),
+      was_paid: /paid/i.test(o.financial_status || '') ? 1 : 0,
+      was_shipped: /fulfilled/i.test(o.fulfillment_status || '') ? 1 : 0, was_canceled: o.cancelled_at ? 1 : 0,
+      grandtotal_amount: toCents(o.total_amount), grandtotal_divisor: 100, grandtotal_currency: o.currency,
+      subtotal_amount: toCents(o.subtotal_amount), total_shipping_amount: toCents(o.total_shipping_amount),
+      total_tax_amount: toCents(o.total_tax_amount), discount_amount: toCents(o.total_discounts_amount),
+      created_ts: toUnixSeconds(o.created_at_shopify), tracking_code: o.tracking_number,
+      carrier_name: o.tracking_company, tracking_status: null,
+      shipping_cost: o.shipping_cost, shipping_cost_currency: o.shipping_cost_currency,
+      is_done: 0, supplier_ordered: 0, supplier_order_ref: null, notes: null,
+    };
+    if (rowMode === 'order' || lines.length === 0) {
+      rows.push({ receiptId: o.order_id, transactionId: null, order, item: lines[0] ?? null, items: lines, shop, rowMode: 'order' });
+    } else {
+      for (const item of lines) {
+        rows.push({ receiptId: o.order_id, transactionId: item.transaction_id, order, item, items: lines, shop, rowMode: 'item' });
+      }
+    }
+  }
+  return rows;
+}
+
 /**
  * Load the orders to push, shaped into the rows that will become Airtable
  * records: one per order line in 'item' mode, one per order in 'order' mode.
  */
-export function loadRows(receiptIds, { rowMode = 'item' } = {}) {
+export function loadRows(receiptIds, { rowMode = 'item', channel = 'etsy' } = {}) {
   if (!receiptIds?.length) return [];
+  if (channel === 'shopify') return loadShopifyRows(receiptIds, { rowMode });
   const db = getDb();
   const shopId = activeShopId();
   const shop = currentShop();
@@ -539,12 +619,13 @@ export function loadRows(receiptIds, { rowMode = 'item' } = {}) {
 }
 
 /** A single order's worth of sample values, for the mapping preview and the AI prompt. */
-export function sampleValues(rowMode = 'item') {
+export function sampleValues(rowMode = 'item', channel = 'etsy') {
   const db = getDb();
-  const latest = db.prepare('SELECT receipt_id FROM receipts WHERE shop_id IS ? ORDER BY created_ts DESC LIMIT 1')
-    .get(activeShopId());
+  const latest = channel === 'shopify'
+    ? db.prepare('SELECT order_id AS receipt_id FROM shopify_orders ORDER BY created_at_shopify DESC LIMIT 1').get()
+    : db.prepare('SELECT receipt_id FROM receipts WHERE shop_id IS ? ORDER BY created_ts DESC LIMIT 1').get(activeShopId());
   if (!latest) return {};
-  const [row] = loadRows([latest.receipt_id], { rowMode });
+  const [row] = loadRows([latest.receipt_id], { rowMode, channel });
   if (!row) return {};
   return Object.fromEntries(SOURCE_FIELDS.map((f) => [f.key, resolveSource(f.key, row)]));
 }

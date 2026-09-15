@@ -378,11 +378,11 @@ Reply with JSON only, no prose:
  * against both schemas before it is returned, so a hallucinated column or
  * source key is dropped rather than saved.
  */
-export async function matchByAi({ table, fields = [], provider, shopName, rowMode = 'item', runner = run }) {
+export async function matchByAi({ table, fields = [], provider, shopName, rowMode = 'item', channel = 'etsy', runner = run }) {
   const writable = fields.filter((f) => f.writable);
   if (!writable.length) throw badRequest('That table has no writable columns.');
 
-  const samples = sampleValues(rowMode);
+  const samples = sampleValues(rowMode, channel);
   const context = {
     airtableTable: table,
     airtableColumns: writable.map((f) => ({

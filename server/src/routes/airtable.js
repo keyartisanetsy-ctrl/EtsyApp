@@ -82,8 +82,8 @@ router.post('/destinations/:id/duplicate', asyncRoute(async (req, res) => {
  * as a plain, editable list - nothing is saved until the user says so.
  */
 router.post('/match', asyncRoute(async (req, res) => {
-  const { baseId, tableId, mode = 'name', provider, rowMode = 'item' } = req.body ?? {};
-  res.json(await service.proposeMapping({ baseId, tableId, mode, provider, rowMode }));
+  const { baseId, tableId, mode = 'name', provider, rowMode = 'item', channel = 'etsy' } = req.body ?? {};
+  res.json(await service.proposeMapping({ baseId, tableId, mode, provider, rowMode, channel }));
 }));
 
 // -------------------------------------------------------------------- push

@@ -73,6 +73,16 @@ export const SETTING_DEFS = {
   'airtable.auto_push':    { env: '', def: 'false', label: 'Send new orders to Airtable automatically after each sync',
     options: [ { value: 'false', label: 'No - I press the button myself' }, { value: 'true', label: 'Yes - push new orders automatically' } ] },
 
+  'shopify.shop_domain':      { env: process.env.SHOPIFY_SHOP_DOMAIN || '', def: '', label: 'Shop domain (….myshopify.com)' },
+  'shopify.api_version':      { env: process.env.SHOPIFY_API_VERSION || '', def: '2025-01', label: 'Admin API version' },
+  'shopify.oauth_client_id':     { env: process.env.SHOPIFY_CLIENT_ID || '', def: '', label: 'Shopify app Client ID' },
+  'shopify.oauth_client_secret': { env: process.env.SHOPIFY_CLIENT_SECRET || '', def: '', secret: true, label: 'Shopify app Client Secret' },
+  // Whichever path connected (OAuth exchange or a pasted custom-app token)
+  // ends up here - the client only ever needs one token to call the API with.
+  'shopify.admin_token':      { env: process.env.SHOPIFY_ADMIN_TOKEN || '', def: '', secret: true, label: 'Shopify Admin API access token' },
+  'shopify.connected_via':    { env: '', def: '', label: 'How the current token was obtained (oauth or custom)' },
+  'shopify.airtable_name':    { env: '', def: '', label: 'Shop name to write into an Airtable shop/MAĞAZA column for Shopify orders (blank = shop domain)' },
+
   'sku.prefix':            { env: '', def: 'KC', label: 'SKU prefix for generated codes' },
   'sku.pattern':           { env: '', def: '{PREFIX}{PRODUCT}-{VARIANT}', label: 'SKU shape, e.g. KC001-01' },
 

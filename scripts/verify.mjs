@@ -3465,6 +3465,139 @@ await check('renaming a SKU moves its supply record instead of orphaning it', as
   }
 });
 
+console.log('\nShopify');
+await check('OAuth callback HMAC verification matches Shopify\'s own recipe', async () => {
+  const oauth = await import('../server/src/shopify/oauth.js');
+  const crypto = await import('node:crypto');
+  const secret = 'shhh-secret';
+  const query = { code: 'abc123', shop: 'test-shop.myshopify.com', state: 'xyz', timestamp: '1690000000' };
+  const message = Object.keys(query).sort().map((k) => `${k}=${query[k]}`).join('&');
+  const hmac = crypto.createHmac('sha256', secret).update(message).digest('hex');
+
+  assert(oauth.verifyHmac({ ...query, hmac }, secret), 'a correctly signed callback should verify');
+  assert(!oauth.verifyHmac({ ...query, hmac: `${hmac.slice(0, -1)}0` }, secret), 'a tampered hmac must not verify');
+  assert(!oauth.verifyHmac({ ...query, hmac }, 'wrong-secret'), 'the wrong secret must not verify');
+  assert(!oauth.verifyHmac({ ...query }, secret), 'a missing hmac must not verify');
+});
+
+await check('a Shopify order pushes through the same Airtable engine as an Etsy one', async () => {
+  const { initDb, getDb, deleteSetting } = await import('../server/src/db/index.js');
+  const airtable = await import('../server/src/services/airtable.js');
+  const { writeSetting } = await import('../server/src/services/settings.js');
+  await initDb();
+  const db = getDb();
+  const orderId = 'gid://shopify/Order/9001';
+
+  db.prepare('DELETE FROM shopify_orders WHERE order_id = ?').run(orderId);
+  db.prepare('DELETE FROM shopify_order_line_items WHERE order_id = ?').run(orderId);
+  db.prepare('DELETE FROM shopify_fulfillments WHERE order_id = ?').run(orderId);
+  writeSetting('shopify.shop_domain', 'verify-shop.myshopify.com');
+
+  try {
+    db.prepare(`INSERT INTO shopify_orders (order_id, name, email, financial_status, fulfillment_status, currency,
+        subtotal_amount, total_tax_amount, total_shipping_amount, total_discounts_amount, total_amount,
+        customer_name, ship_city, ship_country, created_at_shopify)
+      VALUES (?, '#2001', 'buyer@example.com', 'PAID', 'UNFULFILLED', 'USD', 40, 3.2, 5, 0, 48.2,
+        'Jamie Rivera', 'Austin', 'US', '2026-09-10T12:00:00Z')`).run(orderId);
+    db.prepare(`INSERT INTO shopify_order_line_items (line_item_id, order_id, product_id, variant_id, sku, title,
+        variant_title, quantity, price_amount, currency, image_url)
+      VALUES ('gid://shopify/LineItem/1', ?, 'gid://shopify/Product/1', 'gid://shopify/ProductVariant/1',
+        'SHOP-SKU-1', 'Keycap Set', 'Black', 2, 20, 'USD', 'https://example.test/img.jpg')`).run(orderId);
+    db.prepare(`INSERT INTO shopify_fulfillments (order_id, tracking_number, tracking_company, shipping_cost, shipping_cost_currency)
+      VALUES (?, 'YT1234567890123456', 'YunExpress', 6.5, 'CNY')`).run(orderId);
+
+    const fakeTable = {
+      id: 'tblFAKE', name: 'Orders',
+      fields: [
+        { name: 'Order ID', type: 'singleLineText', writable: true },
+        { name: 'Buyer', type: 'singleLineText', writable: true },
+        { name: 'Subtotal', type: 'currency', writable: true },
+        { name: 'Quantity', type: 'number', writable: true },
+        { name: 'SKU', type: 'singleLineText', writable: true },
+        { name: 'Tracking', type: 'singleLineText', writable: true },
+        { name: 'Shop', type: 'singleLineText', writable: true },
+      ],
+    };
+    const destination = {
+      id: 999, channel: 'shopify', rowMode: 'item', oncePerOrder: true, mergeFields: [], sendEmpty: false, createLinks: false,
+      fieldMap: [
+        { target: 'Order ID', source: 'order.id' },
+        { target: 'Buyer', source: 'buyer.name' },
+        { target: 'Subtotal', source: 'total.subtotal' },
+        { target: 'Quantity', source: 'item.quantity' },
+        { target: 'SKU', source: 'item.sku' },
+        { target: 'Tracking', source: 'tracking.code' },
+        { target: 'Shop', source: 'shop.airtable_name' },
+      ],
+    };
+
+    const { records, issues } = await airtable.buildRecords(destination, [orderId], { table: fakeTable });
+    assert(records.length === 1, `expected 1 row (one line item), got ${records.length}`);
+    const fields = records[0].fields;
+    assert(fields['Order ID'] === orderId, `Order ID: ${fields['Order ID']}`);
+    assert(fields.Buyer === 'Jamie Rivera', `Buyer: ${fields.Buyer}`);
+    assert(fields.Subtotal === 40, `Subtotal should be the subtotal (40), got ${fields.Subtotal}`);
+    assert(fields.Quantity === 2, `Quantity: ${fields.Quantity}`);
+    assert(fields.SKU === 'SHOP-SKU-1', `SKU: ${fields.SKU}`);
+    assert(fields.Tracking === 'YT1234567890123456', `Tracking: ${fields.Tracking}`);
+    assert(fields.Shop === 'verify-shop.myshopify.com', `Shop: ${fields.Shop}`);
+    assert(!issues.length, `unexpected issues: ${JSON.stringify(issues)}`);
+  } finally {
+    db.prepare('DELETE FROM shopify_orders WHERE order_id = ?').run(orderId);
+    db.prepare('DELETE FROM shopify_order_line_items WHERE order_id = ?').run(orderId);
+    db.prepare('DELETE FROM shopify_fulfillments WHERE order_id = ?').run(orderId);
+    deleteSetting('shopify.shop_domain');
+  }
+});
+
+await check('Shopify products/orders: local CRUD works without calling the live API', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  const shopify = await import('../server/src/services/shopify.js');
+  await initDb();
+  const db = getDb();
+  const productId = 'gid://shopify/Product/8001';
+  const variantId = 'gid://shopify/ProductVariant/8001';
+  const orderId = 'gid://shopify/Order/8001';
+
+  for (const [table, col] of [['shopify_products', 'product_id'], ['shopify_variants', 'variant_id']]) {
+    db.prepare(`DELETE FROM ${table} WHERE ${col} = ?`).run(table === 'shopify_products' ? productId : variantId);
+  }
+  db.prepare('DELETE FROM shopify_orders WHERE order_id = ?').run(orderId);
+  db.prepare("DELETE FROM shopify_variant_meta WHERE sku = 'VERIFY-SHOP-SKU'").run();
+
+  try {
+    db.prepare(`INSERT INTO shopify_products (product_id, title, handle, status, vendor, product_type, tags)
+      VALUES (?, 'Test Keycap', 'test-keycap', 'ACTIVE', 'KeyArtisan', 'Keycap Set', '["a","b"]')`).run(productId);
+    db.prepare(`INSERT INTO shopify_variants (variant_id, product_id, title, sku, price_amount, cost_amount, inventory_quantity, position)
+      VALUES (?, ?, 'Default', 'VERIFY-SHOP-SKU', 19.99, 4.5, 12, 1)`).run(variantId, productId);
+    db.prepare(`INSERT INTO shopify_orders (order_id, name, financial_status, fulfillment_status, currency, total_amount, created_at_shopify)
+      VALUES (?, '#3001', 'PAID', 'UNFULFILLED', 'USD', 19.99, '2026-09-10T00:00:00Z')`).run(orderId);
+
+    const grid = shopify.listProducts({ search: 'Test Keycap' });
+    assert(grid.rows.length === 1, `expected 1 variant row, got ${grid.rows.length}`);
+    assert(grid.rows[0].margin === Math.round((19.99 - 4.5) * 100) / 100, `margin wrong: ${grid.rows[0].margin}`);
+
+    const product = shopify.getProduct(productId);
+    assert(product.variants.length === 1 && product.variants[0].sku === 'VERIFY-SHOP-SKU', 'getProduct did not return the variant');
+
+    const meta = shopify.saveVariantMeta('VERIFY-SHOP-SKU', { supplyLink: 'https://supplier.example/x', supplierName: 'Acme' });
+    assert(meta.supply_link === 'https://supplier.example/x', 'supply link not saved');
+    const gridAfter = shopify.listProducts({ search: 'Test Keycap' });
+    assert(gridAfter.rows[0].supplyLink === 'https://supplier.example/x', 'supply link not joined back into the grid');
+
+    const orders = shopify.listOrders({ search: '#3001' });
+    assert(orders.rows.length === 1 && orders.rows[0].orderId === orderId, 'listOrders did not find the order');
+
+    const withCost = shopify.setShippingCost(orderId, { cost: 7.25, currency: 'usd' });
+    assert(withCost.shippingCost === 7.25 && withCost.shippingCostCurrency === 'USD', 'shipping cost not stored/uppercased');
+  } finally {
+    db.prepare('DELETE FROM shopify_products WHERE product_id = ?').run(productId);
+    db.prepare('DELETE FROM shopify_variants WHERE variant_id = ?').run(variantId);
+    db.prepare('DELETE FROM shopify_orders WHERE order_id = ?').run(orderId);
+    db.prepare("DELETE FROM shopify_variant_meta WHERE sku = 'VERIFY-SHOP-SKU'").run();
+  }
+});
+
 await check('unauthenticated Etsy write is refused with guidance', async () => {
   const { status, body } = await req('/api/listings', {
     method: 'POST',
