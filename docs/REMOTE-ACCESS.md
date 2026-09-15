@@ -63,18 +63,43 @@ setting, once, and forget. The script opens 80/443 in the Windows Firewall
 automatically; if the VDS provider also has its own network
 firewall/security-group panel, open 80/443 there too.
 
-Two optional overrides, if you ever need them:
+**Some cheap "Windows VDS/RDP" resellers never route general inbound
+traffic to the machine at all** -- only RDP, often on a non-standard port
+(a provider's own panel showing something like "Windows 2019 + 13000
+Port" is exactly this). If that's the case here, Caddy's log
+(`C:\EtsyAppTools\logs\EtsyCaddy-err.log`) will show a certificate request
+failing with `"Connection refused"` on both `http-01` and `tls-alpn-01` --
+that specific error means nothing external can reach 80/443 on this
+machine, no matter which IP is used. Trying a different IP does not fix
+this; use `-CloudflareTunnelToken` below instead.
+
+Three optional overrides, if you ever need them:
 
 - `-PublicIp 203.0.113.45` -- skip auto-detection and use this IP instead
   (only needed if detection ever guesses wrong, e.g. a VDS with several
   network interfaces).
-- `-NoPublicIp` -- for a VDS that genuinely cannot open inbound 80/443:
-  falls back to a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
-  instead, an *outbound*-only connection that hands back a public
-  `https://<random-words>.trycloudflare.com` address. Fine for browsing the
-  app day to day, but **that address changes every time the tunnel service
-  restarts**, so it is not something you can register once with an OAuth
-  provider and forget. Check the log
+- `-CloudflareTunnelToken <token> [-CloudflareHostname sub.yourdomain.com]`
+  -- for the no-inbound-access case above, on a domain you already own.
+  Uses a [named Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-remote-tunnel/)
+  instead of Caddy: an *outbound*-only connection to Cloudflare, so no
+  inbound port is needed on this VDS at all, routed to a permanent hostname
+  you control -- this is genuinely as permanent as the Caddy address, just
+  without needing 80/443 open. Get `<token>` from the
+  [Zero Trust dashboard](https://one.dash.cloudflare.com/): **Networks →
+  Tunnels → Create a tunnel → Cloudflared connector → name it** -- the
+  install command it then shows you ends in a long token, that's the one
+  to pass here. Before running the script, also add a **Public Hostname**
+  on that same tunnel: pick a subdomain (e.g. `shopify`) on a domain
+  already added to your Cloudflare account, service type `HTTP`, URL
+  `localhost:4317`. `-CloudflareHostname` is only for this script's own
+  printout (so it can show you the exact Shopify callback URL) -- it
+  doesn't configure anything itself.
+- `-NoPublicIp` -- also for the no-inbound-access case, but without a
+  Cloudflare account or domain: falls back to a Cloudflare *quick* tunnel,
+  which hands back a public `https://<random-words>.trycloudflare.com`
+  address. Fine for browsing the app day to day, but **that address
+  changes every time the tunnel service restarts**, so it is not something
+  you can register once with an OAuth provider and forget. Check the log
   (`C:\EtsyAppTools\logs\EtsyTunnel-err.log`) if it stops responding.
 
 The `-ExecutionPolicy Bypass` only applies to this one run; it does not

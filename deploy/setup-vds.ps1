@@ -1,6 +1,6 @@
 # One-shot setup: gets Etsy Command Center running on a Windows Server VDS,
-# reachable over real HTTPS from any browser -- with no domain, no DNS step,
-# and no GitHub login (the repo is public, downloaded as a plain zip).
+# reachable over real HTTPS from any browser -- with no GitHub login (the
+# repo is public, downloaded as a plain zip).
 #
 # Run this ON THE VDS, in a PowerShell window running as Administrator:
 #
@@ -21,19 +21,44 @@
 # detected fresh every run, the exact same command works unmodified on any
 # of several different VDSs, each getting its own correct, permanent address.
 #
-# Two optional overrides:
-#   -PublicIp 203.0.113.45   Skip auto-detection and use this IP instead
-#                            (only needed if detection ever guesses wrong).
-#   -NoPublicIp              Use a Cloudflare Tunnel instead: no inbound
-#                            port needed at all, but the address it hands
-#                            back CHANGES every time that service restarts,
-#                            so it is not usable as an OAuth redirect URI.
-#                            For a VDS that genuinely cannot open 80/443.
+# THIS NEEDS INBOUND 80/443 TO ACTUALLY REACH THIS VM. Some cheap "Windows
+# VDS/RDP" resellers only forward RDP (often on a non-standard port, e.g.
+# "Windows 2019 + 13000 Port" on the provider's own panel) and never route
+# general inbound traffic to the VM at all -- Caddy's own log
+# (C:\EtsyAppTools\logs\EtsyCaddy-err.log) says so directly if that's the
+# case: a certificate request failing with "Connection refused" on both
+# http-01 and tls-alpn-01 means nothing external can reach 80/443 on this
+# machine, no matter which IP is used, and the fix is not a different IP --
+# it's one of the two options below.
+#
+# Three optional overrides:
+#   -PublicIp 203.0.113.45     Skip auto-detection and use this IP instead
+#                              (only needed if detection ever guesses wrong).
+#   -CloudflareTunnelToken <token> [-CloudflareHostname sub.yourdomain.com]
+#                              For a VDS where inbound 80/443 genuinely
+#                              cannot be opened (the case above). Uses a
+#                              *named* Cloudflare Tunnel instead of Caddy --
+#                              an outbound-only connection to Cloudflare, so
+#                              no inbound port is needed at all -- routed to
+#                              a permanent hostname on a domain you own,
+#                              which never changes either. Get <token> from
+#                              the Cloudflare Zero Trust dashboard: Networks
+#                              > Tunnels > Create a tunnel > Cloudflared >
+#                              name it > the install command it shows you
+#                              ends in this token; add a Public Hostname on
+#                              that same tunnel pointing at localhost:4317.
+#   -NoPublicIp                Use a Cloudflare *quick* tunnel instead: no
+#                              inbound port and no Cloudflare account
+#                              needed, but the address it hands back
+#                              CHANGES every time that service restarts, so
+#                              it is not usable as an OAuth redirect URI --
+#                              only for a VDS where 80/443 cannot be opened
+#                              and you don't want to set up a named tunnel.
 #
 # Either way: installs Node.js if missing, downloads the app (no git
 # needed), builds it, generates a random app password, and registers the
-# app plus whichever of the two above as Windows services (via NSSM) so
-# they survive reboots. Safe to re-run.
+# app plus whichever of the above as Windows services so they survive
+# reboots. Safe to re-run.
 
 param(
   # A static public IPv4 for this VDS. Leave empty (the default) to have the
@@ -43,7 +68,16 @@ param(
   # Explicit opt-out of the permanent-address path, for a VDS that cannot
   # open inbound 80/443. Falls back to a Cloudflare quick tunnel, whose
   # address changes on every restart.
-  [switch]$NoPublicIp
+  [switch]$NoPublicIp,
+  # The token from a *named* Cloudflare Tunnel (Zero Trust dashboard). When
+  # given, this takes priority over the two options above -- no inbound
+  # port needed, and the resulting address (on a domain you own) is
+  # permanent, unlike the quick-tunnel fallback.
+  [string]$CloudflareTunnelToken = '',
+  # Purely cosmetic: the public hostname you configured on that same tunnel
+  # in Cloudflare's dashboard, just so this script can print the exact
+  # Shopify/Etsy callback URL for you instead of you having to know it.
+  [string]$CloudflareHostname = ''
 )
 
 # Asks a public echo service what IP this machine is reaching the internet
@@ -233,17 +267,73 @@ function Install-OrRestart-Service($name, $exe, $argString, $workDir) {
 Section "Registering the app as a Windows service..."
 Install-OrRestart-Service -name 'EtsyCommandCenter' -exe $nodeExe -argString 'scripts\start.mjs' -workDir $AppDir
 
-if (-not $PublicIp -and -not $NoPublicIp) {
-  Section "Detecting this VDS's real public IP..."
-  $PublicIp = Get-PublicIp
-  if ($PublicIp) {
-    Write-Host "  Detected: $PublicIp"
-  } else {
-    Write-Host "  Could not reach any IP-detection service -- falling back to a Cloudflare" -ForegroundColor Yellow
-    Write-Host "  tunnel instead (its address changes on every restart). Pass -PublicIp" -ForegroundColor Yellow
-    Write-Host "  <your VDS's real public IP> to force the permanent-address path." -ForegroundColor Yellow
+if ($CloudflareTunnelToken) {
+  # --- Named Cloudflare Tunnel (permanent address, no inbound port needed at all) ---
+  Section "Setting up a named Cloudflare Tunnel..."
+  $cloudflaredExe = Join-Path $ToolsDir 'cloudflared.exe'
+  if (-not (Test-Path $cloudflaredExe)) {
+    Section "Installing cloudflared..."
+    Invoke-WebRequest -Uri 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' -OutFile $cloudflaredExe
   }
-}
+
+  # cloudflared's own installer registers, configures and starts itself as a
+  # Windows service (named "Cloudflared") from just the token -- no NSSM
+  # step needed here, unlike the quick-tunnel path below. Safe to re-run:
+  # it detects an existing installation and updates it in place.
+  Invoke-Native -Exe $cloudflaredExe -CallArgs @('service', 'uninstall') -IgnoreExitCode
+  Start-Sleep -Seconds 2
+  Invoke-Native -Exe $cloudflaredExe -CallArgs @('service', 'install', $CloudflareTunnelToken)
+
+  Start-Sleep -Seconds 5
+  $cfSvc = Get-Service -Name 'Cloudflared' -ErrorAction SilentlyContinue
+  Write-Host "  Cloudflared status: $($cfSvc.Status)"
+
+  $PermanentUrl = if ($CloudflareHostname) { "https://$CloudflareHostname" } else { $null }
+
+  Write-Host "`n================================================================"
+  Write-Host " Ready."
+  Write-Host ""
+  if ($PermanentUrl) {
+    Write-Host " Open:      $PermanentUrl"
+  } else {
+    Write-Host " Open whatever public hostname you set up on this tunnel in the Cloudflare"
+    Write-Host " Zero Trust dashboard (Networks -> Tunnels -> your tunnel -> Public Hostname)."
+  }
+  Write-Host " Password:  $AppPassword"
+  Write-Host ""
+  Write-Host " Write these two down -- the password is also saved in:"
+  Write-Host "   $EnvFile"
+  Write-Host ""
+  if ($PermanentUrl) {
+    Write-Host " Shopify OAuth redirect/callback URI -- paste this exact address into your"
+    Write-Host " Shopify app's 'Allowed redirection URL(s)':"
+    Write-Host "   $PermanentUrl/api/shopify/oauth/callback"
+    Write-Host ""
+  }
+  Write-Host " This address never changes -- no inbound port needed on this VDS at all,"
+  Write-Host " since cloudflared only ever makes an outbound connection to Cloudflare."
+  Write-Host " Safe to register with Shopify, Etsy, or anywhere else that needs one, and"
+  Write-Host " forget it."
+  Write-Host " Both services restart automatically when the server reboots."
+  Write-Host " Check status any time with:  Get-Service EtsyCommandCenter, Cloudflared"
+  Write-Host " If something is not working, check the Cloudflared service's own event log"
+  Write-Host " (Event Viewer -> Windows Logs -> Application, source Cloudflared) and the"
+  Write-Host " tunnel's status in the Cloudflare Zero Trust dashboard."
+  Write-Host "================================================================"
+
+} else {
+
+  if (-not $PublicIp -and -not $NoPublicIp) {
+    Section "Detecting this VDS's real public IP..."
+    $PublicIp = Get-PublicIp
+    if ($PublicIp) {
+      Write-Host "  Detected: $PublicIp"
+    } else {
+      Write-Host "  Could not reach any IP-detection service -- falling back to a Cloudflare" -ForegroundColor Yellow
+      Write-Host "  tunnel instead (its address changes on every restart). Pass -PublicIp" -ForegroundColor Yellow
+      Write-Host "  <your VDS's real public IP> to force the permanent-address path." -ForegroundColor Yellow
+    }
+  }
 
 if ($PublicIp) {
   # --- Caddy (a permanent HTTPS address, needs inbound 80/443 open) ---------
@@ -402,4 +492,6 @@ if ($PublicIp) {
   Write-Host " Check status any time with:  Get-Service EtsyCommandCenter, EtsyTunnel"
   Write-Host " If something is not working, the real error is in:  $LogDir"
   Write-Host "================================================================"
+}
+
 }
