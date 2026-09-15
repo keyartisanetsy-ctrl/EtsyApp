@@ -652,6 +652,19 @@ CREATE TABLE IF NOT EXISTS supply_items (
 );
 CREATE INDEX IF NOT EXISTS idx_supply_supplier ON supply_items(shop_id, supplier);
 
+-- The last OneBound stock/price check for one supplier item, cached so the
+-- SKU grid can show it without spending a paid API call on every page load.
+-- A fresh check (the "Check stock" button) always overwrites this.
+CREATE TABLE IF NOT EXISTS taobao_stock_checks (
+  supplier    TEXT NOT NULL,
+  item_id     TEXT NOT NULL,
+  checked_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  in_stock    INTEGER,            -- 0/1/NULL (NULL = could not be determined)
+  summary     TEXT,               -- one line, e.g. "Out of stock: Red / L"
+  raw         TEXT,               -- the analysed result, for the detail view
+  PRIMARY KEY (supplier, item_id)
+);
+
 -- What Product Studio (the Taobao/1688 app) sent when a product was pushed
 -- across. The draft itself lives in listing_drafts; this keeps the photos, the
 -- options and the raw payload beside it, because those are not Etsy fields yet

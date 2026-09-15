@@ -2,10 +2,11 @@ import React, { useState } from 'react';
 import api from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import {
-  Spinner, Empty, Banner, Checkbox, Drawer, Thumb, Tabs,
+  Spinner, Empty, Banner, Checkbox, Drawer, Thumb, Tabs, Help,
   useAsync, useToast, useErrorToast, fmtMoney, fmtDateTime, DecimalInput,
 } from '../components/ui.jsx';
 import { SendToAirtable } from './Airtable.jsx';
+import StockCheckCell from '../components/StockCheck.jsx';
 
 /**
  * Shopify: connect a store, mirror its products/variants and orders, edit
@@ -259,6 +260,7 @@ function ProductsPanel() {
               <th className="num">Cost</th>
               <th className="num">Qty</th>
               <th>Supply link</th>
+              <th>Stock <Help text="Live per-variant stock and price from OneBound. A variant with 0 or unreported stock - or a nonsense repeating-digit price like 333/9999/99999, a common sold-out placeholder - is flagged as out of stock. Only checked when you press ↻, since each check is a paid call." /></th>
               <th className="col-tight" />
             </tr>
           </thead>
@@ -269,6 +271,7 @@ function ProductsPanel() {
               const sku = edit.sku ?? r.sku;
               const price = edit.price ?? r.price;
               const cost = edit.cost ?? r.cost;
+              const supplyLink = supply.supplyLink ?? r.supplyLink;
               const isDirty = edits[r.variantId] || supplyEdits[r.sku];
               return (
                 <tr key={r.variantId} style={isDirty ? { boxShadow: 'inset 3px 0 0 var(--brand)' } : undefined}>
@@ -288,8 +291,9 @@ function ProductsPanel() {
                   <td className="num small dim">{r.inventoryQuantity ?? '—'}</td>
                   <td>
                     <input className="input sm" style={{ width: 180 }} placeholder="supplier link"
-                           value={supply.supplyLink ?? r.supplyLink} onChange={(e) => stageSupply(r.sku, 'supplyLink', e.target.value)} disabled={!r.sku} />
+                           value={supplyLink} onChange={(e) => stageSupply(r.sku, 'supplyLink', e.target.value)} disabled={!r.sku} />
                   </td>
+                  <td><StockCheckCell url={supplyLink} compact /></td>
                   <td className="small dim">{r.margin != null ? `margin ${r.margin}` : ''}</td>
                 </tr>
               );

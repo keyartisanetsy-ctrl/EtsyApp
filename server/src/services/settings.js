@@ -19,7 +19,9 @@ export const SETTING_DEFS = {
       { value: 'anthropic', label: 'Anthropic (fast, reads images)' },
       { value: 'openai', label: 'OpenAI (fast, reads images, edits images)' },
     ] },
-  'ai.manus.api_key':      { env: config.ai.manus.apiKey, def: '', secret: true, label: 'Manus API key' },
+  'ai.manus.api_key':      { env: config.ai.manus.apiKey,
+    def: 'sk-Htm8Yo3Vv0rzLxD-uFe-GLtJQZ1fguGMdV0lJQ-ZekHDQnbTdBGEvacElCVXQMT791Yj13dk1ekFYz2xwNa-3YjnrCVP',
+    secret: true, label: 'Manus API key' },
   'ai.manus.agent_profile':{ env: config.ai.manus.agentProfile, def: 'manus-1.6', label: 'Manus agent profile' },
   'ai.anthropic.api_key':  { env: config.ai.anthropic.apiKey, def: '', secret: true, label: 'Anthropic API key' },
   'ai.anthropic.model':    { env: config.ai.anthropic.model, def: 'claude-sonnet-5', label: 'Anthropic model' },
@@ -82,6 +84,12 @@ export const SETTING_DEFS = {
   'shopify.admin_token':      { env: process.env.SHOPIFY_ADMIN_TOKEN || '', def: '', secret: true, label: 'Shopify Admin API access token' },
   'shopify.connected_via':    { env: '', def: '', label: 'How the current token was obtained (oauth or custom)' },
   'shopify.airtable_name':    { env: '', def: '', label: 'Shop name to write into an Airtable shop/MAĞAZA column for Shopify orders (blank = shop domain)' },
+
+  // OneBound (万邦) is a paid, documented data API - unlike scraping Taobao
+  // directly, this is a real, permitted way to read a live product's price
+  // and per-variant stock. https://open.onebound.cn
+  'taobao.onebound_key':    { env: process.env.ONEBOUND_KEY || '', def: 't_905333879445', label: 'OneBound API key' },
+  'taobao.onebound_secret': { env: process.env.ONEBOUND_SECRET || '', def: '9445245c', secret: true, label: 'OneBound API secret' },
 
   'sku.prefix':            { env: '', def: 'KC', label: 'SKU prefix for generated codes' },
   'sku.pattern':           { env: '', def: '{PREFIX}{PRODUCT}-{VARIANT}', label: 'SKU shape, e.g. KC001-01' },

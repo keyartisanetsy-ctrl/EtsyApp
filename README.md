@@ -342,6 +342,34 @@ a custom app's Admin API access token directly.
 Etsy's own tracking-to-Etsy push (the Orders screen's tracking box) already
 existed before Shopify was added — this only adds the equivalent for Shopify.
 
+## Live stock checking (OneBound)
+
+A per-variant stock/price check against the actual supplier, on Etsy SKUs,
+Shopify variants and the Supply book alike — not scraping (Taobao blocks that
+outright), but [OneBound](https://open.onebound.cn), a real, paid data API for
+Taobao/Tmall/1688. A default key/secret ship with the app; replace them with
+your own under **Supply book → 🔑 Stock check settings**.
+
+- **Out of stock, per variant, not per product.** A variant with 0 stock, or
+  no stock figure at all, is "that variant" being out — exactly as one
+  product can have some colours in and others out. A single-variant item
+  uses its own overall stock/price the same way.
+- **The fake-price tell.** Some sellers set a price where every digit repeats
+  — 333, 4444, 99999 — instead of formally delisting a sold-out item. Any
+  variant priced like that is flagged out of stock even when its stock
+  number looks fine.
+- **Free until you press ↻.** OneBound bills per call, right or wrong, so a
+  check only ever runs from the ↻ button next to a row. What you see the
+  rest of the time is the last cached result, for free.
+- **Shared supplier links.** Etsy and Shopify listings sometimes point at the
+  exact same Taobao/1688 product. The Supply book calls this out and
+  suggests using the same SKU (or at least matching the variant's own SKU)
+  on both sides, so one check covers both — except where a variant genuinely
+  only exists on one side (an Etsy-only "keycap puller", say), which keeps
+  its own, separate link rather than being forced into the wrong cluster.
+- Small **?** marks throughout the Supply book, SKU grid and Shopify products
+  page explain each of these in place.
+
 ## Remote access
 
 Still local-first by default — bound to `127.0.0.1`, reachable only from this

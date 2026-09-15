@@ -148,6 +148,29 @@ export function CopyButton({ text, label = 'Copy', className = 'btn sm' }) {
   );
 }
 
+/**
+ * A small "(?)" mark that explains one field or feature on hover/tap - for
+ * the spots that need a sentence of context but not a whole paragraph of
+ * `.hint` text under the field.
+ */
+export function Help({ text }) {
+  return (
+    <span
+      className="help-mark"
+      title={text}
+      tabIndex={0}
+      style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        width: 15, height: 15, borderRadius: '50%', marginLeft: 5,
+        background: 'var(--muted, #94a3b8)', color: '#fff', fontSize: 10,
+        fontWeight: 700, cursor: 'help', verticalAlign: 'middle', lineHeight: 1,
+      }}
+    >
+      ?
+    </span>
+  );
+}
+
 export function Pager({ total, limit, offset, onChange }) {
   const page = Math.floor(offset / limit) + 1;
   const pages = Math.max(1, Math.ceil(total / limit));

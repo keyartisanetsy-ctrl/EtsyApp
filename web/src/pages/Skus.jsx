@@ -8,6 +8,7 @@ import {
   Spinner, Empty, Banner, Checkbox, Thumb, Pager, SortTh, Drawer, Modal, CopyButton,
   useAsync, useDebounced, useToast, useErrorToast, fmtMoney, STATE_BADGE, DecimalInput,
 } from '../components/ui.jsx';
+import StockCheckCell from '../components/StockCheck.jsx';
 
 const LIMIT = 100;
 
@@ -288,6 +289,7 @@ export default function Skus() {
               <th className="right">−{pct}%</th>
               <SortTh label="Qty" field="quantity" sort={sort} dir={dir} onSort={onSort} className="right" />
               <th>Supply link</th>
+              <th>Stock</th>
               <SortTh label="State" field="state" sort={sort} dir={dir} onSort={onSort} />
               <th className="col-tight" />
             </tr>
@@ -347,6 +349,7 @@ export default function Skus() {
                       {variantLink && <a href={variantLink} target="_blank" rel="noreferrer" className="btn xs" title="Open this variant's supply page">↗</a>}
                     </div>
                   </td>
+                  <td><StockCheckCell url={variantLink || link} compact /></td>
                   <td><span className={`badge ${STATE_BADGE[r.state] ?? 'grey'}`}>{r.state}</span></td>
                   <td><button className="btn xs" onClick={() => setDetail(r)}>Open</button></td>
                 </tr>
@@ -484,6 +487,10 @@ function SkuDetail({ row, pct, onClose, onSaved }) {
       </dl>
 
       <div className="section-title">Supply (private — never sent to Etsy)</div>
+      <div className="field">
+        <label>Stock</label>
+        <div><StockCheckCell url={meta.variantSupplyLink || meta.supplyLink} /></div>
+      </div>
       <div className="field">
         <label>Main supply link</label>
         <input className="input" value={meta.supplyLink ?? ''} placeholder="https://supplier.example/product/123"

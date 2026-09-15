@@ -2,9 +2,10 @@ import React, { useState } from 'react';
 import api from '../lib/api.js';
 import { TablePage } from '../components/Page.jsx';
 import {
-  Spinner, Empty, Banner, Modal, Drawer, Stat, useAsync, useDebounced,
+  Spinner, Empty, Banner, Modal, Drawer, Stat, Help, useAsync, useDebounced,
   useToast, useErrorToast, fmtMoney, DecimalInput,
 } from '../components/ui.jsx';
+import StockCheckCell from '../components/StockCheck.jsx';
 
 /**
  * The supply book — the Taobao side of the business, in the same app.
@@ -20,12 +21,14 @@ export default function Supply() {
   const [supplier, setSupplier] = useState('');
   const [missingLink, setMissingLink] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [edit, setEdit] = useState(null);
 
   const { data, loading, reload } = useAsync(
     () => api.get('/supply', { search: debounced, supplier, missingLink: missingLink || undefined }),
     [debounced, supplier, missingLink],
   );
+  const { data: dupes } = useAsync(() => api.get('/supply/duplicates'), []);
 
   const items = data?.items ?? [];
   const cov = data?.coverage;
@@ -36,6 +39,7 @@ export default function Supply() {
       subtitle={cov ? `${cov.covered} of ${cov.skus || '—'} SKUs have a supplier` : ''}
       actions={
         <>
+          <button className="btn sm" onClick={() => setSettingsOpen(true)}>🔑 Stock check settings</button>
           <button className="btn sm" onClick={() => setImportOpen(true)}>↧ Bring a sheet across</button>
           <button className="btn sm primary" onClick={() => setEdit({ sku: '' })}>＋ Add</button>
         </>
@@ -66,6 +70,25 @@ export default function Supply() {
         </div>
       )}
 
+      {dupes?.length > 0 && (
+        <div style={{ padding: 16, paddingBottom: 0 }}>
+          <Banner kind={dupes.some((d) => d.suggestion) ? 'warn' : 'info'}>
+            <div className="flex gap4" style={{ alignItems: 'center', marginBottom: 6 }}>
+              <strong>{dupes.length} supplier link{dupes.length > 1 ? 's are' : ' is'} shared by more than one SKU (Etsy + Shopify included)</strong>
+              <Help text="Etsy and Shopify listings sometimes link to the exact same Taobao/1688/Tmall product. When that happens it helps to use the same SKU (or at least match the variant's own SKU) on both sides, so a stock/price check on one automatically covers the other. A shared link with matching SKUs already needs nothing." />
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {dupes.map((d) => (
+                <li key={`${d.supplier}:${d.itemId}`} className="small">
+                  {d.rows.map((r) => `${r.sku} (${r.platform}${r.variantLabel ? ` · ${r.variantLabel}` : ''})`).join(' + ')}
+                  {d.suggestion ? <> — {d.suggestion}</> : <span className="dim"> — SKUs already match, nothing to do.</span>}
+                </li>
+              ))}
+            </ul>
+          </Banner>
+        </div>
+      )}
+
       {loading && !data ? <div className="empty"><Spinner /></div>
         : !items.length ? (
           <Empty icon="🛒" title="Nothing in the supply book yet">
@@ -78,7 +101,9 @@ export default function Supply() {
                 <th>SKU</th><th>Supplier</th><th>Item</th>
                 <th className="right">Cost</th><th className="right">In USD</th>
                 <th className="right">Sells for</th><th className="right">Margin</th>
-                <th>Links</th><th className="col-tight" />
+                <th>Links</th>
+                <th>Stock <Help text="Live per-variant stock and price from OneBound. A variant with 0 or unreported stock - or a nonsense repeating-digit price like 333/9999/99999, a common sold-out placeholder some suppliers use instead of delisting - is flagged as out of stock. Only checked when you press ↻, since each check is a paid call." /></th>
+                <th className="col-tight" />
               </tr>
             </thead>
             <tbody>
@@ -107,6 +132,7 @@ export default function Supply() {
                       {!i.url && !i.variantUrl && <span className="muted small">—</span>}
                     </div>
                   </td>
+                  <td><StockCheckCell url={i.variantUrl || i.url} compact /></td>
                   <td><button className="btn xs" onClick={() => setEdit(i)}>Edit</button></td>
                 </tr>
               ))}
@@ -116,7 +142,54 @@ export default function Supply() {
 
       <SupplyEditor item={edit} suppliers={data?.suppliers ?? []} onClose={() => setEdit(null)} onSaved={reload} />
       <ImportModal open={importOpen} onClose={() => setImportOpen(false)} onDone={reload} />
+      <StockSettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </TablePage>
+  );
+}
+
+function StockSettingsModal({ open, onClose }) {
+  const [form, setForm] = useState({ key: '', secret: '' });
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const showError = useErrorToast();
+  const { data, reload } = useAsync(() => (open ? api.get('/supply/stock-settings') : Promise.resolve(null)), [open]);
+
+  React.useEffect(() => {
+    if (data) setForm({ key: data.key ?? '', secret: '' });
+  }, [data]);
+
+  if (!open) return null;
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.put('/supply/stock-settings', form);
+      toast({ kind: 'ok', title: 'Saved' });
+      setForm((f) => ({ ...f, secret: '' }));
+      reload();
+    } catch (err) { showError(err, 'Could not save'); } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Stock check settings"
+           footer={<><div className="spacer" /><button className="btn primary" onClick={save} disabled={busy}>{busy ? <Spinner /> : 'Save'}</button></>}>
+      <p className="dim small">
+        The app checks live stock and price at the supplier through <a href="https://open.onebound.cn" target="_blank" rel="noreferrer">OneBound</a>,
+        a paid data API for Taobao/Tmall/1688 (not scraping — a real key you pay for). A default key is already filled in;
+        replace it with your own if you have one. Every check costs money at OneBound, right or wrong, so it only ever runs
+        when you press the ↻ button on a row — never automatically.
+      </p>
+      <div className="field">
+        <label>OneBound API key</label>
+        <input className="input mono" value={form.key} onChange={(e) => setForm({ ...form, key: e.target.value })} />
+      </div>
+      <div className="field">
+        <label>OneBound API secret</label>
+        <input className="input mono" type="password" placeholder={data?.hasSecret ? data.secretPreview : 'not set'}
+               value={form.secret} onChange={(e) => setForm({ ...form, secret: e.target.value })} />
+        <div className="hint">Leave blank to keep the current secret.</div>
+      </div>
+    </Modal>
   );
 }
 

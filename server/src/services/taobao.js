@@ -25,6 +25,7 @@ import { activeShopId } from '../etsy/shop.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { convert, latest } from './fx.js';
 import * as undo from './undo.js';
+import * as onebound from '../taobao/onebound.js';
 
 const round2 = (n) => (n === null || n === undefined ? null : Math.round((n + Number.EPSILON) * 100) / 100);
 
@@ -297,6 +298,173 @@ export function importRows(text) {
       ? 'Each row is now joined to its SKU, so the links show on the SKU page and on every order for that product.'
       : null,
   };
+}
+
+// ------------------------------------------------------------- stock check
+//
+// OneBound is a paid API, so nothing here is ever called automatically - only
+// when a person presses "Check stock" for one item. The result is cached in
+// taobao_stock_checks so the grid can show the last-known status for free
+// afterwards, until it is checked again.
+
+/** OneBound's platform path segment for a supplier this app already tracks. */
+const ONEBOUND_PLATFORM = { taobao: 'taobao', tmall: 'taobao', '1688': '1688' };
+
+/**
+ * A price shaped like 333, 4444, 99999... A well-known Taobao/1688 seller
+ * convention: rather than formally delist a sold-out item, the price is set
+ * to a nonsense all-same-digit number so nobody actually pays it. A genuine
+ * price essentially never has every digit identical, so this is a reliable
+ * tell once the item is at least 3 digits (999 CNY is a plausible price on
+ * its own, but combined with a shorter or longer identical run - 33, 4444,
+ * 99999 - it is always this convention, never a coincidence).
+ */
+export function looksLikeFakeStockoutPrice(price) {
+  const n = Number(price);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  if (Math.abs(n - Math.round(n)) > 1e-9) return false; // a real price almost always carries cents
+  const digits = String(Math.round(n));
+  return digits.length >= 3 && /^(\d)\1+$/.test(digits);
+}
+
+/** Turn one OneBound response into the shape the app actually needs. */
+export function analyzeItem(raw, { supplier, itemId }) {
+  const skuList = raw?.skus?.sku ?? (Array.isArray(raw?.skus) ? raw.skus : []);
+  const variants = (Array.isArray(skuList) ? skuList : [skuList]).filter(Boolean).map((s) => {
+    const quantity = s.quantity === undefined || s.quantity === null || s.quantity === '' ? null : Number(s.quantity);
+    const price = s.price ?? s.orginal_price ?? null;
+    const noStockInfo = quantity === null || Number.isNaN(quantity);
+    const zeroStock = quantity === 0;
+    const fakePrice = looksLikeFakeStockoutPrice(price);
+    const outOfStock = zeroStock || noStockInfo || fakePrice;
+    return {
+      skuId: String(s.sku_id ?? ''),
+      label: s.properties_name || s.properties || '',
+      price: price === null ? null : Number(price),
+      quantity,
+      outOfStock,
+      reason: zeroStock ? 'stock is 0'
+        : noStockInfo ? 'no stock information given'
+        : fakePrice ? `price (${price}) looks like a sold-out placeholder`
+        : null,
+    };
+  });
+
+  const overallQuantity = raw?.num === undefined || raw?.num === null || raw?.num === '' ? null : Number(raw.num);
+  const overallFakePrice = looksLikeFakeStockoutPrice(raw?.price);
+  const delisted = !!raw?.delist_time;
+
+  // With no variants at all, the item itself is the only "variant" - apply
+  // the exact same rule (0/missing stock, or a placeholder price) to it.
+  const noVariants = variants.length === 0;
+  const wholeItemOut = noVariants && (overallQuantity === 0 || overallQuantity === null || overallFakePrice || delisted);
+
+  return {
+    supplier, itemId,
+    title: raw?.title ?? null,
+    picUrl: raw?.pic_url ?? null,
+    delisted,
+    overallQuantity,
+    variants,
+    // In stock only if there is at least one variant (or, single-variant
+    // items, the item itself) that is not flagged - matching "if stock is 0
+    // or not given, THAT VARIANT is out of stock," not the whole product.
+    inStock: noVariants ? !wholeItemOut : variants.some((v) => !v.outOfStock),
+    allVariantsOut: noVariants ? wholeItemOut : variants.length > 0 && variants.every((v) => v.outOfStock),
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+async function fetchLiveItem(supplier, itemId) {
+  const platform = ONEBOUND_PLATFORM[supplier];
+  if (!platform) throw badRequest(`Stock checking is not wired up for "${supplier}" yet - only Taobao, Tmall and 1688.`);
+  // item_get_pro_v1 carries exact per-sku quantity and delist_time, which the
+  // plainer item_get does not always have; it already falls back to
+  // item_get_pro on its own if pro_v1 is not enabled on this key.
+  return onebound.itemGetProV1(itemId, { platform });
+}
+
+/** Live check against OneBound, cached afterwards. */
+export async function checkStock({ supplier, itemId }) {
+  if (!supplier || !itemId) throw badRequest('Need a supplier item to check - save a supply link first.');
+  const raw = await fetchLiveItem(supplier, itemId);
+  const result = analyzeItem(raw, { supplier, itemId });
+
+  const summary = result.inStock
+    ? (result.allVariantsOut ? null : 'In stock')
+    : `Out of stock${result.variants[0]?.label ? `: ${result.variants[0].label}` : ''}`;
+  getDb().prepare(`
+    INSERT INTO taobao_stock_checks (supplier, item_id, checked_at, in_stock, summary, raw)
+    VALUES (?,?, datetime('now'), ?, ?, ?)
+    ON CONFLICT(supplier, item_id) DO UPDATE SET
+      checked_at = excluded.checked_at, in_stock = excluded.in_stock, summary = excluded.summary, raw = excluded.raw`)
+    .run(supplier, itemId, result.inStock ? 1 : 0, summary, json(result));
+
+  audit('taobao.stock_check', { entity: 'supply_item', entityId: `${supplier}:${itemId}`, detail: { inStock: result.inStock } });
+  return result;
+}
+
+/** Same, but starting from any supply URL - resolves the supplier/item id first. */
+export function checkStockByUrl(url) {
+  const parsed = parseSupplyUrl(url);
+  if (!parsed.ok) throw badRequest(parsed.reason);
+  if (!parsed.itemId) throw badRequest('Could not find a product id in that link.');
+  return checkStock({ supplier: parsed.supplier, itemId: parsed.itemId });
+}
+
+/** The last cached check, without spending another API call. */
+export function cachedStock({ supplier, itemId }) {
+  if (!supplier || !itemId) return null;
+  const row = getDb().prepare('SELECT * FROM taobao_stock_checks WHERE supplier = ? AND item_id = ?').get(supplier, itemId);
+  if (!row) return null;
+  return { supplier, itemId, checkedAt: row.checked_at, inStock: !!row.in_stock, summary: row.summary, ...parse(row.raw, {}) };
+}
+
+/**
+ * SKUs - on Etsy or on Shopify - that point at the same supplier item.
+ * Etsy's own supply_items (any connected shop) plus Shopify's
+ * shopify_variant_meta are scanned together; two or more SKUs sharing a
+ * (supplier, item_id) are grouped into one cluster with a plain-language
+ * suggestion, since the two apps have no other way to know they are selling
+ * the same physical product.
+ */
+export function findSharedSupplyLinks() {
+  const db = getDb();
+  const etsyRows = db.prepare(`
+    SELECT sku, shop_id AS shopId, supplier, item_id AS itemId, title, variant_label AS variantLabel
+    FROM supply_items WHERE COALESCE(item_id, '') <> ''`).all()
+    .map((r) => ({ ...r, platform: 'etsy' }));
+
+  const shopifyRaw = db.prepare(`SELECT sku, supply_link AS url, notes FROM shopify_variant_meta WHERE COALESCE(supply_link,'') <> ''`).all();
+  const shopifyRows = shopifyRaw.map((r) => {
+    const parsed = parseSupplyUrl(r.url);
+    return parsed.ok && parsed.itemId
+      ? { sku: r.sku, shopId: null, supplier: parsed.supplier, itemId: parsed.itemId, title: null, variantLabel: null, platform: 'shopify' }
+      : null;
+  }).filter(Boolean);
+
+  const byItem = new Map();
+  for (const row of [...etsyRows, ...shopifyRows]) {
+    const key = `${row.supplier}:${row.itemId}`;
+    if (!byItem.has(key)) byItem.set(key, []);
+    byItem.get(key).push(row);
+  }
+
+  const clusters = [];
+  for (const [key, rows] of byItem) {
+    if (rows.length < 2) continue; // only one reference to this supplier item - nothing to reconcile
+    const distinctSkus = new Set(rows.map((r) => r.sku));
+    const [supplier, itemId] = key.split(':');
+    const skusMatch = distinctSkus.size === 1;
+    clusters.push({
+      supplier, itemId, rows,
+      suggestion: skusMatch
+        ? null
+        : `These point at the same ${supplier} product but use different SKUs (${[...distinctSkus].join(', ')}). `
+          + 'Using the same SKU (or at least matching the variant’s own SKU) on both keeps stock/price checks and supply links in sync automatically.',
+    });
+  }
+  return clusters;
 }
 
 /** How much of the catalogue has a supplier behind it. */

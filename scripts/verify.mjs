@@ -371,10 +371,13 @@ await check('built-in prompts are protected', async () => {
   const { status } = await req(`/api/ai/prompts/${builtin.id}`, { method: 'DELETE', allowError: true });
   assert(status === 400, `expected 400, got ${status}`);
 });
-await check('AI call without a key fails cleanly', async () => {
+await check('AI call fails cleanly rather than crashing', async () => {
+  // A default Manus key ships with the app, so this may reach a real provider
+  // instead of hitting the "no provider configured" path - either way it must
+  // come back as a structured JSON error, never an unhandled 500.
   const { status, body } = await req('/api/ai/reply', { method: 'POST', body: { message: 'hello' }, allowError: true });
-  assert(status === 400, `expected 400, got ${status}`);
-  assert(/provider/i.test(body.error), `unhelpful error: ${body.error}`);
+  assert(status >= 400 && status < 500, `expected a clean 4xx, got ${status}`);
+  assert(body?.error, `expected an error message, got: ${JSON.stringify(body)}`);
 });
 
 console.log('\nBulk engine');
@@ -2134,6 +2137,101 @@ await check('every supplier link yields a stable id', async () => {
   assert(!taobao.parseSupplyUrl('not a link').ok, 'nonsense was accepted');
 });
 
+await check('a repeating-digit price is recognised as a sold-out placeholder', async () => {
+  const taobao = await import('../server/src/services/taobao.js');
+  for (const p of [333, 444, 999, 1111, 9999, 11111, 99999]) {
+    assert(taobao.looksLikeFakeStockoutPrice(p), `${p} should look like a placeholder price`);
+  }
+  for (const p of [39.99, 128, 25, 99, 0, -333, 1234, '39.90']) {
+    assert(!taobao.looksLikeFakeStockoutPrice(p), `${p} should NOT look like a placeholder price`);
+  }
+});
+
+await check('stock analysis is per variant, not per product ("O VARYANTTA")', async () => {
+  const taobao = await import('../server/src/services/taobao.js');
+  const raw = {
+    title: 'Test item', num: 50, price: '39.90',
+    skus: { sku: [
+      { sku_id: '1', properties_name: 'Color:Red', price: '39.90', quantity: 10 },
+      { sku_id: '2', properties_name: 'Color:Blue', price: '0', quantity: 0 },
+      { sku_id: '3', properties_name: 'Color:Green', price: '9999', quantity: 5 },
+      { sku_id: '4', properties_name: 'Color:Black', quantity: undefined },
+    ] },
+  };
+  const r = taobao.analyzeItem(raw, { supplier: 'taobao', itemId: '123' });
+  assert(r.variants.length === 4, `expected 4 variants, got ${r.variants.length}`);
+  assert(r.variants[0].outOfStock === false, 'Red has real stock and a normal price - should be in stock');
+  assert(r.variants[1].outOfStock === true && r.variants[1].reason === 'stock is 0', 'Blue has 0 stock');
+  assert(r.variants[2].outOfStock === true && /placeholder/.test(r.variants[2].reason),
+    'Green has stock but a repeating-digit price - should still be flagged out of stock');
+  assert(r.variants[3].outOfStock === true && r.variants[3].reason === 'no stock information given', 'Black has no quantity at all');
+  assert(r.inStock === true, 'one in-stock variant (Red) means the item overall is not a total write-off');
+  assert(r.allVariantsOut === false, 'not every variant is out, so the whole product must not read as dead');
+
+  // A single-variant item has no skus array at all - the item-level fields stand in for the one variant.
+  const soldOut = taobao.analyzeItem({ title: 'Single', num: 0, price: '19.90' }, { supplier: 'taobao', itemId: '456' });
+  assert(soldOut.variants.length === 0 && soldOut.inStock === false && soldOut.allVariantsOut === true,
+    'a single-variant item with 0 stock should be entirely out of stock');
+
+  const delisted = taobao.analyzeItem({ title: 'Gone', delist_time: '2024-01-01', num: 50, price: '19.90' }, { supplier: 'taobao', itemId: '789' });
+  assert(delisted.allVariantsOut === true, 'a delisted single-variant item should count as out of stock even with a plausible price/stock');
+});
+
+await check('supplier links shared across Etsy and Shopify are found, with a suggestion only when the SKUs differ', async () => {
+  const { initDb, getDb } = await import('../server/src/db/index.js');
+  await initDb();
+  const db = getDb();
+  const taobao = await import('../server/src/services/taobao.js');
+  const shopId = 970001;
+  try {
+    // Two different SKUs pointing at the same Taobao item - flagged, with a suggestion naming both.
+    db.prepare('INSERT INTO supply_items (shop_id, sku, supplier, item_id, url) VALUES (?,?,?,?,?)')
+      .run(shopId, 'ETSY-A', 'taobao', '7000000001', 'https://item.taobao.com/item.htm?id=7000000001');
+    db.prepare('INSERT INTO supply_items (shop_id, sku, supplier, item_id, url) VALUES (?,?,?,?,?)')
+      .run(shopId, 'ETSY-B', 'taobao', '7000000001', 'https://item.taobao.com/item.htm?id=7000000001');
+
+    // Etsy and Shopify already use the SAME sku for the same item - already correct, no suggestion needed.
+    db.prepare('INSERT INTO supply_items (shop_id, sku, supplier, item_id, url) VALUES (?,?,?,?,?)')
+      .run(shopId, 'MATCHED-1', 'taobao', '7000000002', 'https://item.taobao.com/item.htm?id=7000000002');
+    db.prepare('INSERT INTO shopify_variant_meta (sku, supply_link) VALUES (?,?)').run('MATCHED-1', 'https://item.taobao.com/item.htm?id=7000000002');
+
+    // Referenced by exactly one SKU - nothing to reconcile, must not be reported at all.
+    db.prepare('INSERT INTO supply_items (shop_id, sku, supplier, item_id, url) VALUES (?,?,?,?,?)')
+      .run(shopId, 'ALONE-1', 'taobao', '7000000003', 'https://item.taobao.com/item.htm?id=7000000003');
+
+    const clusters = taobao.findSharedSupplyLinks();
+
+    const mismatched = clusters.find((c) => c.itemId === '7000000001');
+    assert(mismatched, 'the two-different-SKU cluster was not found');
+    assert(mismatched.rows.length === 2, `expected 2 rows, got ${mismatched.rows.length}`);
+    assert(mismatched.suggestion && /ETSY-A/.test(mismatched.suggestion) && /ETSY-B/.test(mismatched.suggestion),
+      `suggestion should name both SKUs: ${mismatched.suggestion}`);
+
+    const matched = clusters.find((c) => c.itemId === '7000000002');
+    assert(matched, 'the same-SKU-on-both-platforms cluster was not found');
+    assert(matched.suggestion === null, 'a cluster where the SKU already matches on both platforms should not suggest anything');
+    assert(matched.rows.some((r) => r.platform === 'shopify'), 'the Shopify side was not picked up');
+
+    assert(!clusters.find((c) => c.itemId === '7000000003'), 'an item referenced by only one SKU must not be reported as shared');
+  } finally {
+    db.prepare('DELETE FROM supply_items WHERE shop_id = ?').run(shopId);
+    db.prepare("DELETE FROM shopify_variant_meta WHERE sku = 'MATCHED-1'").run();
+  }
+});
+
+await check('stock check settings and cache routes work without spending a real OneBound call', async () => {
+  const { body: settings } = await req('/api/supply/stock-settings');
+  assert(settings.key, 'the default OneBound key should already be filled in');
+  const put = await req('/api/supply/stock-settings', { method: 'PUT', body: { key: settings.key } });
+  assert(put.body.key === settings.key, 'the key round-tripped incorrectly');
+
+  const { body: cached } = await req('/api/supply/stock-cache?url=' + encodeURIComponent('https://item.taobao.com/item.htm?id=90909090909'));
+  assert(cached === null, 'an item never checked should have no cached result');
+
+  const { body: dupes } = await req('/api/supply/duplicates');
+  assert(Array.isArray(dupes), 'duplicates should always be a list, even when empty');
+});
+
 await check('only a program on this machine may add products', async () => {
   const ps = await import('../server/src/services/productstudio.js');
   const key = ps.pairingKey();
@@ -3002,9 +3100,11 @@ await check('autofilling a draft with nothing missing does nothing and never cal
 
 await check('autofilling a draft that is missing fields reaches for the AI', async () => {
   // The opposite case: something really is missing, so this has to actually
-  // ask the AI rather than silently reporting nothing to do. No provider is
-  // configured in this environment, so the clean "no provider" error is
-  // exactly what proves the AI was reached for at all.
+  // ask the AI rather than silently reporting nothing to do. A default Manus
+  // key ships with the app, so this reaches a real provider rather than the
+  // "no provider configured" path - a clean, structured failure either way
+  // proves the AI was reached for at all, without this test depending on
+  // whichever provider happens to be configured or working right now.
   const { initDb, getDb, json } = await import('../server/src/db/index.js');
   const client = await import('../server/src/etsy/client.js');
   const drafts = await import('../server/src/services/drafts.js');
@@ -3028,8 +3128,8 @@ await check('autofilling a draft that is missing fields reaches for the AI', asy
 
     let err = null;
     try { await drafts.autofillMissing(listingId); } catch (e) { err = e; }
-    assert(err, 'expected this to fail without a configured AI provider');
-    assert(/provider/i.test(err.message), `expected a "no provider" style message, got: ${err.message}`);
+    assert(err, 'expected this to fail - no AI provider here actually works');
+    assert(err.status >= 400 && err.status < 500 && err.message, `expected a clean 4xx failure, got: ${err.status} ${err.message}`);
   } finally {
     db.prepare('DELETE FROM listing_drafts WHERE shop_id = 960126').run();
     client.removeAccount(960126);
