@@ -66,7 +66,7 @@ router.use((req, res, next) => {
 /** Optional shared password when the app is exposed beyond loopback. */
 if (config.security.appPassword) {
   router.use('/api', (req, res, next) => {
-    if (req.path.startsWith('/auth/callback') || req.path === '/health') return next();
+    if (req.path.startsWith('/auth/callback') || req.path === '/health' || req.path === '/login') return next();
     const supplied = req.get('x-app-password') || req.cookies?.app_password;
     if (supplied === config.security.appPassword) return next();
     res.status(401).json({ error: 'App password required' });

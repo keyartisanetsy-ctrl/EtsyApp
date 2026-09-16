@@ -3,6 +3,7 @@ import { Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom'
 import api from './lib/api.js';
 import { ToastHost, useToast, useErrorToast } from './components/ui.jsx';
 import UndoHost from './components/Undo.jsx';
+import Login from './components/Login.jsx';
 
 import Dashboard from './pages/Dashboard.jsx';
 import Listings from './pages/Listings.jsx';
@@ -132,17 +133,28 @@ function ShopSwitcher({ summary, onSwitched }) {
 
 export default function App() {
   const [summary, setSummary] = useState(null);
+  const [locked, setLocked] = useState(null); // null = checking, true/false once known
   const location = useLocation();
+
+  useEffect(() => {
+    api.get('/settings')
+      .then(() => setLocked(false))
+      .catch((err) => setLocked(err.status === 401));
+  }, []);
 
   const refresh = useCallback(async () => {
     try { setSummary(await api.dashboard()); } catch { /* offline or not connected yet */ }
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh, location.pathname]);
+  useEffect(() => { if (!locked) refresh(); }, [refresh, location.pathname, locked]);
   useEffect(() => {
+    if (locked) return;
     const t = setInterval(refresh, 60_000);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [refresh, locked]);
+
+  if (locked === null) return null;
+  if (locked) return <Login onSuccess={() => setLocked(false)} />;
 
   const counts = {
     listings: summary?.listings?.total || 0,
