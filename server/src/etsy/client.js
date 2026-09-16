@@ -4,6 +4,7 @@
  * Everything the app sends to Etsy goes through here so that auth refresh,
  * the 10 req/s ceiling, retry/backoff and call logging are handled once.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import config from '../config.js';
 import { readSetting } from '../services/settings.js';
 import { getDb, getSetting, setSetting, resolveSetting } from '../db/index.js';
@@ -14,6 +15,20 @@ import { OPERATIONS } from './operations.generated.js';
 import { outboundFetch } from '../lib/outbound.js';
 
 const log = createLogger('etsy');
+
+/**
+ * Lets a background job (Product Studio choosing which connected shop a
+ * product goes to) act as if a specific shop were active, without touching
+ * the persisted is_active flag - so it never visibly flips what a human has
+ * open in the browser at that moment, and two such jobs can even run at once
+ * without racing each other. Scoped to the async call chain inside
+ * withShop(), so nothing outside it is affected.
+ */
+const shopContext = new AsyncLocalStorage();
+
+export function withShop(shopId, fn) {
+  return shopContext.run(shopId, fn);
+}
 
 // --------------------------------------------------------- rate limiting
 
@@ -103,6 +118,13 @@ const unsealRow = (row) => (row ? {
 
 /** The shop the screens are currently working with. */
 export function getStoredToken() {
+  // Inside withShop(), a specific shop always wins, connected or not - a
+  // background job naming a shop that got disconnected mid-flight must see
+  // "not connected", never silently fall through to whichever shop the
+  // human's browser happens to have active right now.
+  const override = shopContext.getStore();
+  if (override !== undefined) return getAccountByShop(override);
+
   const db = getDb();
   let row = db.prepare('SELECT * FROM etsy_accounts WHERE is_active = 1 ORDER BY id LIMIT 1').get();
   // If nothing is marked active (e.g. the active shop was removed), adopt the

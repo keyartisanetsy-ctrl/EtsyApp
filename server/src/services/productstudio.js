@@ -25,6 +25,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getDb, audit } from '../db/index.js';
 import { activeShopId } from '../etsy/shop.js';
+import { listAccounts, withShop } from '../etsy/client.js';
 import { config } from '../config.js';
 import { readSetting, writeSetting } from './settings.js';
 import { badRequest } from '../lib/errors.js';
@@ -323,11 +324,61 @@ export function readProduct(payload = {}) {
 }
 
 /**
+ * Which connected shop a product should land in.
+ *
+ * Product Studio's button lives in a different app/window than this one, so
+ * silently trusting whichever shop happens to be active here risks a product
+ * landing on the wrong shop with nothing to notice it by. A payload can name
+ * its shop explicitly - shopId (Etsy's numeric id), or shop/shopName/shopLabel
+ * matching a connected shop's label or its name on Etsy. Left out, it falls
+ * back to the active shop - but only while exactly one is connected; with two
+ * or more, guessing is exactly the mix-up this exists to prevent, so it is
+ * refused instead.
+ */
+function resolveTargetShop(payload) {
+  const raw = payload?.shopId ?? payload?.shop_id ?? payload?.etsyShopId
+    ?? payload?.shop ?? payload?.shopName ?? payload?.shopLabel ?? null;
+  const accounts = listAccounts();
+
+  if (raw === null || raw === undefined || raw === '') {
+    if (accounts.length > 1) {
+      throw badRequest(
+        'More than one Etsy shop is connected, so this product has to say which one it belongs to.', {
+          hint: 'Add "shopId" (or "shop"/"shopName" with its label or its name on Etsy) to the request.',
+          connected: accounts.map((a) => ({ shopId: a.shopId, label: a.label, shopName: a.shopName })),
+        },
+      );
+    }
+    const shopId = activeShopId();
+    if (!shopId) throw badRequest('No Etsy shop is connected yet - connect one in Settings first.');
+    return shopId;
+  }
+
+  const asId = Number(raw);
+  const match = accounts.find((a) =>
+    (Number.isFinite(asId) && a.shopId === asId)
+    || String(a.label ?? '').toLowerCase() === String(raw).toLowerCase()
+    || String(a.shopName ?? '').toLowerCase() === String(raw).toLowerCase());
+  if (!match) {
+    throw badRequest(`"${raw}" does not match any connected shop.`, {
+      given: raw,
+      connected: accounts.map((a) => ({ shopId: a.shopId, label: a.label, shopName: a.shopName })),
+    });
+  }
+  return match.shopId;
+}
+
+/**
  * Take a product in and leave a draft on the desk.
  *
  * The supply record is written first, because it is keyed by SKU and the rest
  * of the app reads it from there. Then the draft, which is what you actually
  * open and finish.
+ *
+ * Everything below runs inside withShop(targetShopId, ...): every shop-scoped
+ * read/write here (supply items, the draft, its shop-wide defaults, the
+ * dedupe lookup) resolves against that shop specifically, whether or not it
+ * is the one currently open in this app's own browser tab.
  */
 export async function receive(payload = {}, { dryRun = false } = {}) {
   const read = readProduct(payload);
@@ -356,119 +407,130 @@ export async function receive(payload = {}, { dryRun = false } = {}) {
     };
   }
 
-  // The supply side: links, cost, images.
-  taobao.saveItem({
-    sku,
-    url: p.url,
-    variantUrl: p.variantUrl,
-    title: p.title,
-    price: p.cost ?? p.price,
-    currency: p.currency,
-    moq: p.moq,
-    shippingCost: p.shippingCost,
-    notes: p.notes,
-    images: p.images,
-  });
+  const targetShopId = resolveTargetShop(payload);
 
-  // Pressing the button twice is normal - you fix something over there and send
-  // it again. That must update the draft already on the desk rather than
-  // leaving two of the same product behind. A draft already sent to Etsy is
-  // left alone; a second push then starts a fresh one, which is right, because
-  // the first is no longer a draft.
-  const existing = getDb().prepare(`
-    SELECT i.draft_id FROM product_studio_inbox i
-    JOIN listing_drafts d ON d.listing_id = i.draft_id
-    WHERE i.shop_id IS ? AND i.sku = ? AND d.pushed_at IS NULL`).get(activeShopId(), sku);
+  return withShop(targetShopId, async () => {
+    // The supply side: links, cost, images.
+    taobao.saveItem({
+      sku,
+      url: p.url,
+      variantUrl: p.variantUrl,
+      title: p.title,
+      price: p.cost ?? p.price,
+      currency: p.currency,
+      moq: p.moq,
+      shippingCost: p.shippingCost,
+      notes: p.notes,
+      images: p.images,
+    });
 
-  // Etsy sells in your currency, not the supplier's cost -- but a blank price
-  // is exactly as much manual work as no price at all, so a rough starting
-  // markup (3x cost, a common dropshipping rule of thumb) is offered instead
-  // when Product Studio did not send an actual sale price. It is staged like
-  // everything else here, so it is reviewed, not silently trusted.
-  const shopCurrency = reportingCurrency();
-  const roughPrice = p.cost != null
-    ? (p.currency === shopCurrency ? p.cost * 3 : convert(p.cost * 3, p.currency, shopCurrency, new Date().toISOString().slice(0, 10)))
-    : null;
+    // Pressing the button twice is normal - you fix something over there and
+    // send it again. That must update the draft already on the desk rather
+    // than leaving two of the same product behind. A draft already sent to
+    // Etsy is left alone; a second push then starts a fresh one, which is
+    // right, because the first is no longer a draft.
+    const existing = getDb().prepare(`
+      SELECT i.draft_id FROM product_studio_inbox i
+      JOIN listing_drafts d ON d.listing_id = i.draft_id
+      WHERE i.shop_id IS ? AND i.sku = ? AND d.pushed_at IS NULL`).get(targetShopId, sku);
 
-  // Only a genuinely new draft gets shop-wide defaults filled in -- an update
-  // (the same product sent again) keeps whatever was already staged rather
-  // than clobbering a choice the seller may have already reviewed.
-  let shopDefaults = {};
-  if (!existing) {
-    try {
-      const choices = await drafts.shopChoices();
-      shopDefaults = {
-        ...(choices.shippingProfiles?.[0]?.id ? { shipping_profile_id: choices.shippingProfiles[0].id } : {}),
-        ...(choices.processingProfiles?.[0]?.id ? { readiness_state_id: choices.processingProfiles[0].id } : {}),
-        ...(choices.sections?.[0]?.id ? { shop_section_id: choices.sections[0].id } : {}),
-      };
-    } catch (err) {
-      log.warn(`could not fetch shop defaults for a new draft: ${err.message}`);
+    // Etsy sells in your currency, not the supplier's cost -- but a blank price
+    // is exactly as much manual work as no price at all, so a rough starting
+    // markup (3x cost, a common dropshipping rule of thumb) is offered instead
+    // when Product Studio did not send an actual sale price. It is staged like
+    // everything else here, so it is reviewed, not silently trusted.
+    const shopCurrency = reportingCurrency();
+    const roughPrice = p.cost != null
+      ? (p.currency === shopCurrency ? p.cost * 3 : convert(p.cost * 3, p.currency, shopCurrency, new Date().toISOString().slice(0, 10)))
+      : null;
+
+    // Only a genuinely new draft gets shop-wide defaults filled in -- an update
+    // (the same product sent again) keeps whatever was already staged rather
+    // than clobbering a choice the seller may have already reviewed.
+    let shopDefaults = {};
+    if (!existing) {
+      try {
+        const choices = await drafts.shopChoices();
+        shopDefaults = {
+          ...(choices.shippingProfiles?.[0]?.id ? { shipping_profile_id: choices.shippingProfiles[0].id } : {}),
+          ...(choices.processingProfiles?.[0]?.id ? { readiness_state_id: choices.processingProfiles[0].id } : {}),
+          ...(choices.sections?.[0]?.id ? { shop_section_id: choices.sections[0].id } : {}),
+        };
+      } catch (err) {
+        log.warn(`could not fetch shop defaults for a new draft: ${err.message}`);
+      }
     }
-  }
 
-  const fields = {
-    title: p.title.slice(0, 140),
-    description: p.description,
-    price: p.price ?? roughPrice,
-    quantity: p.quantity,
-    tags: p.tags,
-    materials: p.materials,
-    ...(p.taxonomyId ? { taxonomy_id: p.taxonomyId } : {}),
-    who_made: 'i_did',
-    when_made: '2020_2026',
-    ...shopDefaults,
-  };
+    const fields = {
+      title: p.title.slice(0, 140),
+      description: p.description,
+      price: p.price ?? roughPrice,
+      quantity: p.quantity,
+      tags: p.tags,
+      materials: p.materials,
+      ...(p.taxonomyId ? { taxonomy_id: p.taxonomyId } : {}),
+      who_made: 'i_did',
+      when_made: '2020_2026',
+      ...shopDefaults,
+    };
 
-  // The Etsy side: a local draft, not a live listing.
-  const draft = existing
-    ? drafts.stage(existing.draft_id, fields)
-    : drafts.createLocal(fields);
+    // The Etsy side: a local draft, not a live listing.
+    const draft = existing
+      ? drafts.stage(existing.draft_id, fields)
+      : drafts.createLocal(fields);
 
-  // The photos (and video, if there is one) so the draft screen can actually
-  // show them and they go up to Etsy the moment this becomes a real listing.
-  // Resending the same product replaces what was staged rather than piling
-  // more on, since a second press means "here is the corrected version".
-  if (existing) draftmedia.clear(draft.listingId);
-  for (const url of p.images.slice(0, draftmedia.MAX_IMAGES)) {
-    try { draftmedia.addUrl(draft.listingId, { kind: 'image', url }); }
-    catch (err) { log.warn(`could not stage image for draft ${draft.listingId}: ${err.message}`); }
-  }
-  if (p.videoUrl) {
-    try { draftmedia.addUrl(draft.listingId, { kind: 'video', url: p.videoUrl }); }
-    catch (err) { log.warn(`could not stage video for draft ${draft.listingId}: ${err.message}`); }
-  }
+    // The photos (and video, if there is one) so the draft screen can actually
+    // show them and they go up to Etsy the moment this becomes a real listing.
+    // Resending the same product replaces what was staged rather than piling
+    // more on, since a second press means "here is the corrected version".
+    if (existing) draftmedia.clear(draft.listingId);
+    for (const url of p.images.slice(0, draftmedia.MAX_IMAGES)) {
+      try { draftmedia.addUrl(draft.listingId, { kind: 'image', url }); }
+      catch (err) { log.warn(`could not stage image for draft ${draft.listingId}: ${err.message}`); }
+    }
+    if (p.videoUrl) {
+      try { draftmedia.addUrl(draft.listingId, { kind: 'video', url: p.videoUrl }); }
+      catch (err) { log.warn(`could not stage video for draft ${draft.listingId}: ${err.message}`); }
+    }
 
-  // Keep what came in, so the setup screen can show the mapping even after
-  // the photos above have moved into draft_media.
-  getDb().prepare(`
-    INSERT INTO product_studio_inbox (draft_id, shop_id, sku, source, payload, images, variants, received_at)
-    VALUES (?,?,?,?,?,?,?, datetime('now'))
-    ON CONFLICT(draft_id) DO UPDATE SET
-      sku = excluded.sku, source = excluded.source, payload = excluded.payload,
-      images = excluded.images, variants = excluded.variants, received_at = datetime('now')`)
-    .run(draft.listingId, activeShopId(), sku, p.supplier,
-      JSON.stringify(payload), JSON.stringify(p.images), JSON.stringify(p.variants));
+    // Keep what came in, so the setup screen can show the mapping even after
+    // the photos above have moved into draft_media.
+    getDb().prepare(`
+      INSERT INTO product_studio_inbox (draft_id, shop_id, sku, source, payload, images, variants, received_at)
+      VALUES (?,?,?,?,?,?,?, datetime('now'))
+      ON CONFLICT(draft_id) DO UPDATE SET
+        sku = excluded.sku, source = excluded.source, payload = excluded.payload,
+        images = excluded.images, variants = excluded.variants, received_at = datetime('now')`)
+      .run(draft.listingId, targetShopId, sku, p.supplier,
+        JSON.stringify(payload), JSON.stringify(p.images), JSON.stringify(p.variants));
 
-  audit('productstudio.receive', { entity: 'listing', entityId: draft.listingId, detail: { sku, supplier: p.supplier } });
-  log.info(`${p.supplier} product ${p.itemId ?? sku} arrived as draft ${draft.listingId}`);
+    const shop = listAccounts().find((a) => a.shopId === targetShopId);
 
-  return {
-    ok: true,
-    sku,
-    draftId: draft.listingId,
-    updated: !!existing,
-    // Where to look. Product Studio can open this to jump straight to it.
-    openUrl: `http://localhost:${config.port}/drafts?open=${draft.listingId}`,
-    title: p.title,
-    images: p.images.length,
-    variants: p.variants.length,
-    understood: read.mapping,
-    ignored: read.ignored,
-    message: existing
-      ? `"${p.title.slice(0, 60)}" was already on the draft desk, so it has been updated rather than added twice.`
-      : `"${p.title.slice(0, 60)}" is on the draft desk. Nothing has gone to Etsy - open it, finish it, then send it.`,
-  };
+    audit('productstudio.receive', {
+      entity: 'listing', entityId: draft.listingId, detail: { sku, supplier: p.supplier, shopId: targetShopId },
+    });
+    log.info(`${p.supplier} product ${p.itemId ?? sku} arrived as draft ${draft.listingId} for shop ${shop?.shopName ?? targetShopId}`);
+
+    return {
+      ok: true,
+      sku,
+      draftId: draft.listingId,
+      updated: !!existing,
+      // Which shop this landed on, so nothing here is ever left to guesswork.
+      shop: shop ? { shopId: shop.shopId, label: shop.label, shopName: shop.shopName } : { shopId: targetShopId },
+      // Where to look. Product Studio can open this to jump straight to it -
+      // only reachable once that shop is the active one in this app.
+      openUrl: `http://localhost:${config.port}/drafts?open=${draft.listingId}`,
+      title: p.title,
+      images: p.images.length,
+      variants: p.variants.length,
+      understood: read.mapping,
+      ignored: read.ignored,
+      message: existing
+        ? `"${p.title.slice(0, 60)}" was already on the draft desk, so it has been updated rather than added twice.`
+        : `"${p.title.slice(0, 60)}" is on the draft desk for ${shop?.shopName ?? 'shop ' + targetShopId}. Nothing has gone to Etsy - open it, finish it, then send it.`,
+    };
+  });
 }
 
 /** What came in with a draft: the photos and options Product Studio found. */
@@ -572,6 +634,7 @@ export function contract() {
   const port = config.port;
   const url = `http://localhost:${port}/api/integrations/product-studio/product`;
   const key = pairingKey();
+  const accounts = listAccounts();
 
   return {
     url,
@@ -582,6 +645,18 @@ export function contract() {
     // Only these two are required; everything else improves the draft.
     required: ['title', 'url'],
     accepts: Object.fromEntries(Object.entries(ALIASES).map(([field, names]) => [field, names])),
+    // Every shop currently connected here, so a picker on Product Studio's
+    // side can send shopId and know exactly which shop a product will land
+    // on - see shopSelection below.
+    shops: accounts.map((a) => ({ shopId: a.shopId, label: a.label, shopName: a.shopName })),
+    shopSelection: {
+      field: 'shopId',
+      alsoAccepted: ['shop', 'shopName', 'shopLabel'],
+      required: accounts.length > 1,
+      note: accounts.length > 1
+        ? 'More than one shop is connected, so every product must name its shop explicitly - shopId (see the shops list above), or shop/shopName/shopLabel with its label or its name on Etsy. Left out, the request is refused rather than guessed.'
+        : 'Optional while only one shop is connected - a product without it goes to that shop. Send it anyway once you add a second shop, so nothing here ever depends on which shop happens to be open in this app.',
+    },
     example: {
       title: 'One Piece Theme Anime Artisan Keycap Set',
       description: 'Resin artisan keycap, MOA profile, fits Cherry MX.',
@@ -595,6 +670,7 @@ export function contract() {
       images: ['https://img.alicdn.com/…/1.jpg', 'https://img.alicdn.com/…/2.jpg'],
       variants: [{ name: 'MOA Profile', sku: 'KC001-01', price: 18.5 }],
       tags: ['keycap', 'artisan', 'anime'],
+      ...(accounts[0] ? { shopId: accounts[0].shopId } : {}),
     },
     snippets: {
       javascript: `// The "send to Etsy" button, wherever it lives
