@@ -33,6 +33,18 @@ CREATE TABLE IF NOT EXISTS shopify_oauth_state (
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- A shop's keystring/secret saved BEFORE it is connected, so connecting is a
+-- single click (pick the saved profile) instead of retyping both every time.
+-- Turned into an etsy_accounts row once that click's OAuth round trip
+-- succeeds; this row is not itself a connection.
+CREATE TABLE IF NOT EXISTS etsy_app_profiles (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  label          TEXT NOT NULL,
+  keystring      TEXT NOT NULL,                        -- sealed
+  shared_secret  TEXT NOT NULL,                        -- sealed
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- One row per connected Etsy shop. Several shops can be connected at once;
 -- exactly one is active, and the active shop scopes what the screens show.
 CREATE TABLE IF NOT EXISTS etsy_accounts (

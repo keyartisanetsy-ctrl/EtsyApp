@@ -113,6 +113,34 @@ export function getStoredToken() {
 export const getAccountByShop = (shopId) =>
   unsealRow(getDb().prepare('SELECT * FROM etsy_accounts WHERE shop_id = ?').get(shopId));
 
+// ------------------------------------------------------- saved app profiles
+
+/** A shop's keystring/secret saved before it is connected, so connecting is
+ *  one click instead of retyping both credentials every time. */
+export function listAppProfiles() {
+  return getDb().prepare('SELECT id, label, created_at FROM etsy_app_profiles ORDER BY id').all()
+    .map((r) => ({ id: r.id, label: r.label, createdAt: r.created_at }));
+}
+
+export function saveAppProfile({ label, keystring, sharedSecret }) {
+  getDb()
+    .prepare('INSERT INTO etsy_app_profiles (label, keystring, shared_secret) VALUES (?,?,?)')
+    .run(String(label ?? '').slice(0, 80), seal(keystring, config.dataDir), seal(sharedSecret, config.dataDir));
+  return listAppProfiles();
+}
+
+/** Unsealed - only for handing straight to buildAuthorizationUrl, never to the UI. */
+export function getAppProfileCredentials(id) {
+  const row = getDb().prepare('SELECT keystring, shared_secret FROM etsy_app_profiles WHERE id = ?').get(id);
+  if (!row) return null;
+  return { keystring: unseal(row.keystring, config.dataDir), sharedSecret: unseal(row.shared_secret, config.dataDir) };
+}
+
+export function removeAppProfile(id) {
+  getDb().prepare('DELETE FROM etsy_app_profiles WHERE id = ?').run(id);
+  return listAppProfiles();
+}
+
 /** Every connected shop, without exposing the tokens. */
 export function listAccounts() {
   return getDb().prepare('SELECT * FROM etsy_accounts ORDER BY id').all().map((r) => ({

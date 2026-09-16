@@ -19,6 +19,7 @@ export default function Settings() {
   const { data, loading, reload } = useAsync(() => api.get('/settings'), []);
   const { data: auth, reload: reloadAuth } = useAsync(() => api.get('/auth/status'), []);
   const { data: privacy, reload: reloadPrivacy } = useAsync(() => api.get('/settings/privacy'), []);
+  const { data: profiles, reload: reloadProfiles } = useAsync(() => api.get('/auth/app-profiles'), []);
   const toast = useToast();
   const showError = useErrorToast();
 
@@ -77,6 +78,37 @@ export default function Settings() {
     if (!confirm('Disconnect this Etsy shop? Local data stays, but syncing stops until you reconnect.')) return;
     await api.post('/auth/disconnect', {});
     reloadAuth();
+  };
+
+  const [newProfileLabel, setNewProfileLabel] = useState('');
+  const [newProfileKey, setNewProfileKey] = useState('');
+  const [newProfileSecret, setNewProfileSecret] = useState('');
+
+  const saveProfile = async () => {
+    try {
+      await api.post('/auth/app-profiles', {
+        label: newProfileLabel.trim(),
+        keystring: newProfileKey.trim(),
+        sharedSecret: newProfileSecret.trim(),
+      });
+      setNewProfileLabel(''); setNewProfileKey(''); setNewProfileSecret('');
+      reloadProfiles();
+      toast({ kind: 'ok', title: 'Shop saved' });
+    } catch (err) { showError(err, 'Could not save this shop'); }
+  };
+
+  const connectProfile = async (profileId) => {
+    try {
+      const r = await api.post('/auth/connect', { profileId });
+      window.open(r.url, '_blank', 'noopener');
+      toast({ kind: 'ok', title: 'Etsy opened in a new tab', body: 'Approve the app, then come back and refresh.', duration: 12000 });
+    } catch (err) { showError(err, 'Could not start the connection'); }
+  };
+
+  const removeProfile = async (profileId) => {
+    if (!confirm('Forget this saved shop? Its keystring/secret are deleted from the app; any shop already connected with it stays connected.')) return;
+    try { await api.del(`/auth/app-profiles/${profileId}`); reloadProfiles(); }
+    catch (err) { showError(err); }
   };
 
   if (loading || !data) return <Page title="Settings"><Spinner /></Page>;
@@ -242,6 +274,59 @@ export default function Settings() {
               <dt>Scopes</dt><dd className="small">{auth.scopes.join(' ') || '—'}</dd>
             </dl>
           )}
+
+          <div className="card mb16" style={{ background: 'var(--bg)' }}>
+            <div className="card-head">
+              <h3>Saved shops</h3>
+              <div className="spacer" />
+              <span className={`badge ${profiles?.length ? 'green' : 'grey'}`}>
+                {profiles?.length ? `${profiles.length} saved` : 'none saved'}
+              </span>
+            </div>
+            <div className="hint mb8">
+              Keep a shop's keystring and shared secret saved here once, then connect it any time with a single
+              click — no retyping. Saving a shop here does not connect it by itself; pressing Connect still opens
+              Etsy for you to sign in and approve.
+            </div>
+
+            {profiles?.length > 0 && (
+              <table className="data mb16">
+                <thead><tr><th>Shop</th><th /></tr></thead>
+                <tbody>
+                  {profiles.map((p) => (
+                    <tr key={p.id}>
+                      <td>{p.label}</td>
+                      <td>
+                        <div className="flex gap4">
+                          <button className="btn xs primary" onClick={() => connectProfile(p.id)}>Connect</button>
+                          <button className="btn xs danger" onClick={() => removeProfile(p.id)}>Forget</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            <div className="flex gap8 mb8" style={{ flexWrap: 'wrap' }}>
+              <div className="field" style={{ minWidth: 160 }}>
+                <label>Shop name</label>
+                <input className="input" value={newProfileLabel} onChange={(e) => setNewProfileLabel(e.target.value)}
+                       placeholder="e.g. KeyArtisanUS" />
+              </div>
+              <div className="field" style={{ minWidth: 220 }}>
+                <label>Keystring</label>
+                <input className="input" value={newProfileKey} onChange={(e) => setNewProfileKey(e.target.value)} />
+              </div>
+              <div className="field" style={{ minWidth: 220 }}>
+                <label>Shared secret</label>
+                <input className="input" type="password" value={newProfileSecret} onChange={(e) => setNewProfileSecret(e.target.value)} />
+              </div>
+            </div>
+            <button className="btn" onClick={saveProfile} disabled={!newProfileLabel.trim() || !newProfileKey.trim() || !newProfileSecret.trim()}>
+              + Save shop
+            </button>
+          </div>
 
           {!auth?.hasKeystring && !newKeystring && (
             <Banner kind="warn">

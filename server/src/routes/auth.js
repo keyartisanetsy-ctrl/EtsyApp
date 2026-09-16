@@ -1,16 +1,32 @@
 import { Router } from 'express';
 import { asyncRoute } from '../lib/http.js';
 import { buildAuthorizationUrl, exchangeCode, verifyScopes, DEFAULT_SCOPES } from '../etsy/oauth.js';
-import { getStoredToken, disconnect, getCredentials, call, listAccounts, setActiveAccount, removeAccount, renameAccount } from '../etsy/client.js';
+import {
+  getStoredToken, disconnect, getCredentials, call, listAccounts, setActiveAccount, removeAccount, renameAccount,
+  listAppProfiles, saveAppProfile, getAppProfileCredentials, removeAppProfile,
+} from '../etsy/client.js';
 import { maskSecret } from '../lib/crypto.js';
 import { currentShop } from '../etsy/shop.js';
 import { OPERATION_COUNT } from '../etsy/operations.generated.js';
+import { badRequest, notFound } from '../lib/errors.js';
 
 const router = Router();
 
 // ------------------------------------------------------------- accounts
 
 router.get('/accounts', asyncRoute(async (req, res) => res.json(listAccounts())));
+
+// ------------------------------------------------------- saved app profiles
+
+router.get('/app-profiles', asyncRoute(async (req, res) => res.json(listAppProfiles())));
+
+router.post('/app-profiles', asyncRoute(async (req, res) => {
+  const { label, keystring, sharedSecret } = req.body ?? {};
+  if (!label || !keystring || !sharedSecret) throw badRequest('label, keystring and sharedSecret are all required.');
+  res.json(saveAppProfile({ label, keystring, sharedSecret }));
+}));
+
+router.delete('/app-profiles/:id', asyncRoute(async (req, res) => res.json(removeAppProfile(Number(req.params.id)))));
 
 /** Switch which connected shop the screens work with. */
 router.post('/accounts/:shopId/activate', asyncRoute(async (req, res) => {
@@ -46,7 +62,13 @@ router.get('/status', asyncRoute(async (req, res) => {
 }));
 
 router.post('/connect', asyncRoute(async (req, res) => {
-  const { scopes, redirectUri, keystring, sharedSecret } = req.body ?? {};
+  const { scopes, redirectUri, profileId } = req.body ?? {};
+  let { keystring, sharedSecret } = req.body ?? {};
+  if (profileId) {
+    const creds = getAppProfileCredentials(Number(profileId));
+    if (!creds) throw notFound('Saved app profile not found.');
+    ({ keystring, sharedSecret } = creds);
+  }
   res.json(buildAuthorizationUrl({
     scopes: Array.isArray(scopes) && scopes.length ? scopes : DEFAULT_SCOPES,
     redirectUri,
