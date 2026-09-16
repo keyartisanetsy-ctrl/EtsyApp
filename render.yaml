@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: etsy-command-center
+    runtime: node
+    plan: starter
+    region: frankfurt
+    branch: claude/etsy-bulk-management-app-q3enu5
+    buildCommand: npm install && npm run codegen && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: OPEN_BROWSER
+        value: "0"
+      - key: DATA_DIR
+        value: /var/data
+      # Set this to your real address once you know it - e.g. the
+      # onrender.com URL Render gives you, or your own domain
+      # (keyartisan.us) once it is pointed here. Etsy/Shopify's
+      # redirect URI must match whatever this ends up being.
+      - key: PUBLIC_HOST
+        sync: false
