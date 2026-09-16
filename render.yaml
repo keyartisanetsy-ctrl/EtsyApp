@@ -22,6 +22,10 @@ services:
         value: "0"
       - key: DATA_DIR
         value: /var/data
+      # Render already redeploys on every push; the VDS-oriented self-update
+      # (checks GitHub, npm install/build, restart) would just fight that.
+      - key: AUTO_UPDATE
+        value: "0"
       # Set this to your real address once you know it - e.g. the
       # onrender.com URL Render gives you, or your own domain
       # (keyartisan.us) once it is pointed here. Etsy/Shopify's
