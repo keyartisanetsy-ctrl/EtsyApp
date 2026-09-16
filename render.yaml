@@ -7,7 +7,7 @@ services:
     branch: claude/etsy-bulk-management-app-q3enu5
     buildCommand: npm install --include=dev && npm run codegen && npm run build
     startCommand: npm start
-    healthCheckPath: /api/health
+    healthCheckPath: /etsy-shopify/api/health
     autoDeploy: true
     disk:
       name: data
@@ -26,9 +26,9 @@ services:
       # (checks GitHub, npm install/build, restart) would just fight that.
       - key: AUTO_UPDATE
         value: "0"
-      # Set this to your real address once you know it - e.g. the
-      # onrender.com URL Render gives you, or your own domain
-      # (keyartisan.us) once it is pointed here. Etsy/Shopify's
-      # redirect URI must match whatever this ends up being.
+      # Served behind a Cloudflare Worker at keyartisan.us/etsy-shopify,
+      # alongside the sibling Product Studio app at /product-studio.
+      - key: BASE_PATH
+        value: /etsy-shopify
       - key: PUBLIC_HOST
-        sync: false
+        value: keyartisan.us
