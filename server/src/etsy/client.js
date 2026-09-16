@@ -7,7 +7,7 @@
 import config from '../config.js';
 import { readSetting } from '../services/settings.js';
 import { getDb, getSetting, setSetting, resolveSetting } from '../db/index.js';
-import { seal, open as unseal } from '../lib/crypto.js';
+import { seal, open as unseal, maskSecret } from '../lib/crypto.js';
 import { createLogger } from '../lib/logger.js';
 import { EtsyApiError, unauthorized, notFound } from '../lib/errors.js';
 import { OPERATIONS } from './operations.generated.js';
@@ -161,6 +161,10 @@ export function listAccounts() {
     // Whether this shop registered its own Etsy app, vs. still using the
     // Settings-wide keystring (true for a shop connected before that existed).
     hasOwnKeystring: !!r.keystring,
+    // Masked (first/last 4 chars) so the right shop's app can be told apart
+    // at a glance, without ever showing either value in full.
+    keystringMasked: r.keystring ? maskSecret(unseal(r.keystring, config.dataDir)) : '',
+    sharedSecretMasked: r.shared_secret ? maskSecret(unseal(r.shared_secret, config.dataDir)) : '',
   }));
 }
 

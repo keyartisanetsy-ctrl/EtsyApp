@@ -162,6 +162,11 @@ export default function Settings() {
                       {a.hasOwnKeystring
                         ? <span className="badge green" title="Connected under its own registered Etsy app">own key</span>
                         : <span className="badge grey" title="Falls back to the keystring saved further down this tab">shared key</span>}
+                      {a.hasOwnKeystring && (
+                        <div className="mono small muted mt4">
+                          {a.keystringMasked}{a.sharedSecretMasked ? ` / ${a.sharedSecretMasked}` : ''}
+                        </div>
+                      )}
                     </td>
                     <td className="mono small">{a.shopId}</td>
                     <td className="small muted">{fmtAgo(a.connectedAt)}</td>
