@@ -66,8 +66,12 @@ export function getCredentials(account) {
     keystring,
     sharedSecret,
     apiKeyHeader: buildApiKeyHeader(keystring, sharedSecret),
-    redirectUri: resolveSetting('etsy.redirect_uri', config.etsy.redirectUri) ||
-      `http://${config.publicHost}:${config.port}/api/auth/callback`,
+    // readSetting (not resolveSetting) so this matches the same
+    // localhost-vs-real-public-host, BASE_PATH-aware default the Settings
+    // page shows and copies into Etsy's dashboard - duplicating that
+    // template here instead left the actual connect flow still building
+    // the broken http://host:port form even after the display was fixed.
+    redirectUri: readSetting('etsy.redirect_uri'),
   };
 }
 
