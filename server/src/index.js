@@ -45,8 +45,14 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(cookieParser());
 
+// Everything below is mounted under config.basePath (empty by default, so it
+// serves from the root exactly as before). Set BASE_PATH when this app sits
+// behind a reverse proxy on a shared hub domain (e.g. "/etsy-shopify"), so
+// static assets, API routes and the SPA fallback all agree on the prefix.
+const router = express.Router();
+
 // Concise request log; skips the noisy polling endpoints.
-app.use((req, res, next) => {
+router.use((req, res, next) => {
   const started = Date.now();
   res.on('finish', () => {
     if (req.path.startsWith('/api') && !/\/(dashboard|counters|summary)$/.test(req.path)) {
@@ -59,58 +65,60 @@ app.use((req, res, next) => {
 
 /** Optional shared password when the app is exposed beyond loopback. */
 if (config.security.appPassword) {
-  app.use('/api', (req, res, next) => {
+  router.use('/api', (req, res, next) => {
     if (req.path.startsWith('/auth/callback') || req.path === '/health') return next();
     const supplied = req.get('x-app-password') || req.cookies?.app_password;
     if (supplied === config.security.appPassword) return next();
     res.status(401).json({ error: 'App password required' });
   });
-  app.post('/api/login', (req, res) => {
+  router.post('/api/login', (req, res) => {
     if (req.body?.password !== config.security.appPassword) return res.status(401).json({ error: 'Wrong password' });
     res.cookie('app_password', req.body.password, { httpOnly: true, sameSite: 'lax', maxAge: config.security.sessionTtlHours * 3600_000 });
     res.json({ ok: true });
   });
 }
 
-app.get('/api/health', (req, res) => res.json({
+router.get('/api/health', (req, res) => res.json({
   ok: true, version: '1.0.0', env: config.env, operations: OPERATION_COUNT, uptime: Math.round(process.uptime()),
 }));
 
-app.use('/api/auth', authRoutes);
-app.use('/api/settings', settingsRoutes);
-app.use('/api/dashboard', dashboardRoutes);
-app.use('/api/listings', listingRoutes);
-app.use('/api/skus', skuRoutes);
-app.use('/api/orders', orderRoutes);
-app.use('/api/tracking', trackingRoutes);
-app.use('/api/ai', aiRoutes);
-app.use('/api/bulk', bulkRoutes);
-app.use('/api/research', researchRoutes);
-app.use('/api/shop', shopRoutes);
-app.use('/api/finance', financeRoutes);
-app.use('/api/exports', exportRoutes);
-app.use('/api/etsy', etsyRoutes);
-app.use('/api/airtable', airtableRoutes);
-app.use('/api/analytics', analyticsRoutes);
-app.use('/api/undo', undoRoutes);
-app.use('/api/drafts', draftRoutes);
-app.use('/api/supply', supplyRoutes);
-app.use('/api/etsy-extra', etsyExtraRoutes);
-app.use('/api/integrations', integrationRoutes);
-app.use('/api/shopify', shopifyRoutes);
+router.use('/api/auth', authRoutes);
+router.use('/api/settings', settingsRoutes);
+router.use('/api/dashboard', dashboardRoutes);
+router.use('/api/listings', listingRoutes);
+router.use('/api/skus', skuRoutes);
+router.use('/api/orders', orderRoutes);
+router.use('/api/tracking', trackingRoutes);
+router.use('/api/ai', aiRoutes);
+router.use('/api/bulk', bulkRoutes);
+router.use('/api/research', researchRoutes);
+router.use('/api/shop', shopRoutes);
+router.use('/api/finance', financeRoutes);
+router.use('/api/exports', exportRoutes);
+router.use('/api/etsy', etsyRoutes);
+router.use('/api/airtable', airtableRoutes);
+router.use('/api/analytics', analyticsRoutes);
+router.use('/api/undo', undoRoutes);
+router.use('/api/drafts', draftRoutes);
+router.use('/api/supply', supplyRoutes);
+router.use('/api/etsy-extra', etsyExtraRoutes);
+router.use('/api/integrations', integrationRoutes);
+router.use('/api/shopify', shopifyRoutes);
 
 // Serve the built frontend when it exists, so `npm start` runs the whole app.
 const webDist = path.join(ROOT, 'web', 'dist');
 if (fs.existsSync(webDist)) {
-  app.use(express.static(webDist));
+  router.use(express.static(webDist));
   // Client-side routes fall through to the SPA. The lookahead must be anchored
   // to /api/ (or exactly /api) so a page route like /api-explorer still works.
-  app.get(/^(?!\/api(?:\/|$)).*/, (req, res) => res.sendFile(path.join(webDist, 'index.html')));
+  router.get(/^(?!\/api(?:\/|$)).*/, (req, res) => res.sendFile(path.join(webDist, 'index.html')));
 } else {
-  app.get('/', (req, res) => res.status(200).send(
+  router.get('/', (req, res) => res.status(200).send(
     '<h1>Etsy Command Center API</h1><p>The web build is missing. Run <code>npm run build</code>, or use <code>npm run dev</code> for the dev server.</p>',
   ));
 }
+
+app.use(config.basePath || '/', router);
 
 app.use((req, res) => res.status(404).json({ error: `No route for ${req.method} ${req.path}` }));
 

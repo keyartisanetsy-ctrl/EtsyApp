@@ -20,6 +20,10 @@ export const config = {
   // This is what every URL shown to the user or registered with Etsy uses;
   // the server still binds to explicit loopback addresses (see index.js).
   publicHost: process.env.PUBLIC_HOST || 'localhost',
+  // Optional URL prefix this app is mounted under behind a reverse proxy
+  // (e.g. "/etsy-shopify" when served at hub-domain/etsy-shopify/...).
+  // Empty by default: mounted at the root, exactly as before.
+  basePath: (process.env.BASE_PATH || '').replace(/\/+$/, ''),
 
   dataDir: process.env.DATA_DIR || path.join(ROOT, 'data'),
   get dbFile() { return process.env.DB_FILE || path.join(this.dataDir, 'etsy-command-center.db'); },

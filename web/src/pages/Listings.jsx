@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import api from '../lib/api.js';
+import api, { withBase } from '../lib/api.js';
 import Pictures from '../components/Pictures.jsx';
 import { TablePage } from '../components/Page.jsx';
 import {
@@ -103,7 +103,7 @@ export default function Listings() {
 
   const exportXlsx = async () => {
     const r = await api.post('/exports/listings', { state });
-    window.location.href = `/api/exports/download/${encodeURIComponent(r.filename)}`;
+    window.location.href = withBase(`/api/exports/download/${encodeURIComponent(r.filename)}`);
   };
 
   return (

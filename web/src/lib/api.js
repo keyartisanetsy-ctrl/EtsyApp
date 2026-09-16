@@ -10,6 +10,11 @@ class ApiError extends Error {
   }
 }
 
+/** Prefixes an absolute path with wherever this build is served from
+ *  (import.meta.env.BASE_URL, e.g. "/etsy-shopify/" behind a hub proxy, or
+ *  "/" at the root) so links keep working under either. */
+export const withBase = (path) => `${import.meta.env.BASE_URL.replace(/\/$/, '')}${path}`;
+
 async function request(path, { method = 'GET', body, formData, signal } = {}) {
   const options = { method, signal, headers: {} };
   if (formData) options.body = formData;
@@ -18,7 +23,7 @@ async function request(path, { method = 'GET', body, formData, signal } = {}) {
     options.body = JSON.stringify(body);
   }
 
-  const res = await fetch(`/api${path}`, options);
+  const res = await fetch(withBase(`/api${path}`), options);
   const text = await res.text();
   let payload = null;
   try { payload = text ? JSON.parse(text) : null; } catch { payload = text; }

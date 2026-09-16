@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import api from '../lib/api.js';
+import api, { withBase } from '../lib/api.js';
 import { useRates } from '../lib/rates.js';
 import Pictures from '../components/Pictures.jsx';
 import { TablePage } from '../components/Page.jsx';
@@ -146,7 +146,7 @@ export default function Skus() {
       if (allRenames.length) {
         try {
           const r = await api.post('/exports/sku-renames', { renames: allRenames });
-          window.location.href = `/api/exports/download/${encodeURIComponent(r.filename)}`;
+          window.location.href = withBase(`/api/exports/download/${encodeURIComponent(r.filename)}`);
           toast({ kind: 'ok', title: 'SKU rename sheet ready', body: `${allRenames.length} rename(s) - old/new SKU and both images, for the warehouse or supplier.` });
         } catch (err) { showError(err, 'Renamed on Etsy, but could not build the hand-off sheet'); }
       }
@@ -214,7 +214,7 @@ export default function Skus() {
     try {
       const r = await api.post('/exports/skus', { search: debounced, state, missingSku, missingSupply });
       toast({ kind: 'ok', title: 'Workbook ready', body: r.filename });
-      window.location.href = `/api/exports/download/${encodeURIComponent(r.filename)}`;
+      window.location.href = withBase(`/api/exports/download/${encodeURIComponent(r.filename)}`);
     } catch (err) { showError(err, 'Export failed'); }
   };
 

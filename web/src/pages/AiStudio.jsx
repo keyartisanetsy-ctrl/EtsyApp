@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import api from '../lib/api.js';
+import api, { withBase } from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import {
   Spinner, Banner, Tabs, CopyButton, Empty, Thumb,
@@ -384,7 +384,7 @@ function ListingWriter({ status }) {
                 className="btn primary mt8"
                 onClick={() => {
                   sessionStorage.setItem('ai-listing-draft', JSON.stringify(result.full.listing));
-                  window.location.href = '/listings/new';
+                  window.location.href = withBase('/listings/new');
                 }}
               >
                 Send to Create listing →

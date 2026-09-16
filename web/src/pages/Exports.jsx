@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import api from '../lib/api.js';
+import api, { withBase } from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import { Spinner, Empty, useAsync, useToast, useErrorToast, fmtAgo } from '../components/ui.jsx';
 
@@ -23,7 +23,7 @@ export default function Exports() {
       const r = await api.post(kind.path, {});
       toast({ kind: 'ok', title: 'Workbook ready', body: `${r.filename} · ${Math.round(r.bytes / 1024)} KB` });
       reload();
-      window.location.href = `/api/exports/download/${encodeURIComponent(r.filename)}`;
+      window.location.href = withBase(`/api/exports/download/${encodeURIComponent(r.filename)}`);
     } catch (err) { showError(err, 'Export failed'); } finally { setBusy(null); }
   };
 

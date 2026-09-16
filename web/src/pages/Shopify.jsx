@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import api from '../lib/api.js';
+import api, { withBase } from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Checkbox, Drawer, Thumb, Tabs, Help,
@@ -61,7 +61,7 @@ function ConnectionPanel({ status }) {
 
   if (!s) return <Spinner />;
 
-  const redirectUri = `${window.location.origin}/api/shopify/oauth/callback`;
+  const redirectUri = `${window.location.origin}${withBase('/api/shopify/oauth/callback')}`;
 
   const saveDomain = async () => {
     setBusy(true);

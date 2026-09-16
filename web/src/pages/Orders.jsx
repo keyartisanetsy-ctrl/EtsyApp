@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import api from '../lib/api.js';
+import api, { withBase } from '../lib/api.js';
 import { useRates } from '../lib/rates.js';
 import { TablePage } from '../components/Page.jsx';
 import {
@@ -116,7 +116,7 @@ export default function Orders() {
     try {
       const r = await api.post('/exports/orders', { search: debounced, done: done || undefined, shipped: shipped || undefined, alertsOnly });
       toast({ kind: 'ok', title: 'Workbook ready', body: r.filename });
-      window.location.href = `/api/exports/download/${encodeURIComponent(r.filename)}`;
+      window.location.href = withBase(`/api/exports/download/${encodeURIComponent(r.filename)}`);
     } catch (err) { showError(err, 'Export failed'); }
   };
 
@@ -859,7 +859,7 @@ function BulkTrackingModal({ open, onClose, onDone }) {
 
   const downloadTemplate = async () => {
     const r = await api.post('/exports/tracking-template', {});
-    window.location.href = `/api/exports/download/${encodeURIComponent(r.filename)}`;
+    window.location.href = withBase(`/api/exports/download/${encodeURIComponent(r.filename)}`);
   };
 
   const upload = async (file) => {

@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import api from '../lib/api.js';
+import api, { withBase } from '../lib/api.js';
 import { TablePage } from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Checkbox, Pager, Drawer, Modal, CopyButton, Stat,
@@ -68,7 +68,7 @@ export default function Tracking() {
   const exportXlsx = async () => {
     try {
       const r = await api.post('/exports/tracking', {});
-      window.location.href = `/api/exports/download/${encodeURIComponent(r.filename)}`;
+      window.location.href = withBase(`/api/exports/download/${encodeURIComponent(r.filename)}`);
     } catch (err) { showError(err, 'Export failed'); }
   };
 
