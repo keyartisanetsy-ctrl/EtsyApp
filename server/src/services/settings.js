@@ -11,7 +11,14 @@ import { maskSecret } from '../lib/crypto.js';
 export const SETTING_DEFS = {
   'etsy.keystring':        { env: config.etsy.keystring, def: '', secret: true, label: 'Etsy keystring' },
   'etsy.shared_secret':    { env: config.etsy.sharedSecret, def: '', secret: true, label: 'Etsy shared secret' },
-  'etsy.redirect_uri':     { env: config.etsy.redirectUri, def: `http://${config.publicHost}:${config.port}/api/auth/callback`, label: 'OAuth redirect URI' },
+  // localhost uses the raw host:port a dev server binds to; a real public
+  // host (BASE_PATH deployments included) is always reached over https with
+  // no port, at whatever sub-path this app is mounted under.
+  'etsy.redirect_uri':     { env: config.etsy.redirectUri,
+    def: config.publicHost === 'localhost'
+      ? `http://${config.publicHost}:${config.port}/api/auth/callback`
+      : `https://${config.publicHost}${config.basePath}/api/auth/callback`,
+    label: 'OAuth redirect URI' },
 
   'ai.provider':           { env: config.ai.defaultProvider, def: 'manus', label: 'Default AI provider',
     options: [
