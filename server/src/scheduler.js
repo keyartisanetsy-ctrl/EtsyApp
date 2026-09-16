@@ -6,7 +6,7 @@
 import { createLogger } from './lib/logger.js';
 import config, { ROOT } from './config.js';
 import { readSetting } from './services/settings.js';
-import { getStoredToken } from './etsy/client.js';
+import { getStoredToken, refreshAllAccounts } from './etsy/client.js';
 import { syncTracking, refreshStaleFlags } from './services/tracking/index.js';
 import { syncReceipts } from './services/sync.js';
 import { ensureRates } from './services/fx.js';
@@ -46,6 +46,14 @@ export function startScheduler() {
     if (!getStoredToken()) return;
     try { await syncReceipts({}); } catch (err) { log.warn(`scheduled receipt sync failed: ${err.message}`); }
   }, 30 * 60_000).unref());
+
+  // A shop that isn't the active one can otherwise sit untouched for months
+  // between switches, long enough for Etsy's own refresh-token lifetime to
+  // run out on its own - keep every connected shop alive, not just today's.
+  setTimeout(() => refreshAllAccounts().catch((err) => log.warn(`account refresh sweep failed: ${err.message}`)), 10_000).unref();
+  timers.push(setInterval(() => {
+    refreshAllAccounts().catch((err) => log.warn(`account refresh sweep failed: ${err.message}`));
+  }, 60 * 60_000).unref());
 
   if (config.features.autoSyncOnStart && getStoredToken()) {
     setTimeout(() => syncReceipts({}).catch((e) => log.warn(`startup sync: ${e.message}`)), 5000).unref();

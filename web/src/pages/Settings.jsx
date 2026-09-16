@@ -57,11 +57,19 @@ export default function Settings() {
     finally { setCheckingScopes(false); }
   };
 
+  const [newKeystring, setNewKeystring] = useState('');
+  const [newSecret, setNewSecret] = useState('');
+
   const connect = async () => {
     try {
-      const r = await api.post('/auth/connect', {});
+      const r = await api.post('/auth/connect', {
+        keystring: newKeystring.trim() || undefined,
+        sharedSecret: newSecret.trim() || undefined,
+      });
       window.open(r.url, '_blank', 'noopener');
       toast({ kind: 'ok', title: 'Etsy opened in a new tab', body: 'Approve the app, then come back and refresh.', duration: 12000 });
+      setNewKeystring('');
+      setNewSecret('');
     } catch (err) { showError(err, 'Could not start the connection'); }
   };
 
@@ -101,7 +109,7 @@ export default function Settings() {
 
           {auth?.accounts?.length > 0 && (
             <table className="data mb16">
-              <thead><tr><th /><th>Shop</th><th>Shop ID</th><th>Connected</th><th /></tr></thead>
+              <thead><tr><th /><th>Shop</th><th>Etsy app</th><th>Shop ID</th><th>Connected</th><th /></tr></thead>
               <tbody>
                 {auth.accounts.map((a) => (
                   <tr key={a.shopId}>
@@ -117,6 +125,11 @@ export default function Settings() {
                           catch (err) { showError(err); }
                         }}
                       />
+                    </td>
+                    <td>
+                      {a.hasOwnKeystring
+                        ? <span className="badge green" title="Connected under its own registered Etsy app">own key</span>
+                        : <span className="badge grey" title="Falls back to the keystring saved further down this tab">shared key</span>}
                     </td>
                     <td className="mono small">{a.shopId}</td>
                     <td className="small muted">{fmtAgo(a.connectedAt)}</td>
@@ -147,8 +160,10 @@ export default function Settings() {
               SKUs, tracking, bulk jobs, research) shows only the active shop's own data; nothing is ever mixed
               between shops.
               <div className="mt8">
-                The keystring and shared secret below register <strong>one Etsy app</strong> — you only enter them
-                once. Each shop connects to that same app through its own separate authorization.
+                Each shop can register and use its <strong>own</strong> Etsy app (its own keystring and shared
+                secret) — paste that shop's pair into the fields below before pressing connect, so every shop
+                authorizes separately and looks independent to Etsy. Leave both blank to fall back to the
+                keystring/secret saved further down this tab.
               </div>
             </div>
           </Banner>
@@ -220,31 +235,43 @@ export default function Settings() {
             </div>
           )}
 
-          {!auth?.hasKeystring ? (
+          {auth?.accountCount > 0 && (
+            <dl className="kv mb16">
+              <dt>Active shop</dt><dd>{auth.shop?.shopName ?? '—'} <span className="muted mono">({auth.shop?.shopId ?? '—'})</span></dd>
+              <dt>Token expires</dt><dd>{fmtAgo(auth.expiresAt)} <span className="muted">(refreshed automatically, for every connected shop)</span></dd>
+              <dt>Scopes</dt><dd className="small">{auth.scopes.join(' ') || '—'}</dd>
+            </dl>
+          )}
+
+          {!auth?.hasKeystring && !newKeystring && (
             <Banner kind="warn">
-              Add your Etsy <strong>keystring</strong> and <strong>shared secret</strong> below, then save.
-              Both come from etsy.com/developers/your-apps. Etsy requires the API key header to be
-              <code className="mono"> keystring:shared_secret</code> — the keystring on its own is rejected on
-              every endpoint, so the secret is not optional.
+              Add a keystring and shared secret below — either this specific shop's own (recommended, so it
+              connects under its own Etsy app), or a general one saved further down this tab to reuse for every
+              shop. Both come from etsy.com/developers/your-apps; Etsy requires the API key header to be
+              <code className="mono"> keystring:shared_secret</code>, so the secret is not optional either way.
             </Banner>
-          ) : auth?.accountCount ? (
-            <>
-              <dl className="kv mb16">
-                <dt>Active shop</dt><dd>{auth.shop?.shopName ?? '—'} <span className="muted mono">({auth.shop?.shopId ?? '—'})</span></dd>
-                <dt>Token expires</dt><dd>{fmtAgo(auth.expiresAt)} <span className="muted">(refreshed automatically)</span></dd>
-                <dt>Scopes</dt><dd className="small">{auth.scopes.join(' ') || '—'}</dd>
-              </dl>
-              <button className="btn primary" onClick={connect}>+ Connect another shop</button>
-              <button className="btn danger" style={{ marginLeft: 8 }} onClick={disconnect}>Disconnect all</button>
-            </>
-          ) : (
-            <>
-              <p className="dim small">
-                Your Etsy app's callback URL must be exactly:{' '}
-                <code className="mono">{auth?.redirectUri}</code>
-              </p>
-              <button className="btn primary" onClick={connect}>Connect Etsy shop</button>
-            </>
+          )}
+
+          <p className="dim small">
+            This shop's Etsy app callback URL must be exactly: <code className="mono">{auth?.redirectUri}</code>
+          </p>
+          <div className="flex gap8 mb8" style={{ flexWrap: 'wrap' }}>
+            <div className="field" style={{ minWidth: 220 }}>
+              <label>This shop's keystring</label>
+              <input className="input" value={newKeystring} onChange={(e) => setNewKeystring(e.target.value)}
+                     placeholder={auth?.hasKeystring ? '(optional — blank reuses the saved one)' : 'required'} />
+            </div>
+            <div className="field" style={{ minWidth: 220 }}>
+              <label>This shop's shared secret</label>
+              <input className="input" type="password" value={newSecret} onChange={(e) => setNewSecret(e.target.value)}
+                     placeholder={auth?.hasKeystring ? '(optional — blank reuses the saved one)' : 'required'} />
+            </div>
+          </div>
+          <button className="btn primary" onClick={connect}>
+            {auth?.accountCount ? '+ Connect another shop' : 'Connect Etsy shop'}
+          </button>
+          {auth?.accountCount > 0 && (
+            <button className="btn danger" style={{ marginLeft: 8 }} onClick={disconnect}>Disconnect all</button>
           )}
         </div>
       )}

@@ -46,10 +46,12 @@ router.get('/status', asyncRoute(async (req, res) => {
 }));
 
 router.post('/connect', asyncRoute(async (req, res) => {
-  const { scopes, redirectUri } = req.body ?? {};
+  const { scopes, redirectUri, keystring, sharedSecret } = req.body ?? {};
   res.json(buildAuthorizationUrl({
     scopes: Array.isArray(scopes) && scopes.length ? scopes : DEFAULT_SCOPES,
     redirectUri,
+    keystring,
+    sharedSecret,
   }));
 }));
 

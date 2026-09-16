@@ -53,9 +53,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // -------------------------------------------------------------- credentials
 
-export function getCredentials() {
-  const keystring = resolveSetting('etsy.keystring', config.etsy.keystring);
-  const sharedSecret = resolveSetting('etsy.shared_secret', config.etsy.sharedSecret);
+/**
+ * `account` (a shop's own row, or an ad-hoc {keystring, shared_secret} pair)
+ * takes priority when it has its own keystring - that shop registered its
+ * own Etsy app. Falling back to the Settings-wide keystring keeps a shop
+ * connected before per-shop credentials existed working unchanged.
+ */
+export function getCredentials(account) {
+  const keystring = account?.keystring || resolveSetting('etsy.keystring', config.etsy.keystring);
+  const sharedSecret = account?.shared_secret || resolveSetting('etsy.shared_secret', config.etsy.sharedSecret);
   return {
     keystring,
     sharedSecret,
@@ -81,12 +87,14 @@ export function buildApiKeyHeader(keystring, sharedSecret) {
 }
 
 /** OAuth's client_id is the bare keystring, never the combined pair. */
-export const clientId = () => String(getCredentials().keystring ?? '').split(':')[0].trim();
+export const clientId = (account) => String(getCredentials(account).keystring ?? '').split(':')[0].trim();
 
 const unsealRow = (row) => (row ? {
   ...row,
   access_token: unseal(row.access_token, config.dataDir),
   refresh_token: unseal(row.refresh_token, config.dataDir),
+  keystring: row.keystring ? unseal(row.keystring, config.dataDir) : null,
+  shared_secret: row.shared_secret ? unseal(row.shared_secret, config.dataDir) : null,
 } : null);
 
 /** The shop the screens are currently working with. */
@@ -118,6 +126,9 @@ export function listAccounts() {
     expiresAt: r.expires_at,
     connectedAt: r.connected_at,
     isActive: !!r.is_active,
+    // Whether this shop registered its own Etsy app, vs. still using the
+    // Settings-wide keystring (true for a shop connected before that existed).
+    hasOwnKeystring: !!r.keystring,
   }));
 }
 
@@ -183,11 +194,18 @@ export function removeAccount(shopId, { purgeData = true } = {}) {
  * A shop_id is not known during the very first token exchange (it takes another
  * API call to find out), so a row without one is written and completed later.
  */
-export function saveToken({ access_token, refresh_token, expires_in, user_id, shop_id, shop_name, scopes, makeActive = true }) {
+export function saveToken({
+  access_token, refresh_token, expires_in, user_id, shop_id, shop_name, scopes,
+  keystring, sharedSecret, makeActive = true,
+}) {
   const db = getDb();
   const expiresAt = new Date(Date.now() + (expires_in ?? 3600) * 1000).toISOString();
   const sealedAccess = seal(access_token, config.dataDir);
   const sealedRefresh = seal(refresh_token, config.dataDir);
+  // Only set when this shop registered its own app; omitted on a plain token
+  // refresh, which must never overwrite what connect-time already stored.
+  const sealedKeystring = keystring ? seal(keystring, config.dataDir) : null;
+  const sealedSecret = sharedSecret ? seal(sharedSecret, config.dataDir) : null;
 
   db.transaction(() => {
     const existing = shop_id
@@ -198,20 +216,24 @@ export function saveToken({ access_token, refresh_token, expires_in, user_id, sh
       db.prepare(`UPDATE etsy_accounts SET
           user_id = COALESCE(?, user_id), shop_id = COALESCE(?, shop_id),
           shop_name = COALESCE(?, shop_name), access_token = ?, refresh_token = ?,
-          scopes = COALESCE(NULLIF(?, ''), scopes), expires_at = ?, updated_at = datetime('now')
+          scopes = COALESCE(NULLIF(?, ''), scopes), expires_at = ?,
+          keystring = COALESCE(?, keystring), shared_secret = COALESCE(?, shared_secret),
+          updated_at = datetime('now')
         WHERE id = ?`)
         .run(user_id ?? null, shop_id ?? null, shop_name ?? null,
-             sealedAccess, sealedRefresh, scopes ?? '', expiresAt, existing.id);
+             sealedAccess, sealedRefresh, scopes ?? '', expiresAt,
+             sealedKeystring, sealedSecret, existing.id);
       if (makeActive) {
         db.prepare('UPDATE etsy_accounts SET is_active = 0').run();
         db.prepare('UPDATE etsy_accounts SET is_active = 1 WHERE id = ?').run(existing.id);
       }
     } else {
       const info = db.prepare(`INSERT INTO etsy_accounts
-          (shop_id, shop_name, user_id, access_token, refresh_token, scopes, expires_at, is_active)
-        VALUES (?,?,?,?,?,?,?,?)`)
+          (shop_id, shop_name, user_id, access_token, refresh_token, scopes, expires_at, keystring, shared_secret, is_active)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`)
         .run(shop_id ?? null, shop_name ?? null, user_id ?? null,
-             sealedAccess, sealedRefresh, scopes ?? '', expiresAt, makeActive ? 1 : 0);
+             sealedAccess, sealedRefresh, scopes ?? '', expiresAt,
+             sealedKeystring, sealedSecret, makeActive ? 1 : 0);
       if (makeActive) {
         db.prepare('UPDATE etsy_accounts SET is_active = 0 WHERE id <> ?').run(info.lastInsertRowid);
       }
@@ -224,20 +246,16 @@ export function saveToken({ access_token, refresh_token, expires_in, user_id, sh
 /** Disconnect every shop. Individual shops use removeAccount(). */
 export const disconnect = () => getDb().prepare('DELETE FROM etsy_accounts').run();
 
-/** Etsy access tokens live 1h; refresh a minute early to avoid a mid-flight 401. */
-async function ensureFreshToken() {
-  const token = getStoredToken();
-  if (!token) throw unauthorized('No Etsy account connected. Open Settings and connect your shop.');
-  if (new Date(token.expires_at).getTime() - Date.now() > 60_000) return token;
-
-  log.info('access token expiring, refreshing');
+/** One shop's refresh-token grant, against whichever app that shop is
+ *  registered under (its own keystring, or the Settings-wide one). */
+async function refreshAccountToken(account) {
   const res = await outboundFetch(config.etsy.tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type: 'refresh_token',
-      client_id: clientId(),
-      refresh_token: token.refresh_token,
+      client_id: clientId(account),
+      refresh_token: account.refresh_token,
     }),
   });
   const body = await res.json().catch(() => ({}));
@@ -246,12 +264,44 @@ async function ensureFreshToken() {
   }
   return saveToken({
     ...body,
-    shop_id: token.shop_id,
-    shop_name: token.shop_name,
-    user_id: token.user_id,
-    scopes: token.scopes,
+    shop_id: account.shop_id,
+    shop_name: account.shop_name,
+    user_id: account.user_id,
+    scopes: account.scopes,
     makeActive: false, // refreshing must never change which shop is selected
   });
+}
+
+/** Etsy access tokens live 1h; refresh a minute early to avoid a mid-flight 401. */
+async function ensureFreshToken() {
+  const token = getStoredToken();
+  if (!token) throw unauthorized('No Etsy account connected. Open Settings and connect your shop.');
+  if (new Date(token.expires_at).getTime() - Date.now() > 60_000) return token;
+
+  log.info(`access token expiring for shop ${token.shop_id}, refreshing`);
+  return refreshAccountToken(token);
+}
+
+/**
+ * Keeps every connected shop's token alive, not just the active one - Etsy's
+ * refresh tokens still expire on their own schedule (~90 days) if nothing
+ * ever uses them, and a shop can sit idle in the switcher for a lot longer
+ * than that between visits.
+ */
+export async function refreshAllAccounts() {
+  const rows = getDb().prepare('SELECT * FROM etsy_accounts').all().map(unsealRow);
+  const results = [];
+  for (const account of rows) {
+    if (new Date(account.expires_at).getTime() - Date.now() > 10 * 60_000) continue;
+    try {
+      await refreshAccountToken(account);
+      results.push({ shopId: account.shop_id, ok: true });
+    } catch (err) {
+      log.warn(`refresh failed for shop ${account.shop_id}: ${err.message}`);
+      results.push({ shopId: account.shop_id, ok: false, error: err.message });
+    }
+  }
+  return results;
 }
 
 // ------------------------------------------------------------ request core
@@ -326,9 +376,9 @@ export async function request(pathname, opts = {}) {
 
 async function performRequest(pathname, {
   method = 'GET', query, body, bodyKind = 'json', headers = {},
-  auth = true, operationId, raw = false, accessToken = null,
+  auth = true, operationId, raw = false, accessToken = null, account = null,
 } = {}) {
-  const { keystring, sharedSecret, apiKeyHeader } = getCredentials();
+  const { keystring, sharedSecret, apiKeyHeader } = getCredentials(account ?? getStoredToken());
   if (!keystring) throw unauthorized('Etsy API keystring is not configured. Add it in Settings.');
   if (!sharedSecret && !keystring.includes(':')) {
     throw unauthorized(
@@ -471,7 +521,8 @@ export async function call(operationId, args = {}, opts = {}) {
   const auth = opts.auth ?? (operationNeedsAuth(op) || opts.accessToken || !!getStoredToken());
 
   return request(pathname, {
-    method: op.method, query, body, bodyKind, auth, operationId, raw: opts.raw, accessToken: opts.accessToken,
+    method: op.method, query, body, bodyKind, auth, operationId, raw: opts.raw,
+    accessToken: opts.accessToken, account: opts.account,
   });
 }
 

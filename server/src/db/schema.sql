@@ -10,11 +10,16 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 -- OAuth2 (PKCE) state, short lived, one row per in-flight authorisation.
+-- keystring/shared_secret (sealed) carry a shop-specific Etsy app's
+-- credentials through the redirect round trip when connecting a shop that
+-- registers its own app, rather than the one saved in Settings.
 CREATE TABLE IF NOT EXISTS oauth_state (
   state          TEXT PRIMARY KEY,
   code_verifier  TEXT NOT NULL,
   redirect_uri   TEXT NOT NULL,
   scopes         TEXT NOT NULL,
+  keystring      TEXT,
+  shared_secret  TEXT,
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -44,6 +49,11 @@ CREATE TABLE IF NOT EXISTS etsy_accounts (
   offsite_ads_rate REAL DEFAULT 0.12,
   access_token   TEXT NOT NULL,                        -- sealed
   refresh_token  TEXT NOT NULL,                        -- sealed
+  -- This shop's own Etsy app credentials (sealed). NULL means it still uses
+  -- the one saved in Settings, for a shop connected before per-shop
+  -- credentials existed.
+  keystring      TEXT,
+  shared_secret  TEXT,
   scopes         TEXT NOT NULL DEFAULT '',
   expires_at     TEXT NOT NULL,
   is_active      INTEGER NOT NULL DEFAULT 0,

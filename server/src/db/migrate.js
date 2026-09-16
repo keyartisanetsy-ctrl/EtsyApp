@@ -90,6 +90,13 @@ export function migrateSchema(db) {
   // What each shop is called over in Airtable.
   addColumn(db, 'etsy_accounts', 'airtable_name', "TEXT DEFAULT ''");
 
+  // Per-shop Etsy app credentials (sealed), so each connected shop can use
+  // its own registered app instead of one shared keystring for every shop.
+  addColumn(db, 'etsy_accounts', 'keystring', 'TEXT');
+  addColumn(db, 'etsy_accounts', 'shared_secret', 'TEXT');
+  addColumn(db, 'oauth_state', 'keystring', 'TEXT');
+  addColumn(db, 'oauth_state', 'shared_secret', 'TEXT');
+
   // Refunds and the second email address Etsy sometimes supplies.
   addColumn(db, 'receipts', 'refunded_amount', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'receipts', 'refund_count', 'INTEGER NOT NULL DEFAULT 0');
