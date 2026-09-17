@@ -9,6 +9,7 @@
  */
 import { getDb } from '../db/index.js';
 import { activeShopId, currentShop } from '../etsy/shop.js';
+import { activeShopifyShopId, currentShopifyShop } from '../shopify/shop.js';
 import { readSetting } from '../services/settings.js';
 import { rateOn, convert } from '../services/fx.js';
 import { codeFor, monthLabelTr, monthLabelEn } from '../services/ordercode.js';
@@ -500,24 +501,25 @@ const toUnixSeconds = (isoString) => (isoString ? Math.floor(Date.parse(isoStrin
  */
 function loadShopifyRows(orderIds, { rowMode = 'item' } = {}) {
   const db = getDb();
-  const shopDomain = readSetting('shopify.shop_domain');
-  const shop = {
-    shopId: null, shopName: shopDomain,
-    airtableName: readSetting('shopify.airtable_name') || shopDomain,
-  };
   const holes = orderIds.map(() => '?').join(',');
 
+  // Each order carries its own store (shop_id), so a batch never has to
+  // assume it all came from whichever store happens to be active - the
+  // shop info below is resolved per order, straight from the row that owns it.
   const orders = db.prepare(`
-    SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency
+    SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency,
+           sa.shop_domain AS sa_domain, sa.shop_name AS sa_shop_name, sa.airtable_name AS sa_airtable_name
     FROM shopify_orders o
     LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
+    LEFT JOIN shopify_accounts sa ON sa.id = o.shop_id
     WHERE o.order_id IN (${holes})
     ORDER BY o.created_at_shopify DESC`).all(...orderIds);
 
   const items = db.prepare(`
     SELECT x.*, m.supply_link, m.supplier_name, m.supply_currency
     FROM shopify_order_line_items x
-    LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND x.sku <> ''
+    LEFT JOIN shopify_orders o2 ON o2.order_id = x.order_id
+    LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND x.sku <> '' AND m.shop_id = o2.shop_id
     WHERE x.order_id IN (${holes})
     ORDER BY x.line_item_id`).all(...orderIds);
 
@@ -535,9 +537,13 @@ function loadShopifyRows(orderIds, { rowMode = 'item' } = {}) {
 
   const rows = [];
   for (const o of orders) {
+    const shop = {
+      shopId: o.shop_id, shopName: o.sa_shop_name || o.sa_domain,
+      airtableName: o.sa_airtable_name || o.sa_domain,
+    };
     const lines = byOrder.get(o.order_id) ?? [];
     const order = {
-      receipt_id: o.order_id, shop_id: null, status: (o.financial_status || '').toLowerCase(),
+      receipt_id: o.order_id, shop_id: o.shop_id, status: (o.financial_status || '').toLowerCase(),
       name: o.customer_name, buyer_email: o.email, first_line: o.ship_address1, second_line: o.ship_address2,
       city: o.ship_city, state: o.ship_province, zip: o.ship_zip, country_iso: o.ship_country,
       formatted_address: [o.ship_address1, o.ship_address2, o.ship_city, o.ship_province, o.ship_zip, o.ship_country].filter(Boolean).join(', '),
@@ -622,7 +628,7 @@ export function loadRows(receiptIds, { rowMode = 'item', channel = 'etsy' } = {}
 export function sampleValues(rowMode = 'item', channel = 'etsy') {
   const db = getDb();
   const latest = channel === 'shopify'
-    ? db.prepare('SELECT order_id AS receipt_id FROM shopify_orders ORDER BY created_at_shopify DESC LIMIT 1').get()
+    ? db.prepare('SELECT order_id AS receipt_id FROM shopify_orders WHERE shop_id IS ? ORDER BY created_at_shopify DESC LIMIT 1').get(activeShopifyShopId())
     : db.prepare('SELECT receipt_id FROM receipts WHERE shop_id IS ? ORDER BY created_ts DESC LIMIT 1').get(activeShopId());
   if (!latest) return {};
   const [row] = loadRows([latest.receipt_id], { rowMode, channel });

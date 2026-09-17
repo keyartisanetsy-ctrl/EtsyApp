@@ -84,15 +84,14 @@ export const SETTING_DEFS = {
   'airtable.auto_push':    { env: '', def: 'false', label: 'Send new orders to Airtable automatically after each sync',
     options: [ { value: 'false', label: 'No - I press the button myself' }, { value: 'true', label: 'Yes - push new orders automatically' } ] },
 
-  'shopify.shop_domain':      { env: process.env.SHOPIFY_SHOP_DOMAIN || '', def: '', label: 'Shop domain (….myshopify.com)' },
-  'shopify.api_version':      { env: process.env.SHOPIFY_API_VERSION || '', def: '2025-01', label: 'Admin API version' },
+  // Domain/token/connected-via/Airtable-name all live per store now, on
+  // shopify_accounts - only the app itself (which any number of stores can
+  // install) stays a single global setting here.
+  'shopify.api_version':      { env: process.env.SHOPIFY_API_VERSION || '', def: '2025-01', label: 'Admin API version (default for a newly connected store)' },
   'shopify.oauth_client_id':     { env: process.env.SHOPIFY_CLIENT_ID || '', def: '', label: 'Shopify app Client ID' },
   'shopify.oauth_client_secret': { env: process.env.SHOPIFY_CLIENT_SECRET || '', def: '', secret: true, label: 'Shopify app Client Secret' },
-  // Whichever path connected (OAuth exchange or a pasted custom-app token)
-  // ends up here - the client only ever needs one token to call the API with.
-  'shopify.admin_token':      { env: process.env.SHOPIFY_ADMIN_TOKEN || '', def: '', secret: true, label: 'Shopify Admin API access token' },
-  'shopify.connected_via':    { env: '', def: '', label: 'How the current token was obtained (oauth or custom)' },
-  'shopify.airtable_name':    { env: '', def: '', label: 'Shop name to write into an Airtable shop/MAĞAZA column for Shopify orders (blank = shop domain)' },
+  'shopify.orders_sync_minutes': { env: '', def: '5', label: 'How often to check every connected store for new/updated orders (minutes)' },
+  'shopify.auto_sync_hours':     { env: '', def: '4', label: 'Full auto-sync interval - products and orders, every connected store (hours)' },
 
   // OneBound (万邦) is a paid, documented data API - unlike scraping Taobao
   // directly, this is a real, permitted way to read a live product's price

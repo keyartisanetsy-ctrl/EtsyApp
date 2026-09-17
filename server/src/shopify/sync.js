@@ -5,6 +5,7 @@
  */
 import { getDb, json } from '../db/index.js';
 import { gql } from './client.js';
+import { requireShopifyShopId } from './shop.js';
 import { createLogger } from '../lib/logger.js';
 
 const log = createLogger('shopify-sync');
@@ -30,13 +31,14 @@ query Products($cursor: String) {
   }
 }`;
 
-/** Pull every product+variant. Paginates until Shopify says there is no more. */
+/** Pull every product+variant for the active store. Paginates until Shopify says there is no more. */
 export async function syncProducts() {
+  const shopId = requireShopifyShopId();
   const db = getDb();
   const upsertProduct = db.prepare(`
-    INSERT INTO shopify_products (product_id, title, handle, status, vendor, product_type, tags, description_html, first_image_url, raw, synced_at)
-    VALUES (@id,@title,@handle,@status,@vendor,@productType,@tags,@descriptionHtml,@firstImageUrl,@raw,datetime('now'))
-    ON CONFLICT(product_id) DO UPDATE SET title=excluded.title, handle=excluded.handle, status=excluded.status,
+    INSERT INTO shopify_products (product_id, shop_id, title, handle, status, vendor, product_type, tags, description_html, first_image_url, raw, synced_at)
+    VALUES (@id,@shopId,@title,@handle,@status,@vendor,@productType,@tags,@descriptionHtml,@firstImageUrl,@raw,datetime('now'))
+    ON CONFLICT(product_id) DO UPDATE SET shop_id=excluded.shop_id, title=excluded.title, handle=excluded.handle, status=excluded.status,
       vendor=excluded.vendor, product_type=excluded.product_type, tags=excluded.tags,
       description_html=excluded.description_html, first_image_url=excluded.first_image_url,
       raw=excluded.raw, synced_at=excluded.synced_at`);
@@ -58,7 +60,7 @@ export async function syncProducts() {
     for (const p of data.products.nodes) {
       seenProductIds.push(p.id);
       upsertProduct.run({
-        id: p.id, title: p.title, handle: p.handle, status: p.status, vendor: p.vendor,
+        id: p.id, shopId, title: p.title, handle: p.handle, status: p.status, vendor: p.vendor,
         productType: p.productType, tags: json(p.tags ?? []), descriptionHtml: p.descriptionHtml ?? null,
         firstImageUrl: p.featuredImage?.url ?? null, raw: json(p),
       });
@@ -78,10 +80,13 @@ export async function syncProducts() {
     cursor = data.products.pageInfo.endCursor;
   }
 
-  // A product deleted on Shopify since the last sync should not linger here.
+  // A product deleted on Shopify since the last sync should not linger here -
+  // scoped to this store, so syncing it never touches another store's rows.
   if (seenProductIds.length) {
     const holes = seenProductIds.map(() => '?').join(',');
-    db.prepare(`DELETE FROM shopify_products WHERE product_id NOT IN (${holes})`).run(...seenProductIds);
+    db.prepare(`DELETE FROM shopify_products WHERE shop_id = ? AND product_id NOT IN (${holes})`).run(shopId, ...seenProductIds);
+  } else {
+    db.prepare('DELETE FROM shopify_products WHERE shop_id = ?').run(shopId);
   }
   log.info(`synced ${products} product(s), ${variants} variant(s)`);
   return { products, variants };
@@ -115,18 +120,19 @@ query Orders($cursor: String) {
   }
 }`;
 
-/** Pull recent orders + their line items. */
+/** Pull recent orders + their line items for the active store. */
 export async function syncOrders({ pages = 5 } = {}) {
+  const shopId = requireShopifyShopId();
   const db = getDb();
   const upsertOrder = db.prepare(`
-    INSERT INTO shopify_orders (order_id, name, email, phone, financial_status, fulfillment_status,
+    INSERT INTO shopify_orders (order_id, shop_id, name, email, phone, financial_status, fulfillment_status,
       currency, subtotal_amount, total_tax_amount, total_shipping_amount, total_discounts_amount, total_amount,
       customer_name, ship_name, ship_address1, ship_address2, ship_city, ship_province, ship_zip, ship_country,
       ship_phone, note, tags, created_at_shopify, cancelled_at, raw, synced_at)
-    VALUES (@id,@name,@email,@phone,@financialStatus,@fulfillmentStatus,@currency,@subtotal,@tax,@shipping,
+    VALUES (@id,@shopId,@name,@email,@phone,@financialStatus,@fulfillmentStatus,@currency,@subtotal,@tax,@shipping,
       @discounts,@total,@customerName,@shipName,@shipAddress1,@shipAddress2,@shipCity,@shipProvince,@shipZip,
       @shipCountry,@shipPhone,@note,@tags,@createdAt,@cancelledAt,@raw,datetime('now'))
-    ON CONFLICT(order_id) DO UPDATE SET financial_status=excluded.financial_status,
+    ON CONFLICT(order_id) DO UPDATE SET shop_id=excluded.shop_id, financial_status=excluded.financial_status,
       fulfillment_status=excluded.fulfillment_status, subtotal_amount=excluded.subtotal_amount,
       total_tax_amount=excluded.total_tax_amount, total_shipping_amount=excluded.total_shipping_amount,
       total_discounts_amount=excluded.total_discounts_amount, total_amount=excluded.total_amount,
@@ -146,7 +152,7 @@ export async function syncOrders({ pages = 5 } = {}) {
     for (const o of data.orders.nodes) {
       const addr = o.shippingAddress ?? {};
       upsertOrder.run({
-        id: o.id, name: o.name, email: o.email ?? null, phone: o.phone ?? null,
+        id: o.id, shopId, name: o.name, email: o.email ?? null, phone: o.phone ?? null,
         financialStatus: o.displayFinancialStatus ?? null, fulfillmentStatus: o.displayFulfillmentStatus ?? null,
         currency: o.currentTotalPriceSet?.shopMoney?.currencyCode ?? null,
         subtotal: num(o.currentSubtotalPriceSet?.shopMoney?.amount),

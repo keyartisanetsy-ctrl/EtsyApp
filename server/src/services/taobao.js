@@ -435,11 +435,11 @@ export function findSharedSupplyLinks() {
     FROM supply_items WHERE COALESCE(item_id, '') <> ''`).all()
     .map((r) => ({ ...r, platform: 'etsy' }));
 
-  const shopifyRaw = db.prepare(`SELECT sku, supply_link AS url, notes FROM shopify_variant_meta WHERE COALESCE(supply_link,'') <> ''`).all();
+  const shopifyRaw = db.prepare(`SELECT shop_id AS shopId, sku, supply_link AS url, notes FROM shopify_variant_meta WHERE COALESCE(supply_link,'') <> ''`).all();
   const shopifyRows = shopifyRaw.map((r) => {
     const parsed = parseSupplyUrl(r.url);
     return parsed.ok && parsed.itemId
-      ? { sku: r.sku, shopId: null, supplier: parsed.supplier, itemId: parsed.itemId, title: null, variantLabel: null, platform: 'shopify' }
+      ? { sku: r.sku, shopId: r.shopId, supplier: parsed.supplier, itemId: parsed.itemId, title: null, variantLabel: null, platform: 'shopify' }
       : null;
   }).filter(Boolean);
 

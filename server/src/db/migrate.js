@@ -19,6 +19,8 @@
  * exactly the case worth being careful about.
  */
 import { createLogger } from '../lib/logger.js';
+import config from '../config.js';
+import { seal, open as unseal } from '../lib/crypto.js';
 
 const log = createLogger('migrate');
 
@@ -59,6 +61,30 @@ function legacyActiveShopId(db) {
     if (row?.shop_id) return row.shop_id;
   }
   return null;
+}
+
+/**
+ * The single store's worth of settings written before shopify_accounts
+ * existed, if any - read directly from `settings` rather than through
+ * readSetting() so this has no dependency on services/settings.js and works
+ * from migrate.js alone, the same way legacyActiveShopId() above does.
+ */
+function legacyShopifySettings(db) {
+  if (!hasTable(db, 'settings')) return null;
+  const get = (key) => {
+    const row = db.prepare('SELECT value, is_secret FROM settings WHERE key = ?').get(key);
+    if (!row) return '';
+    return row.is_secret ? unseal(row.value, config.dataDir) : row.value;
+  };
+  const shopDomain = get('shopify.shop_domain');
+  const adminToken = get('shopify.admin_token');
+  if (!shopDomain || !adminToken) return null;
+  return {
+    shopDomain, adminToken,
+    connectedVia: get('shopify.connected_via') || null,
+    apiVersion: get('shopify.api_version') || null,
+    airtableName: get('shopify.airtable_name') || '',
+  };
 }
 
 /** Runs BEFORE schema.sql. Table/column shape only -- never touches etsy_accounts. */
@@ -102,6 +128,14 @@ export function migrateSchema(db) {
   addColumn(db, 'receipts', 'refund_count', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'receipts', 'refunds', 'TEXT');
   addColumn(db, 'receipts', 'payment_email', 'TEXT');
+
+  // Multiple Shopify stores, the same change Etsy already went through:
+  // shop_id scopes each store's own products/orders. The composite-PK rebuild
+  // of shopify_variant_meta runs later, in migrateData, because backfilling it
+  // needs shopify_accounts' row id, which does not exist until schema.sql
+  // creates that table.
+  addColumn(db, 'shopify_products', 'shop_id', 'INTEGER');
+  addColumn(db, 'shopify_orders', 'shop_id', 'INTEGER');
 
   if (active) {
     for (const table of ['shop_sections', 'bulk_jobs', 'research_runs']) {
@@ -220,6 +254,51 @@ export function migrateData(db) {
   // so it is always safe to remove.
   const orphans = db.prepare('DELETE FROM etsy_accounts WHERE shop_id IS NULL').run();
   if (orphans.changes) log.info(`removed ${orphans.changes} incomplete shop connection(s) left by an older version`);
+
+  // Single-store Shopify settings -> multi-store shopify_accounts, the same
+  // move Etsy made from oauth_token. Only runs once: guarded by the table
+  // being empty, since (unlike oauth_token) there is no source table to drop
+  // to make it naturally not re-fire on the next startup.
+  if (hasTable(db, 'shopify_accounts') && !db.prepare('SELECT COUNT(*) AS c FROM shopify_accounts').get().c) {
+    const legacy = legacyShopifySettings(db);
+    if (legacy) {
+      const info = db.prepare(`
+        INSERT INTO shopify_accounts (shop_domain, airtable_name, api_version, admin_token, connected_via, is_active)
+        VALUES (?,?,?,?,?,1)`)
+        .run(legacy.shopDomain, legacy.airtableName, legacy.apiVersion, seal(legacy.adminToken, config.dataDir), legacy.connectedVia);
+      const shopId = info.lastInsertRowid;
+      for (const table of ['shopify_products', 'shopify_orders']) {
+        if (!hasTable(db, table)) continue;
+        const orphans2 = db.prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE shop_id IS NULL`).get().c;
+        if (orphans2) db.prepare(`UPDATE ${table} SET shop_id = ? WHERE shop_id IS NULL`).run(shopId);
+      }
+      log.info(`migrated the existing Shopify connection (${legacy.shopDomain}) to the stores table`);
+    }
+  }
+
+  // shopify_variant_meta: bare `sku` primary key -> composite (shop_id, sku),
+  // for the same reason as sku_meta above - two different stores can
+  // legitimately reuse the same SKU string. Backfilled with whichever store
+  // shopify_accounts now has (the one just migrated above, or the sole one
+  // someone already connected under the new multi-store code); left NULL if
+  // there genuinely is none, e.g. rows kept from a store disconnected earlier
+  // (Shopify's disconnect never purged local data).
+  if (hasTable(db, 'shopify_variant_meta') && !isCompositePk(db, 'shopify_variant_meta', ['shop_id', 'sku'])) {
+    const anyShop = hasTable(db, 'shopify_accounts')
+      ? db.prepare('SELECT id FROM shopify_accounts ORDER BY is_active DESC, id LIMIT 1').get()?.id ?? null
+      : null;
+    db.transaction(() => {
+      db.exec('ALTER TABLE shopify_variant_meta RENAME TO shopify_variant_meta_old');
+      db.exec(`CREATE TABLE shopify_variant_meta (
+        shop_id INTEGER, sku TEXT NOT NULL, supply_link TEXT DEFAULT '', supplier_name TEXT DEFAULT '',
+        supply_currency TEXT DEFAULT 'CNY', notes TEXT DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (shop_id, sku))`);
+      db.prepare(`INSERT INTO shopify_variant_meta (shop_id, sku, supply_link, supplier_name, supply_currency, notes, updated_at)
+        SELECT ?, sku, supply_link, supplier_name, supply_currency, notes, updated_at FROM shopify_variant_meta_old`).run(anyShop);
+      db.exec('DROP TABLE shopify_variant_meta_old');
+    })();
+    log.info(`shopify_variant_meta rebuilt with shop scoping${anyShop ? ` (existing rows assigned to store ${anyShop})` : ''}`);
+  }
 }
 
 /** Convenience for callers that do not need the two phases separately. */

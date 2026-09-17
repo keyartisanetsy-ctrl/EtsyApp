@@ -3,17 +3,44 @@ import { asyncRoute, bool, int, required } from '../lib/http.js';
 import * as client from '../shopify/client.js';
 import * as oauth from '../shopify/oauth.js';
 import * as shopify from '../services/shopify.js';
+import { currentShopifyShop } from '../shopify/shop.js';
 import { readSetting, writeSetting } from '../services/settings.js';
 import { maskSecret } from '../lib/crypto.js';
+import { badRequest } from '../lib/errors.js';
 
 const router = Router();
+
+// ------------------------------------------------------------- accounts
+
+router.get('/accounts', asyncRoute(async (req, res) => res.json(client.listShopifyAccounts())));
+
+/** Switch which connected store the screens work with. */
+router.post('/accounts/:id/activate', asyncRoute(async (req, res) => {
+  res.json(client.setActiveShopifyAccount(Number(req.params.id)));
+}));
+
+router.put('/accounts/:id', asyncRoute(async (req, res) => {
+  const { label, airtableName } = req.body ?? {};
+  const id = Number(req.params.id);
+  if (label !== undefined) client.renameShopifyAccount(id, label);
+  if (airtableName !== undefined) client.setShopifyAirtableName(id, airtableName);
+  res.json(client.listShopifyAccounts());
+}));
+
+/** Disconnect one store. Its mirrored data is removed with it unless asked otherwise. */
+router.delete('/accounts/:id', asyncRoute(async (req, res) => {
+  res.json(client.removeShopifyAccount(Number(req.params.id), { purgeData: req.body?.keepData !== true }));
+}));
 
 // ------------------------------------------------------------- connection
 
 router.get('/status', asyncRoute(async (req, res) => {
   const creds = client.getCredentials();
+  const accounts = client.listShopifyAccounts();
   res.json({
-    shopDomain: creds.shopDomain,
+    shop: currentShopifyShop(),
+    accounts,
+    accountCount: accounts.length,
     apiVersion: creds.apiVersion,
     hasClientId: !!creds.clientId,
     clientIdPreview: creds.clientId ? maskSecret(creds.clientId) : null,
@@ -24,53 +51,43 @@ router.get('/status', asyncRoute(async (req, res) => {
   });
 }));
 
-router.put('/shop-domain', asyncRoute(async (req, res) => {
-  writeSetting('shopify.shop_domain', req.body?.domain ?? '');
-  res.json(client.getCredentials());
-}));
-
-router.put('/api-version', asyncRoute(async (req, res) => {
-  writeSetting('shopify.api_version', req.body?.version || '2025-01');
-  res.json(client.getCredentials());
-}));
-
 router.put('/oauth-app', asyncRoute(async (req, res) => {
   required(req.body ?? {}, ['clientId']);
   writeSetting('shopify.oauth_client_id', req.body.clientId);
   if (req.body.clientSecret) writeSetting('shopify.oauth_client_secret', req.body.clientSecret);
-  res.json(client.getCredentials());
+  res.json({ hasClientId: !!readSetting('shopify.oauth_client_id'), hasClientSecret: !!readSetting('shopify.oauth_client_secret') });
 }));
 
-/** Path A: start the OAuth dance with a Dev Dashboard app. */
+/** Path A: start the OAuth dance with a Dev Dashboard app, for a specific store. */
 router.post('/oauth/connect', asyncRoute(async (req, res) => {
-  const shopDomain = req.body?.shopDomain || readSetting('shopify.shop_domain');
+  const shopDomain = req.body?.shopDomain;
   required({ shopDomain }, ['shopDomain']);
   res.json(oauth.buildAuthorizationUrl({ shopDomain }));
 }));
 
 // Shopify redirects the browser here once the merchant approves.
 router.get('/oauth/callback', asyncRoute(async (req, res) => {
-  const { shop, code, state, hmac, host, timestamp } = req.query;
+  const { shop, code, state } = req.query;
   if (!shop || !code || !state) return res.status(400).send(page('Missing parameters', 'Shopify did not return shop/code/state.', false));
   try {
     const result = await oauth.exchangeCode({ shop: String(shop), code: String(code), state: String(state), query: req.query });
-    res.send(page('Shop connected', `${result.shopDomain} is connected. You can close this tab.`, true));
+    res.send(page('Store connected', `${result.shopName || result.shopDomain} is connected. You can close this tab.`, true));
   } catch (err) {
     res.status(err.status ?? 500).send(page('Could not connect', err.message, false));
   }
 }));
 
-/** Path B: paste a custom-app "Admin API access token" directly. */
+/** Path B: paste a custom-app "Admin API access token" directly, for a specific store. */
 router.post('/token', asyncRoute(async (req, res) => {
+  const shopDomain = req.body?.shopDomain;
   const token = String(req.body?.token ?? '').trim();
-  if (!token) { client.disconnect(); return res.json({ connected: false }); }
-  client.saveAdminToken(token, { via: 'custom' });
-  res.json({ connected: true });
+  required({ shopDomain }, ['shopDomain']);
+  if (!token) throw badRequest('Paste the Admin API access token.');
+  const account = client.saveShopifyToken({ shopDomain, adminToken: token, connectedVia: 'custom' });
+  res.json({ connected: true, accountId: account.id });
 }));
 
-router.delete('/token', asyncRoute(async (req, res) => { client.disconnect(); res.json({ disconnected: true }); }));
-
-/** Live check: does the token actually work. */
+/** Live check: does the active store's token actually work. */
 router.get('/test', asyncRoute(async (req, res) => res.json(await client.testConnection())));
 
 // ---------------------------------------------------------------- sync

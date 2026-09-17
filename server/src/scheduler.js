@@ -7,8 +7,10 @@ import { createLogger } from './lib/logger.js';
 import config, { ROOT } from './config.js';
 import { readSetting } from './services/settings.js';
 import { getStoredToken, refreshAllAccounts, listAccounts, withShop } from './etsy/client.js';
+import { listShopifyAccounts, withShopifyShop } from './shopify/client.js';
 import { syncTracking, refreshStaleFlags } from './services/tracking/index.js';
 import { syncReceipts, syncAll } from './services/sync.js';
+import { syncProducts as syncShopifyProducts, syncOrders as syncShopifyOrders } from './services/shopify.js';
 import { ensureRates } from './services/fx.js';
 import { scanInbox } from './services/productstudio.js';
 import { checkForUpdate, applyUpdate } from '../../scripts/self-update.mjs';
@@ -30,6 +32,17 @@ async function forEachConnectedShop(label, job) {
       await withShop(shopId, job);
     } catch (err) {
       log.warn(`${label} failed for shop ${shopName || shopId}: ${err.message}`);
+    }
+  }
+}
+
+/** Same idea as forEachConnectedShop(), for Shopify's own multi-store accounts. */
+async function forEachConnectedShopifyStore(label, job) {
+  for (const { id, shopDomain } of listShopifyAccounts()) {
+    try {
+      await withShopifyShop(id, job);
+    } catch (err) {
+      log.warn(`${label} failed for store ${shopDomain || id}: ${err.message}`);
     }
   }
 }
@@ -78,6 +91,22 @@ export function startScheduler() {
   timers.push(setInterval(() => {
     forEachConnectedShop('full sync', () => syncAll({}));
   }, fullSyncHours * 60 * 60_000).unref());
+
+  // Shopify's own version of the two jobs above, for every connected store -
+  // Shopify sync had no schedule at all before this, so every store had to be
+  // synced by hand.
+  const shopifyOrderSyncMinutes = Math.max(2, Number(readSetting('shopify.orders_sync_minutes')) || 5);
+  timers.push(setInterval(() => {
+    forEachConnectedShopifyStore('Shopify order sync', () => syncShopifyOrders({}));
+  }, shopifyOrderSyncMinutes * 60_000).unref());
+
+  const shopifyFullSyncHours = Math.max(1, Number(readSetting('shopify.auto_sync_hours')) || 4);
+  const shopifyFullSync = () => forEachConnectedShopifyStore('Shopify full sync', async () => {
+    await syncShopifyProducts();
+    await syncShopifyOrders({});
+  });
+  setTimeout(shopifyFullSync, 25_000).unref();
+  timers.push(setInterval(shopifyFullSync, shopifyFullSyncHours * 60 * 60_000).unref());
 
   // A shop that isn't the active one can otherwise sit untouched for months
   // between switches, long enough for Etsy's own refresh-token lifetime to
@@ -143,7 +172,9 @@ export function startScheduler() {
     }, 30 * 60_000).unref());
   }
 
-  log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every ${orderSyncMinutes}m, full sync every ${fullSyncHours}h, drop folder every 20s)`);
+  log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every ${orderSyncMinutes}m, `
+    + `full sync every ${fullSyncHours}h, Shopify orders every ${shopifyOrderSyncMinutes}m, `
+    + `Shopify full sync every ${shopifyFullSyncHours}h, drop folder every 20s)`);
 }
 
 export const stopScheduler = () => { for (const t of timers) clearInterval(t); timers.length = 0; };

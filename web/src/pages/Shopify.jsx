@@ -20,7 +20,7 @@ export default function Shopify() {
   return (
     <Page
       title="Shopify"
-      subtitle={status.data?.connected ? `Connected: ${status.data.shopDomain}` : 'Not connected'}
+      subtitle={status.data?.shop ? `Active: ${status.data.shop.shopName || status.data.shop.shopDomain}` : 'Not connected'}
     >
       <div className="mb16">
         <Tabs
@@ -52,7 +52,6 @@ function ConnectionPanel({ status }) {
   const showError = useErrorToast();
   const s = status.data;
   const [domain, setDomain] = useState('');
-  const [apiVersion, setApiVersion] = useState('');
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [customToken, setCustomToken] = useState('');
@@ -61,39 +60,33 @@ function ConnectionPanel({ status }) {
 
   if (!s) return <Spinner />;
 
+  const accounts = s.accounts ?? [];
   const redirectUri = `${window.location.origin}${withBase('/api/shopify/oauth/callback')}`;
 
-  const saveDomain = async () => {
-    setBusy(true);
-    try { await api.put('/shopify/shop-domain', { domain: domain || s.shopDomain }); toast({ kind: 'ok', title: 'Shop domain saved' }); status.reload(); }
-    catch (err) { showError(err, 'Could not save'); } finally { setBusy(false); }
-  };
-
   const saveOAuthApp = async () => {
-    setBusy(true);
-    try {
-      await api.put('/shopify/oauth-app', { clientId: clientId || undefined, clientSecret: clientSecret || undefined });
-      toast({ kind: 'ok', title: 'App credentials saved' });
-      setClientSecret('');
-      status.reload();
-    } catch (err) { showError(err, 'Could not save'); } finally { setBusy(false); }
+    await api.put('/shopify/oauth-app', { clientId: clientId || undefined, clientSecret: clientSecret || undefined });
+    setClientSecret('');
   };
 
   const connect = async () => {
+    if (!domain.trim()) return showError(new Error('Enter a shop domain first.'));
     setBusy(true);
     try {
-      const domainToUse = domain || s.shopDomain;
-      if (domainToUse && domainToUse !== s.shopDomain) await api.put('/shopify/shop-domain', { domain: domainToUse });
       if (clientId || clientSecret) await saveOAuthApp();
-      const r = await api.post('/shopify/oauth/connect', { shopDomain: domainToUse });
+      const r = await api.post('/shopify/oauth/connect', { shopDomain: domain.trim() });
       window.location.href = r.url;
     } catch (err) { showError(err, 'Could not start the connection'); setBusy(false); }
   };
 
   const saveToken = async () => {
+    if (!domain.trim()) return showError(new Error('Enter a shop domain first.'));
     setBusy(true);
-    try { await api.post('/shopify/token', { token: customToken }); setCustomToken(''); toast({ kind: 'ok', title: 'Token saved' }); status.reload(); }
-    catch (err) { showError(err, 'Could not save the token'); } finally { setBusy(false); }
+    try {
+      await api.post('/shopify/token', { shopDomain: domain.trim(), token: customToken });
+      setCustomToken(''); setDomain('');
+      toast({ kind: 'ok', title: 'Store connected' });
+      status.reload();
+    } catch (err) { showError(err, 'Could not save the token'); } finally { setBusy(false); }
   };
 
   const test = async () => {
@@ -103,30 +96,58 @@ function ConnectionPanel({ status }) {
     catch (err) { showError(err, 'Shopify refused the token'); } finally { setBusy(false); }
   };
 
-  const deleteKey = async () => {
-    if (!confirm('Disconnect Shopify? Synced products/orders stay in the local mirror.')) return;
-    setBusy(true);
-    try { await api.del('/shopify/token'); toast({ kind: 'ok', title: 'Disconnected' }); status.reload(); }
-    catch (err) { showError(err, 'Could not disconnect'); } finally { setBusy(false); }
+  const useStore = async (id) => {
+    try { await api.post(`/shopify/accounts/${id}/activate`, {}); status.reload(); toast({ kind: 'ok', title: 'Switched store' }); }
+    catch (err) { showError(err); }
+  };
+
+  const removeStore = async (id, label) => {
+    if (!confirm(`Disconnect ${label}?\n\nIts locally stored products and orders are removed too. Nothing on Shopify changes.`)) return;
+    try { await api.del(`/shopify/accounts/${id}`, {}); status.reload(); toast({ kind: 'ok', title: 'Store disconnected' }); }
+    catch (err) { showError(err); }
   };
 
   return (
     <section className="card">
       <div className="flex wrap">
         <h3>🛍 Shopify (optional)</h3>
-        {s.shopDomain && <span className="badge ok">{s.shopDomain}</span>}
+        <span className={`badge ${accounts.length ? 'ok' : 'muted'}`}>
+          {accounts.length ? `${accounts.length} connected` : 'none connected'}
+        </span>
       </div>
 
-      <div className="flex wrap small muted mb16">
-        <span className="badge muted">API {s.apiVersion}</span>
-        {s.tokenPreview && <span className="badge muted">token: {s.tokenPreview}</span>}
-        <span>Provider: this page</span>
-      </div>
+      {accounts.length > 0 && (
+        <table className="data mb16">
+          <thead><tr><th /><th>Store</th><th>Via</th><th /></tr></thead>
+          <tbody>
+            {accounts.map((a) => (
+              <tr key={a.id}>
+                <td>{a.isActive ? <span className="badge green">active</span> : <span className="badge grey">idle</span>}</td>
+                <td className="mono small">{a.shopName || a.shopDomain}</td>
+                <td className="small dim">{a.connectedVia === 'oauth' ? 'OAuth app' : 'custom token'}</td>
+                <td>
+                  <div className="flex gap4">
+                    {!a.isActive && <button className="btn xs" onClick={() => useStore(a.id)}>Use this</button>}
+                    <button className="btn xs danger" onClick={() => removeStore(a.id, a.shopName || a.shopDomain)}>Remove</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
-      <div className="field">
-        <label>Shop domain (….myshopify.com)</label>
-        <input className="input" placeholder="yourshop.myshopify.com"
-               value={domain || s.shopDomain || ''} onChange={(e) => setDomain(e.target.value)} onBlur={saveDomain} />
+      <Banner kind="info">
+        <div>
+          Every screen (products, orders) shows only the active store's own data; nothing is ever mixed between
+          stores. One Shopify app can connect any number of stores - enter its Client ID/Secret once below, then
+          repeat the domain field for each additional store.
+        </div>
+      </Banner>
+
+      <div className="field mt8">
+        <label>Shop domain to connect (….myshopify.com)</label>
+        <input className="input" placeholder="yourshop.myshopify.com" value={domain} onChange={(e) => setDomain(e.target.value)} />
       </div>
 
       <hr />
@@ -143,13 +164,13 @@ function ConnectionPanel({ status }) {
                value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} />
       </div>
       <p className="small muted">
-        Enter your Dev Dashboard app's Client ID + Secret. Under App settings → Redirect / Allowed redirection URL(s),
-        add exactly this address, with <code>read_products</code>, <code>write_products</code>, <code>read_orders</code>,
+        Under App settings → Redirect / Allowed redirection URL(s), add exactly this address, with
+        {' '}<code>read_products</code>, <code>write_products</code>, <code>read_orders</code>,
         {' '}<code>write_orders</code> and <code>write_fulfillments</code> among the scopes, then press the button below:
         <br /><code className="mono">{redirectUri}</code>
       </p>
-      <button className="btn primary lg" style={{ width: '100%' }} disabled={busy} onClick={connect}>
-        {busy ? <Spinner /> : "Connect to Shopify"}
+      <button className="btn primary lg" style={{ width: '100%' }} disabled={busy || !domain.trim()} onClick={connect}>
+        {busy ? <Spinner /> : accounts.length ? '+ Connect another store' : 'Connect to Shopify'}
       </button>
 
       <hr />
@@ -160,26 +181,21 @@ function ConnectionPanel({ status }) {
         <input className="input mono" placeholder="shpat_..." value={customToken} onChange={(e) => setCustomToken(e.target.value)} />
       </div>
       <p className="small muted">
-        Classic path: in the shop admin, Settings → Apps → Develop apps → create a custom app → give it
+        Classic path: in that store's admin, Settings → Apps → Develop apps → create a custom app → give it
         {' '}<code>read_products</code>/<code>write_products</code>/<code>read_orders</code>/<code>write_orders</code>/
         <code>write_fulfillments</code> → Install → copy the "Admin API access token" (starts <code>shpat_</code>, not
-        the Client ID/Secret).
+        the Client ID/Secret). Enter that store's domain above first.
       </p>
-      <button className="btn" disabled={busy || !customToken.trim()} onClick={saveToken}>Save token</button>
+      <button className="btn" disabled={busy || !domain.trim() || !customToken.trim()} onClick={saveToken}>Save token</button>
 
       <div className="flex mt16">
-        <button className="btn sm" disabled={busy || !s.connected} onClick={test}>{busy ? <Spinner /> : "Validate API"}</button>
-        <button className="btn sm ghost danger" disabled={busy || !s.connected} onClick={deleteKey}>Delete key</button>
+        <button className="btn sm" disabled={busy || !s.connected} onClick={test}>{busy ? <Spinner /> : "Validate active store's API"}</button>
       </div>
 
       {testResult && (
         <div className="mt8">
           <Banner kind="ok">{testResult.name} · {testResult.myshopifyDomain} · {testResult.plan?.displayName}</Banner>
         </div>
-      )}
-
-      {s.connected && (
-        <div className="small mt8">✓ {s.shopDomain} · {s.connectedVia === 'oauth' ? 'OAuth app' : 'custom token'}</div>
       )}
     </section>
   );

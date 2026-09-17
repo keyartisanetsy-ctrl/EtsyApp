@@ -33,6 +33,27 @@ CREATE TABLE IF NOT EXISTS shopify_oauth_state (
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- One row per connected Shopify store, the same idea as etsy_accounts:
+-- several stores can be connected at once, exactly one is active, and the
+-- active store scopes what the Shopify screens show. The OAuth app itself
+-- (Client ID/Secret) stays a single global setting - unlike Etsy, Shopify's
+-- own OAuth is designed for one app to be installed on any number of
+-- different stores, so there is no need for a store to register its own app.
+CREATE TABLE IF NOT EXISTS shopify_accounts (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  shop_domain    TEXT NOT NULL UNIQUE,
+  shop_name      TEXT,
+  label          TEXT DEFAULT '',                      -- optional nickname
+  airtable_name  TEXT DEFAULT '',                       -- what this store is called in Airtable
+  api_version    TEXT,
+  admin_token    TEXT NOT NULL,                        -- sealed
+  connected_via  TEXT,                                  -- 'oauth' | 'custom'
+  is_active      INTEGER NOT NULL DEFAULT 0,
+  connected_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_shopify_accounts_active ON shopify_accounts(is_active);
+
 -- A shop's keystring/secret saved BEFORE it is connected, so connecting is a
 -- single click (pick the saved profile) instead of retyping both every time.
 -- Turned into an etsy_accounts row once that click's OAuth round trip
@@ -730,12 +751,16 @@ CREATE TABLE IF NOT EXISTS draft_media (
 );
 
 -- ----------------------------------------------------------------- Shopify
--- One connected store, unlike Etsy's multi-shop accounts table - there is
--- only ever one Shopify shop to switch between, so no active/inactive
--- bookkeeping is needed here; connection state lives in `settings`.
+-- Several stores can be connected at once (shopify_accounts above); exactly
+-- one is active, and shop_id here scopes each store's own products/orders the
+-- same way etsy_accounts' shop_id scopes listings/receipts. Variants, line
+-- items and fulfillments are not scoped themselves - they hang off a
+-- product_id/order_id that is a Shopify GID, globally unique across every
+-- store, so joining through the parent is enough.
 
 CREATE TABLE IF NOT EXISTS shopify_products (
   product_id        TEXT PRIMARY KEY,   -- Shopify GID, e.g. gid://shopify/Product/123
+  shop_id           INTEGER,            -- shopify_accounts.id
   title             TEXT,
   handle            TEXT,
   status            TEXT,               -- ACTIVE | ARCHIVED | DRAFT
@@ -748,6 +773,7 @@ CREATE TABLE IF NOT EXISTS shopify_products (
   synced_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_shopify_products_title ON shopify_products(title);
+CREATE INDEX IF NOT EXISTS idx_shopify_products_shop ON shopify_products(shop_id);
 
 CREATE TABLE IF NOT EXISTS shopify_variants (
   variant_id          TEXT PRIMARY KEY,  -- gid://shopify/ProductVariant/123
@@ -769,21 +795,23 @@ CREATE TABLE IF NOT EXISTS shopify_variants (
 CREATE INDEX IF NOT EXISTS idx_shopify_variants_product ON shopify_variants(product_id);
 CREATE INDEX IF NOT EXISTS idx_shopify_variants_sku ON shopify_variants(sku);
 
--- Supply link/supplier, the same idea as sku_meta for Etsy SKUs - kept as its
--- own table rather than reused because sku_meta is keyed by (shop_id, sku)
--- for real Etsy shop ids, and Shopify is a single store with no shop_id of
--- that kind to key on.
+-- Supply link/supplier, the same idea as sku_meta for Etsy SKUs - keyed by
+-- (shop_id, sku), not bare sku, because two different stores can legitimately
+-- reuse the same SKU string.
 CREATE TABLE IF NOT EXISTS shopify_variant_meta (
-  sku             TEXT PRIMARY KEY,
+  shop_id         INTEGER,
+  sku             TEXT NOT NULL,
   supply_link     TEXT DEFAULT '',
   supplier_name   TEXT DEFAULT '',
   supply_currency TEXT DEFAULT 'CNY',
   notes           TEXT DEFAULT '',
-  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (shop_id, sku)
 );
 
 CREATE TABLE IF NOT EXISTS shopify_orders (
   order_id                TEXT PRIMARY KEY,   -- gid://shopify/Order/123
+  shop_id                 INTEGER,            -- shopify_accounts.id
   name                    TEXT,               -- "#1001"
   email                   TEXT,
   phone                   TEXT,
@@ -806,6 +834,7 @@ CREATE TABLE IF NOT EXISTS shopify_orders (
   synced_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_shopify_orders_created ON shopify_orders(created_at_shopify DESC);
+CREATE INDEX IF NOT EXISTS idx_shopify_orders_shop ON shopify_orders(shop_id);
 
 CREATE TABLE IF NOT EXISTS shopify_order_line_items (
   line_item_id   TEXT PRIMARY KEY,   -- gid://shopify/LineItem/123

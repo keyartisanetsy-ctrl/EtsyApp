@@ -6,6 +6,7 @@
 import { getDb, json, parse, audit } from '../db/index.js';
 import { gql, checkUserErrors } from '../shopify/client.js';
 import { syncProducts, syncOrders } from '../shopify/sync.js';
+import { requireShopifyShopId } from '../shopify/shop.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 
@@ -15,20 +16,21 @@ export { syncProducts, syncOrders };
 // ------------------------------------------------------------- products
 
 export function listProducts({ search = '', status = '', missingSku = false, limit = 200, offset = 0 } = {}) {
+  const shopId = requireShopifyShopId();
   const db = getDb();
-  const where = [];
-  const params = [];
+  const where = ['p.shop_id = ?'];
+  const params = [shopId];
   if (search) { where.push('(p.title LIKE ? OR v.sku LIKE ?)'); params.push(`%${search}%`, `%${search}%`); }
   if (status) { where.push('p.status = ?'); params.push(status.toUpperCase()); }
   if (missingSku) where.push("(v.sku IS NULL OR v.sku = '')");
-  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const clause = `WHERE ${where.join(' AND ')}`;
 
   const rows = db.prepare(`
     SELECT v.*, p.title AS product_title, p.handle, p.status AS product_status, p.vendor, p.product_type,
            p.first_image_url, m.supply_link, m.supplier_name, m.supply_currency, m.notes AS supply_notes
     FROM shopify_variants v
     JOIN shopify_products p ON p.product_id = v.product_id
-    LEFT JOIN shopify_variant_meta m ON m.sku = v.sku AND v.sku <> ''
+    LEFT JOIN shopify_variant_meta m ON m.sku = v.sku AND v.sku <> '' AND m.shop_id = p.shop_id
     ${clause}
     ORDER BY p.title, v.position
     LIMIT ? OFFSET ?`).all(...params, limit, offset);
@@ -52,8 +54,9 @@ export function listProducts({ search = '', status = '', missingSku = false, lim
 }
 
 export function getProduct(productId) {
+  const shopId = requireShopifyShopId();
   const db = getDb();
-  const p = db.prepare('SELECT * FROM shopify_products WHERE product_id = ?').get(productId);
+  const p = db.prepare('SELECT * FROM shopify_products WHERE product_id = ? AND shop_id = ?').get(productId, shopId);
   if (!p) throw notFound(`Shopify product ${productId} is not in the local mirror. Sync products first.`);
   const variants = db.prepare('SELECT * FROM shopify_variants WHERE product_id = ? ORDER BY position').all(productId);
   return {
@@ -142,24 +145,26 @@ export async function updateVariants(productId, changes = {}) {
 
 /** Supply link / supplier for a Shopify SKU, the same idea as sku_meta for Etsy. */
 export function saveVariantMeta(sku, { supplyLink, supplierName, supplyCurrency, notes } = {}) {
+  const shopId = requireShopifyShopId();
   if (!sku) throw badRequest('This variation has no SKU yet. Set one first.');
   getDb().prepare(`
-    INSERT INTO shopify_variant_meta (sku, supply_link, supplier_name, supply_currency, notes, updated_at)
-    VALUES (?,?,?,?,?, datetime('now'))
-    ON CONFLICT(sku) DO UPDATE SET supply_link=excluded.supply_link, supplier_name=excluded.supplier_name,
+    INSERT INTO shopify_variant_meta (shop_id, sku, supply_link, supplier_name, supply_currency, notes, updated_at)
+    VALUES (?,?,?,?,?,?, datetime('now'))
+    ON CONFLICT(shop_id, sku) DO UPDATE SET supply_link=excluded.supply_link, supplier_name=excluded.supplier_name,
       supply_currency=excluded.supply_currency, notes=excluded.notes, updated_at=excluded.updated_at`)
-    .run(sku, supplyLink ?? '', supplierName ?? '', supplyCurrency ?? 'CNY', notes ?? '');
-  return getDb().prepare('SELECT * FROM shopify_variant_meta WHERE sku = ?').get(sku);
+    .run(shopId, sku, supplyLink ?? '', supplierName ?? '', supplyCurrency ?? 'CNY', notes ?? '');
+  return getDb().prepare('SELECT * FROM shopify_variant_meta WHERE shop_id = ? AND sku = ?').get(shopId, sku);
 }
 
 // --------------------------------------------------------------- orders
 
 export function listOrders({ search = '', limit = 100, offset = 0 } = {}) {
+  const shopId = requireShopifyShopId();
   const db = getDb();
-  const where = [];
-  const params = [];
+  const where = ['o.shop_id = ?'];
+  const params = [shopId];
   if (search) { where.push('(o.name LIKE ? OR o.customer_name LIKE ? OR o.email LIKE ?)'); params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
-  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const clause = `WHERE ${where.join(' AND ')}`;
 
   const rows = db.prepare(`
     SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
@@ -194,11 +199,12 @@ function shapeOrder(r) {
 }
 
 export function getOrder(orderId) {
+  const shopId = requireShopifyShopId();
   const db = getDb();
   const o = db.prepare(`
     SELECT o.*, f.tracking_number, f.tracking_company, f.tracking_url, f.shipping_cost, f.shipping_cost_currency, f.pushed_at
     FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
-    WHERE o.order_id = ?`).get(orderId);
+    WHERE o.order_id = ? AND o.shop_id = ?`).get(orderId, shopId);
   if (!o) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
   const items = db.prepare('SELECT * FROM shopify_order_line_items WHERE order_id = ?').all(orderId).map((i) => ({
     lineItemId: i.line_item_id, productId: i.product_id, variantId: i.variant_id, sku: i.sku || '',
@@ -210,6 +216,9 @@ export function getOrder(orderId) {
 
 /** What this parcel cost to send, typed in next to the tracking number - mirrors tracking.setShippingCost. */
 export function setShippingCost(orderId, { cost, currency } = {}) {
+  const shopId = requireShopifyShopId();
+  const owns = getDb().prepare('SELECT 1 FROM shopify_orders WHERE order_id = ? AND shop_id = ?').get(orderId, shopId);
+  if (!owns) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
   const amount = cost === null || cost === undefined || cost === '' ? null : Number(cost);
   if (amount !== null && !Number.isFinite(amount)) throw badRequest(`"${cost}" is not a number.`);
   getDb().prepare(`
@@ -241,6 +250,9 @@ mutation FulfillmentCreate($fulfillment: FulfillmentInput!) {
  * button, which also both records the number locally and pushes it.
  */
 export async function pushFulfillment(orderId, { trackingNumber, trackingCompany, trackingUrl, notifyCustomer = false } = {}) {
+  const shopId = requireShopifyShopId();
+  const owns = getDb().prepare('SELECT 1 FROM shopify_orders WHERE order_id = ? AND shop_id = ?').get(orderId, shopId);
+  if (!owns) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
   if (!trackingNumber) throw badRequest('Enter a tracking number first.');
 
   const data = await gql(FULFILLMENT_ORDERS_QUERY, { id: orderId });

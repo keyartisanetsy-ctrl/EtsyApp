@@ -4,15 +4,18 @@
  *
  * No PKCE (that is Etsy's flow, not Shopify's); instead the callback carries
  * an HMAC over the query string, signed with the app's client secret, which
- * this verifies before ever exchanging the code.
+ * this verifies before ever exchanging the code. One app (Client ID/Secret,
+ * a single global setting) can be installed on any number of different
+ * stores - each connection just repeats this same flow with a different
+ * shopDomain, and saveShopifyToken() below keys the result by that domain.
  */
 import crypto from 'node:crypto';
 import { getDb } from '../db/index.js';
-import { readSetting, writeSetting } from '../services/settings.js';
+import { readSetting } from '../services/settings.js';
 import { outboundFetch } from '../lib/outbound.js';
 import { badRequest } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
-import { saveAdminToken } from './client.js';
+import { gql, saveShopifyToken } from './client.js';
 
 const log = createLogger('shopify-oauth');
 
@@ -89,8 +92,19 @@ export async function exchangeCode({ shop, code, state, query }) {
     throw badRequest(`Token exchange failed: ${body.error_description || body.error || res.statusText}`);
   }
 
-  saveAdminToken(body.access_token, { via: 'oauth' });
-  writeSetting('shopify.shop_domain', shopDomain);
+  // The store's own name, straight from the freshly-exchanged token - so the
+  // stores list can show something better than a bare domain right away.
+  // This connection is not saved yet, so the lookup targets it directly
+  // rather than through whichever store happens to be active.
+  let shopName = null;
+  try {
+    const data = await gql('{ shop { name } }', {}, { account: { shop_domain: shopDomain, admin_token: body.access_token } });
+    shopName = data.shop?.name ?? null;
+  } catch (err) {
+    log.warn(`connected ${shopDomain}, but could not read its name: ${err.message}`);
+  }
+
+  const account = saveShopifyToken({ shopDomain, shopName, adminToken: body.access_token, connectedVia: 'oauth' });
   log.info(`connected ${shopDomain} (scope: ${body.scope})`);
-  return { shopDomain, scope: body.scope };
+  return { shopDomain, shopName, scope: body.scope, accountId: account.id };
 }
