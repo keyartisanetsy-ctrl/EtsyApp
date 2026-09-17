@@ -334,10 +334,17 @@ export function readProduct(payload = {}) {
  * back to the active shop - but only while exactly one is connected; with two
  * or more, guessing is exactly the mix-up this exists to prevent, so it is
  * refused instead.
+ *
+ * Checked both at the top level and inside payload.product: Product Studio's
+ * own shape (isProductStudioPayload/readProductStudio above) nests every
+ * other product field under product, so its shopId is at least as likely to
+ * land there as a sibling of product/listing.
  */
 function resolveTargetShop(payload) {
-  const raw = payload?.shopId ?? payload?.shop_id ?? payload?.etsyShopId
-    ?? payload?.shop ?? payload?.shopName ?? payload?.shopLabel ?? null;
+  const outer = payload ?? {};
+  const inner = payload?.product ?? {};
+  const raw = outer.shopId ?? outer.shop_id ?? outer.etsyShopId ?? outer.shop ?? outer.shopName ?? outer.shopLabel
+    ?? inner.shopId ?? inner.shop_id ?? inner.etsyShopId ?? inner.shop ?? inner.shopName ?? inner.shopLabel ?? null;
   const accounts = listAccounts();
 
   if (raw === null || raw === undefined || raw === '') {
