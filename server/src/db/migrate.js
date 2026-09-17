@@ -109,6 +109,13 @@ export function migrateSchema(db) {
   addColumn(db, 'order_flags', 'problem_state', "TEXT NOT NULL DEFAULT 'none'");
   addColumn(db, 'order_flags', 'problem_note', "TEXT DEFAULT ''");
   addColumn(db, 'order_flags', 'offsite_ads', 'INTEGER NOT NULL DEFAULT 0');
+  // Inbound supplier-to-warehouse tracking, alongside the existing
+  // supplier_order_ref - both surfaced next to the order's own images.
+  addColumn(db, 'order_flags', 'supply_tracking_number', "TEXT DEFAULT ''");
+  addColumn(db, 'receipt_transactions', 'warehouse_photo_id', 'TEXT');
+  addColumn(db, 'shopify_order_line_items', 'warehouse_photo_id', 'TEXT');
+  addColumn(db, 'shopify_fulfillments', 'supplier_order_ref', "TEXT DEFAULT ''");
+  addColumn(db, 'shopify_fulfillments', 'supply_tracking_number', "TEXT DEFAULT ''");
   addColumn(db, 'etsy_accounts', 'offsite_ads_rate', 'REAL DEFAULT 0.12');
   addColumn(db, 'sku_meta', 'variant_supply_link', "TEXT DEFAULT ''");
   addColumn(db, 'sku_meta', 'variant_image_url', "TEXT DEFAULT ''");

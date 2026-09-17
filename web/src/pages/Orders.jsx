@@ -8,6 +8,7 @@ import {
   useAsync, useDebounced, useToast, useErrorToast, fmtMoney, fmtDateTime, fmtDate, TRACK_BADGE,
 } from '../components/ui.jsx';
 import { SendToAirtable } from './Airtable.jsx';
+import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
 
 const LIMIT = 60;
 
@@ -539,10 +540,17 @@ function OrderDetail({ id, onClose, onChanged }) {
   const { data: order, loading, reload } = useAsync(() => (id ? api.get(`/orders/${id}`) : null), [id], { immediate: !!id });
   const { data: copy } = useAsync(() => (id ? api.get(`/orders/${id}/copy`) : null), [id], { immediate: !!id });
   const [notes, setNotes] = useState('');
+  const [supplierRef, setSupplierRef] = useState('');
+  const [supplyTrack, setSupplyTrack] = useState('');
   const toast = useToast();
   const showError = useErrorToast();
 
-  React.useEffect(() => { setNotes(order?.notes ?? ''); setTab('summary'); }, [order?.receiptId]);
+  React.useEffect(() => {
+    setNotes(order?.notes ?? '');
+    setSupplierRef(order?.supplierOrderRef ?? '');
+    setSupplyTrack(order?.supplyTrackingNumber ?? '');
+    setTab('summary');
+  }, [order?.receiptId]);
   React.useEffect(() => { if (id) api.post('/orders/seen', { receiptIds: [id] }).then(onChanged).catch(() => {}); }, [id]);
 
   if (!id) return null;
@@ -550,6 +558,14 @@ function OrderDetail({ id, onClose, onChanged }) {
   const saveNotes = async () => {
     try { await api.post(`/orders/${id}/flags`, { notes }); toast({ kind: 'ok', title: 'Notes saved' }); onChanged(); }
     catch (err) { showError(err); }
+  };
+
+  const saveSupplierInfo = async () => {
+    try {
+      await api.post(`/orders/${id}/flags`, { supplierOrderRef: supplierRef, supplyTrackingNumber: supplyTrack });
+      toast({ kind: 'ok', title: 'Supplier info saved' });
+      onChanged();
+    } catch (err) { showError(err); }
   };
 
   const setFlag = async (patch) => {
@@ -647,6 +663,21 @@ function OrderDetail({ id, onClose, onChanged }) {
                 </>
               )}
 
+              <div className="section-title">Supplier</div>
+              <dl className="kv mb16">
+                <dt>Supplier order code</dt>
+                <dd>
+                  <input className="input sm" value={supplierRef} onChange={(e) => setSupplierRef(e.target.value)}
+                         placeholder="e.g. the order number on the supplier's site" />
+                </dd>
+                <dt>Supply tracking no.</dt>
+                <dd>
+                  <input className="input sm" value={supplyTrack} onChange={(e) => setSupplyTrack(e.target.value)}
+                         placeholder="Inbound: supplier → warehouse" />
+                </dd>
+              </dl>
+              <button className="btn sm mb16" onClick={saveSupplierInfo}>Save supplier info</button>
+
               <div className="section-title">Internal notes</div>
               <textarea className="textarea" value={notes} onChange={(e) => setNotes(e.target.value)}
                         placeholder="Private notes for this order…" />
@@ -656,7 +687,7 @@ function OrderDetail({ id, onClose, onChanged }) {
 
           {tab === 'items' && (
             <table className="data">
-              <thead><tr><th /><th>Item</th><th>SKU</th><th className="right">Qty</th><th className="right">Price</th><th>Supply</th><th className="right">Est. cost</th></tr></thead>
+              <thead><tr><th /><th>Item</th><th>SKU</th><th className="right">Qty</th><th className="right">Price</th><th>Supply</th><th className="right">Est. cost</th><th>Depo görseli</th></tr></thead>
               <tbody>
                 {order.items.map((i) => (
                   <tr key={i.transactionId}>
@@ -689,6 +720,9 @@ function OrderDetail({ id, onClose, onChanged }) {
                     <td className="num small dim">
                       {i.supplyCost != null ? fmtMoney(i.supplyCost, i.supplyCurrency || 'CNY') : '—'}
                       {i.leadTimeDays != null && <div className="small dim">~{i.leadTimeDays}d</div>}
+                    </td>
+                    <td>
+                      <WarehousePhotoCell channel="etsy" orderPath={`/orders/${id}`} item={i} onChanged={() => { reload(); onChanged(); }} />
                     </td>
                   </tr>
                 ))}

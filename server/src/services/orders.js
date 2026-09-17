@@ -101,7 +101,7 @@ export function listOrders({
   const rows = db.prepare(`
     SELECT r.*, COALESCE(f.is_done,0) AS is_done, f.done_at, COALESCE(f.is_seen,0) AS is_seen,
            COALESCE(f.is_flagged,0) AS is_flagged, COALESCE(f.supplier_ordered,0) AS supplier_ordered,
-           f.supplier_order_ref, f.notes,
+           f.supplier_order_ref, f.supply_tracking_number, f.notes,
            COALESCE(f.problem_state,'none') AS problem_state, f.problem_note,
            COALESCE(f.offsite_ads,0) AS offsite_ads,
            al.airtable_pushed_at,
@@ -161,6 +161,7 @@ function orderSummary(r) {
     isFlagged: !!r.is_flagged,
     supplierOrdered: !!r.supplier_ordered,
     supplierOrderRef: r.supplier_order_ref || '',
+    supplyTrackingNumber: r.supply_tracking_number || '',
     notes: r.notes || '',
     // tracking
     trackingCode: r.tracking_code || null,
@@ -183,7 +184,7 @@ export function getOrder(receiptId) {
   const r = db.prepare(`
     SELECT r.*, COALESCE(f.is_done,0) AS is_done, f.done_at, COALESCE(f.is_seen,0) AS is_seen,
            COALESCE(f.is_flagged,0) AS is_flagged, COALESCE(f.supplier_ordered,0) AS supplier_ordered,
-           f.supplier_order_ref, f.notes, 0 AS item_count,
+           f.supplier_order_ref, f.supply_tracking_number, f.notes, 0 AS item_count,
            COALESCE(f.problem_state,'none') AS problem_state, f.problem_note,
            COALESCE(f.offsite_ads,0) AS offsite_ads,
            al.airtable_pushed_at,
@@ -267,6 +268,11 @@ export function getOrder(receiptId) {
       supplyCurrency: i.supply_currency || null,
       leadTimeDays: i.lead_time_days ?? null,
       variantImageUrl: i.variant_image_url || i.image_url || null,
+      // A photo taken at the warehouse, held next to this same item's own
+      // picture so a mix-up between two similar products is caught before
+      // the parcel ships - compared by eye, or by the AI check below.
+      warehousePhotoId: i.warehouse_photo_id || null,
+      warehousePhotoUrl: i.warehouse_photo_id ? `/api/ai/attachments/${i.warehouse_photo_id}` : null,
     })),
     shipments: shipments.map((s) => ({
       trackingCode: s.tracking_code,
@@ -313,6 +319,7 @@ export function setFlags(receiptIds, patch = {}) {
       }
       if (patch.notes !== undefined) db.prepare('UPDATE order_flags SET notes = ? WHERE receipt_id = ?').run(String(patch.notes), id);
       if (patch.supplierOrderRef !== undefined) db.prepare('UPDATE order_flags SET supplier_order_ref = ? WHERE receipt_id = ?').run(String(patch.supplierOrderRef), id);
+      if (patch.supplyTrackingNumber !== undefined) db.prepare('UPDATE order_flags SET supply_tracking_number = ? WHERE receipt_id = ?').run(String(patch.supplyTrackingNumber), id);
     }
   })();
 
@@ -321,6 +328,23 @@ export function setFlags(receiptIds, patch = {}) {
 }
 
 export const markSeen = (receiptIds) => setFlags(receiptIds, { seen: true });
+
+/**
+ * Attach (or remove, with attachmentId = null) a warehouse photo to one line
+ * item. Ownership is checked through the receipt so a transaction id from
+ * another shop's order - or one made up - can never be written to.
+ */
+export function setWarehousePhoto(receiptId, transactionId, attachmentId) {
+  const db = getDb();
+  const owns = db.prepare(`
+    SELECT 1 FROM receipt_transactions x JOIN receipts r ON r.receipt_id = x.receipt_id
+    WHERE x.transaction_id = ? AND x.receipt_id = ? AND r.shop_id IS ?`)
+    .get(transactionId, receiptId, activeShopId());
+  if (!owns) throw notFound(`Item ${transactionId} is not on order ${receiptId}.`);
+  db.prepare('UPDATE receipt_transactions SET warehouse_photo_id = ? WHERE transaction_id = ?').run(attachmentId, transactionId);
+  audit('orders.warehouse_photo', { entity: 'receipt', entityId: receiptId, detail: { transactionId, attachmentId } });
+  return { receiptId, transactionId, warehousePhotoId: attachmentId };
+}
 
 /**
  * Raise, clear or resolve a problem on orders. Deliberate rather than derived,

@@ -125,4 +125,10 @@ export const DESTINATIONS = [
     sends: 'Only the tracking numbers you ask about.',
     optional: true,
   },
+  {
+    host: "Etsy's / Shopify's own image CDN",
+    purpose: 'Downloading a listing photo to compare it against a warehouse photo, only when you press "AI compare" on an order item.',
+    sends: 'Only the image URL already stored on that order item.',
+    optional: true,
+  },
 ];

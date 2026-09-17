@@ -271,6 +271,10 @@ CREATE TABLE IF NOT EXISTS receipt_transactions (
   is_digital     INTEGER,
   paid_ts        INTEGER, shipped_ts INTEGER,
   raw            TEXT,
+  -- A photo taken at the warehouse before shipping, held next to this item's
+  -- own listing image so a mix-up between two similar-looking products is
+  -- caught before the parcel goes out. References attachments.id.
+  warehouse_photo_id TEXT,
   FOREIGN KEY (receipt_id) REFERENCES receipts(receipt_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_rt_receipt ON receipt_transactions(receipt_id);
@@ -286,6 +290,10 @@ CREATE TABLE IF NOT EXISTS order_flags (
   is_flagged  INTEGER NOT NULL DEFAULT 0,
   supplier_ordered   INTEGER NOT NULL DEFAULT 0,
   supplier_order_ref TEXT DEFAULT '',
+  -- The inbound tracking number for the parcel coming FROM the supplier TO
+  -- the warehouse - distinct from the outbound, buyer-facing tracking in
+  -- the shipments table.
+  supply_tracking_number TEXT DEFAULT '',
   notes       TEXT DEFAULT '',
   -- Set by you or the AI, not derived: none | warning | solved | out_of_stock.
   -- An order can be delivered and still carry a warning.
@@ -848,6 +856,8 @@ CREATE TABLE IF NOT EXISTS shopify_order_line_items (
   price_amount   REAL,
   currency       TEXT,
   image_url      TEXT,
+  -- Same idea as receipt_transactions.warehouse_photo_id on the Etsy side.
+  warehouse_photo_id TEXT,
   FOREIGN KEY (order_id) REFERENCES shopify_orders(order_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_shopify_li_order ON shopify_order_line_items(order_id);
@@ -864,6 +874,25 @@ CREATE TABLE IF NOT EXISTS shopify_fulfillments (
   shipping_cost           REAL,
   shipping_cost_currency  TEXT,
   pushed_at               TEXT,
+  -- Same two supplier-side fields as Etsy's order_flags: the supplier's own
+  -- order reference, and the inbound supplier-to-warehouse tracking number.
+  supplier_order_ref      TEXT DEFAULT '',
+  supply_tracking_number  TEXT DEFAULT '',
   FOREIGN KEY (order_id) REFERENCES shopify_orders(order_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_draft_media_listing ON draft_media(listing_id, kind, rank);
+
+-- The AI's verdict on whether a warehouse photo actually matches the item it
+-- was taken for, so a stale or wrong verdict never lingers once someone
+-- re-checks. One row per item, whichever channel it came from.
+CREATE TABLE IF NOT EXISTS warehouse_checks (
+  channel      TEXT NOT NULL,   -- etsy | shopify
+  item_id      TEXT NOT NULL,   -- receipt_transactions.transaction_id or shopify_order_line_items.line_item_id
+  verdict      TEXT,            -- match | mismatch | unsure
+  confidence   REAL,
+  summary      TEXT,
+  provider     TEXT,
+  model        TEXT,
+  checked_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (channel, item_id)
+);

@@ -1,12 +1,21 @@
 import { Router } from 'express';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import multer from 'multer';
+import config from '../config.js';
 import { asyncRoute, int, tri, bool, ids, required } from '../lib/http.js';
 import * as orders from '../services/orders.js';
 import * as offsiteAds from '../services/offsiteads.js';
 import { listAccounts } from '../etsy/client.js';
 import * as sync from '../services/sync.js';
 import * as addresses from '../services/addresscheck.js';
+import * as warehouse from '../services/warehousecheck.js';
+import { getDb } from '../db/index.js';
+import { sha256 } from '../lib/crypto.js';
 
 const router = Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 router.get('/', asyncRoute(async (req, res) => {
   res.json(orders.listOrders({
@@ -141,6 +150,39 @@ router.post('/enrich-contacts', asyncRoute(async (req, res) => {
     limit: int(req.body?.limit, 60),
     receiptIds: ids(req.body?.receiptIds),
   }));
+}));
+
+// ------------------------------------------------- warehouse photo + AI check
+
+/** A photo taken at the warehouse, held next to this item's own listing image. */
+router.post('/:id/items/:transactionId/warehouse-photo', upload.single('photo'), asyncRoute(async (req, res) => {
+  if (!req.file) throw new Error('Attach the photo as "photo".');
+  fs.mkdirSync(config.uploadDir, { recursive: true });
+  const id = `att_${crypto.randomBytes(8).toString('hex')}`;
+  const ext = path.extname(req.file.originalname) || '.jpg';
+  const dest = path.join(config.uploadDir, `${id}${ext}`);
+  fs.writeFileSync(dest, req.file.buffer);
+  getDb().prepare('INSERT INTO attachments (id, filename, mime, size_bytes, path, sha256, purpose) VALUES (?,?,?,?,?,?,?)')
+    .run(id, req.file.originalname, req.file.mimetype, req.file.size, dest, sha256(req.file.buffer), 'warehouse-photo');
+  res.status(201).json(orders.setWarehousePhoto(Number(req.params.id), Number(req.params.transactionId), id));
+}));
+
+router.delete('/:id/items/:transactionId/warehouse-photo', asyncRoute(async (req, res) => {
+  res.json(orders.setWarehousePhoto(Number(req.params.id), Number(req.params.transactionId), null));
+}));
+
+/** Compare the warehouse photo against the item's own listing image. */
+router.post('/:id/items/:transactionId/warehouse-check', asyncRoute(async (req, res) => {
+  res.json(await warehouse.checkItem({
+    channel: 'etsy',
+    itemId: Number(req.params.transactionId),
+    provider: req.body?.provider,
+    model: req.body?.model,
+  }));
+}));
+
+router.get('/:id/items/:transactionId/warehouse-check', asyncRoute(async (req, res) => {
+  res.json(warehouse.getCheck('etsy', Number(req.params.transactionId)) ?? { checked: false });
 }));
 
 export default router;

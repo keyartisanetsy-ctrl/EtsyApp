@@ -1,14 +1,22 @@
 import { Router } from 'express';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import multer from 'multer';
+import config from '../config.js';
 import { asyncRoute, bool, int, required } from '../lib/http.js';
 import * as client from '../shopify/client.js';
 import * as oauth from '../shopify/oauth.js';
 import * as shopify from '../services/shopify.js';
+import * as warehouse from '../services/warehousecheck.js';
 import { currentShopifyShop } from '../shopify/shop.js';
 import { readSetting, writeSetting } from '../services/settings.js';
-import { maskSecret } from '../lib/crypto.js';
+import { maskSecret, sha256 } from '../lib/crypto.js';
 import { badRequest } from '../lib/errors.js';
+import { getDb } from '../db/index.js';
 
 const router = Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 // ------------------------------------------------------------- accounts
 
@@ -134,6 +142,44 @@ router.post('/orders/:id/shipping-cost', asyncRoute(async (req, res) => {
 router.post('/orders/:id/fulfill', asyncRoute(async (req, res) => {
   required(req.body ?? {}, ['trackingNumber']);
   res.json(await shopify.pushFulfillment(req.params.id, req.body));
+}));
+
+/** The supplier's own order reference and the inbound supplier-to-warehouse tracking number. */
+router.post('/orders/:id/supplier-info', asyncRoute(async (req, res) => {
+  res.json(shopify.setSupplierInfo(req.params.id, req.body ?? {}));
+}));
+
+// ------------------------------------------- warehouse photo + AI check
+
+/** A photo taken at the warehouse, held next to this item's own listing image. */
+router.post('/orders/:id/items/:lineItemId/warehouse-photo', upload.single('photo'), asyncRoute(async (req, res) => {
+  if (!req.file) throw badRequest('Attach the photo as "photo".');
+  fs.mkdirSync(config.uploadDir, { recursive: true });
+  const id = `att_${crypto.randomBytes(8).toString('hex')}`;
+  const ext = path.extname(req.file.originalname) || '.jpg';
+  const dest = path.join(config.uploadDir, `${id}${ext}`);
+  fs.writeFileSync(dest, req.file.buffer);
+  getDb().prepare('INSERT INTO attachments (id, filename, mime, size_bytes, path, sha256, purpose) VALUES (?,?,?,?,?,?,?)')
+    .run(id, req.file.originalname, req.file.mimetype, req.file.size, dest, sha256(req.file.buffer), 'warehouse-photo');
+  res.status(201).json(shopify.setWarehousePhoto(req.params.id, req.params.lineItemId, id));
+}));
+
+router.delete('/orders/:id/items/:lineItemId/warehouse-photo', asyncRoute(async (req, res) => {
+  res.json(shopify.setWarehousePhoto(req.params.id, req.params.lineItemId, null));
+}));
+
+/** Compare the warehouse photo against the item's own listing image. */
+router.post('/orders/:id/items/:lineItemId/warehouse-check', asyncRoute(async (req, res) => {
+  res.json(await warehouse.checkItem({
+    channel: 'shopify',
+    itemId: req.params.lineItemId,
+    provider: req.body?.provider,
+    model: req.body?.model,
+  }));
+}));
+
+router.get('/orders/:id/items/:lineItemId/warehouse-check', asyncRoute(async (req, res) => {
+  res.json(warehouse.getCheck('shopify', req.params.lineItemId) ?? { checked: false });
 }));
 
 const page = (title, message, ok) => `<!doctype html><meta charset="utf-8">

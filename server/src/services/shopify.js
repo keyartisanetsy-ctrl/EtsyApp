@@ -168,6 +168,7 @@ export function listOrders({ search = '', limit = 100, offset = 0 } = {}) {
 
   const rows = db.prepare(`
     SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
+           f.supplier_order_ref, f.supply_tracking_number,
            (SELECT COUNT(*) FROM shopify_order_line_items x WHERE x.order_id = o.order_id) AS item_count
     FROM shopify_orders o
     LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
@@ -195,6 +196,8 @@ function shapeOrder(r) {
     itemCount: r.item_count, trackingNumber: r.tracking_number || null, trackingCompany: r.tracking_company || null,
     shippingCost: r.shipping_cost ?? null, shippingCostCurrency: r.shipping_cost_currency ?? null,
     pushedAt: r.pushed_at || null,
+    supplierOrderRef: r.supplier_order_ref || '',
+    supplyTrackingNumber: r.supply_tracking_number || '',
   };
 }
 
@@ -202,7 +205,8 @@ export function getOrder(orderId) {
   const shopId = requireShopifyShopId();
   const db = getDb();
   const o = db.prepare(`
-    SELECT o.*, f.tracking_number, f.tracking_company, f.tracking_url, f.shipping_cost, f.shipping_cost_currency, f.pushed_at
+    SELECT o.*, f.tracking_number, f.tracking_company, f.tracking_url, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
+           f.supplier_order_ref, f.supply_tracking_number
     FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
     WHERE o.order_id = ? AND o.shop_id = ?`).get(orderId, shopId);
   if (!o) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
@@ -210,6 +214,10 @@ export function getOrder(orderId) {
     lineItemId: i.line_item_id, productId: i.product_id, variantId: i.variant_id, sku: i.sku || '',
     title: i.title, variantTitle: i.variant_title || '', quantity: i.quantity,
     price: i.price_amount, currency: i.currency, imageUrl: i.image_url,
+    // A photo taken at the warehouse, held next to this same item's own
+    // picture - same idea as receipt_transactions on the Etsy side.
+    warehousePhotoId: i.warehouse_photo_id || null,
+    warehousePhotoUrl: i.warehouse_photo_id ? `/api/ai/attachments/${i.warehouse_photo_id}` : null,
   }));
   return { ...shapeOrder(o), trackingUrl: o.tracking_url || null, items };
 }
@@ -227,6 +235,39 @@ export function setShippingCost(orderId, { cost, currency } = {}) {
     ON CONFLICT(order_id) DO UPDATE SET shipping_cost=excluded.shipping_cost, shipping_cost_currency=excluded.shipping_cost_currency`)
     .run(orderId, amount, amount === null ? null : (currency || 'CNY').toUpperCase());
   return getOrder(orderId);
+}
+
+/** The supplier's own order reference and the inbound supplier-to-warehouse
+ *  tracking number - Shopify's equivalent of Etsy's order_flags fields. */
+export function setSupplierInfo(orderId, { supplierOrderRef, supplyTrackingNumber } = {}) {
+  const shopId = requireShopifyShopId();
+  const owns = getDb().prepare('SELECT 1 FROM shopify_orders WHERE order_id = ? AND shop_id = ?').get(orderId, shopId);
+  if (!owns) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
+  getDb().prepare(`
+    INSERT INTO shopify_fulfillments (order_id, supplier_order_ref, supply_tracking_number)
+    VALUES (?,?,?)
+    ON CONFLICT(order_id) DO UPDATE SET
+      supplier_order_ref = COALESCE(excluded.supplier_order_ref, shopify_fulfillments.supplier_order_ref),
+      supply_tracking_number = COALESCE(excluded.supply_tracking_number, shopify_fulfillments.supply_tracking_number)`)
+    .run(orderId, supplierOrderRef ?? null, supplyTrackingNumber ?? null);
+  return getOrder(orderId);
+}
+
+/**
+ * Attach (or remove, with attachmentId = null) a warehouse photo to one line
+ * item. Ownership runs through both the order and the shop, so a line item id
+ * from another store's order can never be written to.
+ */
+export function setWarehousePhoto(orderId, lineItemId, attachmentId) {
+  const shopId = requireShopifyShopId();
+  const db = getDb();
+  const owns = db.prepare(`
+    SELECT 1 FROM shopify_order_line_items x JOIN shopify_orders o ON o.order_id = x.order_id
+    WHERE x.line_item_id = ? AND x.order_id = ? AND o.shop_id = ?`).get(lineItemId, orderId, shopId);
+  if (!owns) throw notFound(`Item ${lineItemId} is not on order ${orderId}.`);
+  db.prepare('UPDATE shopify_order_line_items SET warehouse_photo_id = ? WHERE line_item_id = ?').run(attachmentId, lineItemId);
+  audit('shopify.warehouse_photo', { entity: 'shopify_order', entityId: orderId, detail: { lineItemId, attachmentId } });
+  return { orderId, lineItemId, warehousePhotoId: attachmentId };
 }
 
 const FULFILLMENT_ORDERS_QUERY = `

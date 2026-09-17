@@ -7,6 +7,7 @@ import {
 } from '../components/ui.jsx';
 import { SendToAirtable } from './Airtable.jsx';
 import StockCheckCell from '../components/StockCheck.jsx';
+import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
 
 /**
  * Shopify: connect a store, mirror its products/variants and orders, edit
@@ -485,16 +486,33 @@ function OrderDetail({ orderId, onClose, onChanged }) {
   const [company, setCompany] = useState('');
   const [notify, setNotify] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [supplierRef, setSupplierRef] = useState('');
+  const [supplyTrack, setSupplyTrack] = useState('');
+
+  React.useEffect(() => {
+    setSupplierRef(data?.supplierOrderRef ?? '');
+    setSupplyTrack(data?.supplyTrackingNumber ?? '');
+  }, [data?.orderId]);
 
   if (!orderId) return null;
+
+  const orderPath = `/shopify/orders/${encodeURIComponent(orderId)}`;
 
   const fulfill = async () => {
     setBusy(true);
     try {
-      await api.post(`/shopify/orders/${encodeURIComponent(orderId)}/fulfill`, { trackingNumber: tracking, trackingCompany: company || undefined, notifyCustomer: notify });
+      await api.post(`${orderPath}/fulfill`, { trackingNumber: tracking, trackingCompany: company || undefined, notifyCustomer: notify });
       toast({ kind: 'ok', title: 'Fulfillment pushed to Shopify' });
       reload(); onChanged();
     } catch (err) { showError(err, 'Could not fulfill'); } finally { setBusy(false); }
+  };
+
+  const saveSupplierInfo = async () => {
+    try {
+      await api.post(`${orderPath}/supplier-info`, { supplierOrderRef: supplierRef, supplyTrackingNumber: supplyTrack });
+      toast({ kind: 'ok', title: 'Supplier info saved' });
+      reload(); onChanged();
+    } catch (err) { showError(err); }
   };
 
   return (
@@ -511,7 +529,7 @@ function OrderDetail({ orderId, onClose, onChanged }) {
 
           <div className="section-title">Items</div>
           <table className="data mb16">
-            <thead><tr><th>SKU</th><th>Title</th><th>Variant</th><th className="num">Qty</th><th className="num">Price</th></tr></thead>
+            <thead><tr><th>SKU</th><th>Title</th><th>Variant</th><th className="num">Qty</th><th className="num">Price</th><th>Depo görseli</th></tr></thead>
             <tbody>
               {data.items.map((i) => (
                 <tr key={i.lineItemId}>
@@ -520,10 +538,24 @@ function OrderDetail({ orderId, onClose, onChanged }) {
                   <td className="small dim">{i.variantTitle}</td>
                   <td className="num">{i.quantity}</td>
                   <td className="num">{fmtMoney(i.price, i.currency)}</td>
+                  <td>
+                    <WarehousePhotoCell channel="shopify" orderPath={orderPath} item={i} onChanged={() => { reload(); onChanged(); }} />
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+
+          <div className="section-title">Supplier</div>
+          <dl className="kv mb16">
+            <dt>Supplier order code</dt>
+            <dd><input className="input sm" value={supplierRef} onChange={(e) => setSupplierRef(e.target.value)}
+                       placeholder="e.g. the order number on the supplier's site" /></dd>
+            <dt>Supply tracking no.</dt>
+            <dd><input className="input sm" value={supplyTrack} onChange={(e) => setSupplyTrack(e.target.value)}
+                       placeholder="Inbound: supplier → warehouse" /></dd>
+          </dl>
+          <button className="btn sm mb16" onClick={saveSupplierInfo}>Save supplier info</button>
 
           <div className="section-title">Tracking</div>
           {data.trackingNumber ? (
