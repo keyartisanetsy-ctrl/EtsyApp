@@ -19,8 +19,12 @@ import { gql, saveShopifyToken } from './client.js';
 
 const log = createLogger('shopify-oauth');
 
+// read_customers: the orders sync reads customer.displayName for the buyer
+// name shown on an order. Shopify only grants what is asked for here at
+// OAuth time - the scopes listed in the app's own Dashboard config are just
+// what it is ALLOWED to request, not what a given install actually gets.
 export const DEFAULT_SCOPES = ['read_products', 'write_products', 'read_inventory', 'write_inventory',
-  'read_orders', 'write_orders', 'read_fulfillments', 'write_fulfillments'];
+  'read_orders', 'write_orders', 'read_fulfillments', 'write_fulfillments', 'read_customers'];
 
 const cleanDomain = (d) => String(d ?? '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
 
