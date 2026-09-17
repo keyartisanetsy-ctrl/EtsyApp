@@ -21,3 +21,4 @@ release/
 .idea/
 coverage/
 *.tsbuildinfo
+.claude/settings.local.json
