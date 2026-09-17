@@ -35,7 +35,7 @@ export function buildAuthorizationUrl({ shopDomain, scopes = DEFAULT_SCOPES, red
   if (!clientId) throw badRequest('Set the Client ID from your Shopify app before connecting.');
 
   const state = crypto.randomBytes(24).toString('base64url');
-  const redirect = redirectUri || `http://${process.env.PUBLIC_HOST || 'localhost'}:${process.env.PORT || 4317}/api/shopify/oauth/callback`;
+  const redirect = redirectUri || readSetting('shopify.redirect_uri');
   const scopeStr = scopes.join(',');
 
   getDb().prepare('INSERT INTO shopify_oauth_state (state, shop_domain, redirect_uri, scopes) VALUES (?,?,?,?)')

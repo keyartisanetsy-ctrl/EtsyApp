@@ -90,6 +90,18 @@ export const SETTING_DEFS = {
   'shopify.api_version':      { env: process.env.SHOPIFY_API_VERSION || '', def: '2025-01', label: 'Admin API version (default for a newly connected store)' },
   'shopify.oauth_client_id':     { env: process.env.SHOPIFY_CLIENT_ID || '', def: '', label: 'Shopify app Client ID' },
   'shopify.oauth_client_secret': { env: process.env.SHOPIFY_CLIENT_SECRET || '', def: '', secret: true, label: 'Shopify app Client Secret' },
+  // Same reasoning as etsy.redirect_uri: localhost uses the raw host:port a
+  // dev server binds to, a real public host is always https with no port, at
+  // whatever sub-path this app is mounted under. The OAuth connect button
+  // never passed its own redirectUri, so without this the request silently
+  // fell back to a hardcoded localhost URL that never matches what is
+  // actually registered on the Shopify app - Shopify then refuses the
+  // authorization request outright.
+  'shopify.redirect_uri':     { env: process.env.SHOPIFY_REDIRECT_URI || '',
+    def: config.publicHost === 'localhost'
+      ? `http://${config.publicHost}:${config.port}/api/shopify/oauth/callback`
+      : `https://${config.publicHost}${config.basePath}/api/shopify/oauth/callback`,
+    label: 'Shopify OAuth redirect URI' },
   'shopify.orders_sync_minutes': { env: '', def: '5', label: 'How often to check every connected store for new/updated orders (minutes)' },
   'shopify.auto_sync_hours':     { env: '', def: '4', label: 'Full auto-sync interval - products and orders, every connected store (hours)' },
 
