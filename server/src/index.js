@@ -66,17 +66,24 @@ router.use((req, res, next) => {
 /** Optional shared password when the app is exposed beyond loopback. */
 if (config.security.appPassword) {
   router.use('/api', (req, res, next) => {
-    // Product Studio's own backend already authenticates itself with its
-    // pairing key (routes/integrations.js's `guard`) - that key is what
-    // proves a push is legitimate, not the site's shared password, which a
-    // separate server calling in from another host has no way to send.
-    // Nothing else under /integrations/product-studio is exempted: those
-    // routes (the contract/key display, drop-folder scan) are only ever
-    // opened from this app's own browser UI, which does have the cookie.
-    const isProductStudioPush = req.path === '/integrations/product-studio/product'
+    // Product Studio's own backend already authenticates the routes that
+    // actually create something with its pairing key (routes/integrations.js's
+    // `guard`) - that key, not the site's shared password (which a separate
+    // server on another host has no way to send), is what proves a push is
+    // legitimate. The plain GET contract endpoint is exempted too: Product
+    // Studio's own "pair" step calls it directly to fetch that key in the
+    // first place, before it has anything else to authenticate with - the
+    // same chicken-and-egg reason this endpoint never required the key
+    // itself. It still only ever hands back a random per-install token, the
+    // same thing this whole integration has relied on since before the site
+    // password existed. /product-studio/key (rotates the key) and
+    // /product-studio/scan/draft (browser-UI-only, no external caller needs
+    // them) stay behind the site password.
+    const isProductStudioBridge = req.path === '/integrations/product-studio'
+      || req.path === '/integrations/product-studio/product'
       || req.path === '/integrations/product-studio/products'
       || req.path === '/integrations/product-studio/dry-run';
-    if (req.path.startsWith('/auth/callback') || req.path === '/health' || req.path === '/login' || isProductStudioPush) return next();
+    if (req.path.startsWith('/auth/callback') || req.path === '/health' || req.path === '/login' || isProductStudioBridge) return next();
     const supplied = req.get('x-app-password') || req.cookies?.app_password;
     if (supplied === config.security.appPassword) return next();
     res.status(401).json({ error: 'App password required' });
