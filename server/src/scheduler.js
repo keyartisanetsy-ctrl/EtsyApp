@@ -6,15 +6,33 @@
 import { createLogger } from './lib/logger.js';
 import config, { ROOT } from './config.js';
 import { readSetting } from './services/settings.js';
-import { getStoredToken, refreshAllAccounts } from './etsy/client.js';
+import { getStoredToken, refreshAllAccounts, listAccounts, withShop } from './etsy/client.js';
 import { syncTracking, refreshStaleFlags } from './services/tracking/index.js';
-import { syncReceipts } from './services/sync.js';
+import { syncReceipts, syncAll } from './services/sync.js';
 import { ensureRates } from './services/fx.js';
 import { scanInbox } from './services/productstudio.js';
 import { checkForUpdate, applyUpdate } from '../../scripts/self-update.mjs';
 
 const log = createLogger('scheduler');
 const timers = [];
+
+/**
+ * Runs `job` once per connected shop, each under withShop() so it resolves
+ * that shop's own credentials regardless of which one is active in the
+ * browser right now - a shop sitting idle in the switcher must keep syncing
+ * in the background exactly like the one currently open, not go stale until
+ * someone happens to click over to it. One shop's failure is logged and
+ * skipped rather than stopping the rest.
+ */
+async function forEachConnectedShop(label, job) {
+  for (const { shopId, shopName } of listAccounts()) {
+    try {
+      await withShop(shopId, job);
+    } catch (err) {
+      log.warn(`${label} failed for shop ${shopName || shopId}: ${err.message}`);
+    }
+  }
+}
 
 /**
  * True unless explicitly turned off. Used for the auto-update flags, which
@@ -42,10 +60,24 @@ export function startScheduler() {
     }
   }, Math.max(15, trackingMinutes) * 60_000).unref());
 
-  timers.push(setInterval(async () => {
-    if (!getStoredToken()) return;
-    try { await syncReceipts({}); } catch (err) { log.warn(`scheduled receipt sync failed: ${err.message}`); }
-  }, 30 * 60_000).unref());
+  // Orders only ever fetch what changed since the last watermark
+  // (syncReceipts' own min_last_modified), so a check that finds nothing new
+  // is a small, cheap call - there is no reason to make a new order wait for
+  // a slow interval, so this runs often, for every connected shop.
+  const orderSyncMinutes = Math.max(2, Number(readSetting('orders.sync_minutes')) || 5);
+  timers.push(setInterval(() => {
+    forEachConnectedShop('order sync', () => syncReceipts({}));
+  }, orderSyncMinutes * 60_000).unref());
+
+  // The floor under that fast check: a full pass (listings, sections, orders)
+  // for every connected shop, so anything the incremental order check could
+  // never catch - a listing edited straight on Etsy, a renamed section - is
+  // never more than this many hours stale even if nobody opens the app.
+  const fullSyncHours = Math.max(1, Number(readSetting('etsy.auto_sync_hours')) || 4);
+  setTimeout(() => forEachConnectedShop('full sync', () => syncAll({})), 20_000).unref();
+  timers.push(setInterval(() => {
+    forEachConnectedShop('full sync', () => syncAll({}));
+  }, fullSyncHours * 60 * 60_000).unref());
 
   // A shop that isn't the active one can otherwise sit untouched for months
   // between switches, long enough for Etsy's own refresh-token lifetime to
@@ -111,7 +143,7 @@ export function startScheduler() {
     }, 30 * 60_000).unref());
   }
 
-  log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every 30m, drop folder every 20s)`);
+  log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every ${orderSyncMinutes}m, full sync every ${fullSyncHours}h, drop folder every 20s)`);
 }
 
 export const stopScheduler = () => { for (const t of timers) clearInterval(t); timers.length = 0; };

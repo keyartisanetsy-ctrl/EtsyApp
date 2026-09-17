@@ -60,6 +60,7 @@ export const SETTING_DEFS = {
     options: [ { value: 'true', label: 'Yes - AI features work' }, { value: 'false', label: 'No - block all AI calls' } ] },
 
   'etsy.write_gap_ms':     { env: '', def: '1200', label: 'Pause between writes to Etsy (milliseconds)' },
+  'etsy.auto_sync_hours':  { env: '', def: '4', label: 'Full auto-sync interval - listings, sections and orders, every connected shop (hours)' },
 
   'offsite_ads.default_rate': { env: '', def: '0.12', label: 'Offsite Ads fee rate for a new shop (0.12 = 12%)' },
 
@@ -75,6 +76,7 @@ export const SETTING_DEFS = {
   'fx.history_days':       { env: '', def: '95', label: 'How many days of exchange rates to keep' },
   'fx.auto_refresh':       { env: '', def: 'true', label: 'Refresh exchange rates automatically',
     options: [ { value: 'true', label: 'Yes - keep the daily rates current' }, { value: 'false', label: 'No - only when I press refresh' } ] },
+  'orders.sync_minutes':   { env: '', def: '5', label: 'How often to check every connected shop for new/updated orders (minutes)' },
   'orders.code_template':  { env: '', def: '{YY}-{MM}{DD}-{NN}', label: 'Short order code shape (e.g. 26-0907-01 for 7 September)' },
   'orders.shipping_cost_currency': { env: '', def: 'CNY', label: 'Currency you normally pay shipping in' },
 
