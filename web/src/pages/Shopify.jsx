@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import api, { withBase } from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import {
-  Spinner, Empty, Banner, Checkbox, Drawer, Thumb, Tabs, Help,
+  Spinner, Empty, Banner, Checkbox, Drawer, Modal, Thumb, Tabs, Help,
   useAsync, useToast, useErrorToast, fmtMoney, fmtDateTime, DecimalInput,
 } from '../components/ui.jsx';
 import { SendToAirtable } from './Airtable.jsx';
@@ -399,6 +399,7 @@ function OrdersPanel() {
         {selected.size > 0 && (
           <button className="btn sm primary" onClick={() => setSendingToAirtable([...selected])}>⇉ Send {selected.size} to Airtable</button>
         )}
+        <ShopCampaignsPanel />
         <button className="btn sm" disabled={syncing} onClick={sync}>{syncing ? <Spinner /> : '↻ Sync from Shopify'}</button>
       </div>
 
@@ -450,6 +451,91 @@ function OrdersPanel() {
         />
       )}
     </section>
+  );
+}
+
+/**
+ * What Shopify's own Shop Campaigns ads (run from inside the Shop app /
+ * shop.app, not a third-party platform) have cost lately, by campaign. This
+ * is entirely separate from Etsy's Offsite Ads fee - different platform,
+ * different mechanics, its own screen. The numbers come from a ShopifyQL
+ * query Shopify only answers once the merchant has requested its "Level 2
+ * protected customer data" approval, so an unapproved store sees an
+ * explanation here instead of a crash.
+ */
+function ShopCampaignsPanel() {
+  const [open, setOpen] = useState(false);
+  const [sinceDays, setSinceDays] = useState(30);
+  const { data, loading, reload } = useAsync(
+    () => (open ? api.get('/shopify/campaigns/ad-spend', { sinceDays }) : null),
+    [open, sinceDays],
+    { immediate: open },
+  );
+
+  return (
+    <>
+      <button className="btn sm" onClick={() => setOpen(true)}
+        title="Shopify's own Shop Campaigns ads: spend and return, by campaign">
+        ◈ Shop Campaigns{data?.available && data.totals.adSpend ? ` · ${fmtMoney(data.totals.adSpend)}/${sinceDays}d` : ''}
+      </button>
+
+      <Modal open={open} onClose={() => setOpen(false)} title="Shop Campaigns" lg>
+        <p className="small muted">
+          Shop Campaigns are ads Shopify runs for you inside its own consumer Shop app / shop.app - a different
+          product from a third-party ad platform, and unrelated to Etsy's Offsite Ads. Spend, sales and return
+          are Shopify's own numbers, pulled per campaign.
+        </p>
+
+        <div className="flex mb8">
+          <label className="small">Last</label>
+          <select className="select sm" value={sinceDays} onChange={(e) => setSinceDays(Number(e.target.value))}>
+            <option value={7}>7 days</option>
+            <option value={30}>30 days</option>
+            <option value={90}>90 days</option>
+          </select>
+          <div className="spacer" />
+          <button className="btn xs" onClick={reload}>↻ Refresh</button>
+        </div>
+
+        {loading ? <Spinner /> : !data?.available ? (
+          <Banner kind="warn">
+            {data?.reason || 'Not available yet.'}
+          </Banner>
+        ) : data.campaigns.length === 0 ? (
+          <Empty icon="◈" title="No Shop Campaigns activity" >No campaign orders in the last {sinceDays} days.</Empty>
+        ) : (
+          <>
+            <Banner kind="info">
+              Last {sinceDays} days, all campaigns: {fmtMoney(data.totals.adSpend)} spend, {fmtMoney(data.totals.sales)} sales
+              {data.totals.roas != null ? `, ${data.totals.roas}x return` : ''}
+              {data.totals.avgCac != null ? `, ${fmtMoney(data.totals.avgCac)} avg. cost per customer` : ''}.
+            </Banner>
+            <table className="data mt8">
+              <thead>
+                <tr>
+                  <th>Campaign</th><th className="num">Ad spend</th><th className="num">Sales</th>
+                  <th className="num">ROAS</th><th className="num">Avg. CAC</th><th className="num">Avg. order</th>
+                  <th className="num">Customers</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.campaigns.map((c) => (
+                  <tr key={c.name}>
+                    <td>{c.name}</td>
+                    <td className="num">{fmtMoney(c.adSpend)}</td>
+                    <td className="num">{fmtMoney(c.sales)}</td>
+                    <td className="num">{c.roas != null ? `${c.roas}x` : '—'}</td>
+                    <td className="num">{fmtMoney(c.avgCac)}</td>
+                    <td className="num">{fmtMoney(c.avgOrderValue)}</td>
+                    <td className="num">{c.customers ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </Modal>
+    </>
   );
 }
 

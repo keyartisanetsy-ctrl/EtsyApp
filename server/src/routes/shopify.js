@@ -8,6 +8,7 @@ import { asyncRoute, bool, int, required } from '../lib/http.js';
 import * as client from '../shopify/client.js';
 import * as oauth from '../shopify/oauth.js';
 import * as shopify from '../services/shopify.js';
+import * as shopcampaigns from '../services/shopcampaigns.js';
 import * as warehouse from '../services/warehousecheck.js';
 import { currentShopifyShop } from '../shopify/shop.js';
 import { readSetting, writeSetting } from '../services/settings.js';
@@ -180,6 +181,13 @@ router.post('/orders/:id/items/:lineItemId/warehouse-check', asyncRoute(async (r
 
 router.get('/orders/:id/items/:lineItemId/warehouse-check', asyncRoute(async (req, res) => {
   res.json(warehouse.getCheck('shopify', req.params.lineItemId) ?? { checked: false });
+}));
+
+// ------------------------------------------------------- shop campaigns ads
+
+/** What Shopify's own Shop Campaigns ads have cost lately, per campaign. */
+router.get('/campaigns/ad-spend', asyncRoute(async (req, res) => {
+  res.json(await shopcampaigns.campaignAdSpend({ sinceDays: int(req.query.sinceDays, 30) }));
 }));
 
 const page = (title, message, ok) => `<!doctype html><meta charset="utf-8">
