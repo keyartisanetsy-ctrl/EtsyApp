@@ -77,11 +77,20 @@ export function listDestinations() {
  * table meant for a different one.
  */
 export function listAllDestinations() {
+  // A destination's shop_id means an etsy_accounts.shop_id for an Etsy
+  // destination and a shopify_accounts.id for a Shopify one - the same
+  // integer column pointing at two different tables depending on channel,
+  // so the join that resolves its display name has to follow the channel
+  // too. Joining only etsy_accounts (as this used to) left every Shopify
+  // destination's name blank.
   return getDb().prepare(`
-    SELECT d.*, a.shop_name AS owner_shop_name, a.airtable_name AS owner_airtable_name
+    SELECT d.*,
+           CASE WHEN d.channel = 'shopify' THEN sa.shop_name ELSE ea.shop_name END AS owner_shop_name,
+           CASE WHEN d.channel = 'shopify' THEN sa.airtable_name ELSE ea.airtable_name END AS owner_airtable_name
     FROM airtable_destinations d
-    LEFT JOIN etsy_accounts a ON a.shop_id = d.shop_id
-    ORDER BY d.shop_id IS NULL DESC, a.shop_name, d.is_default DESC, d.id`).all()
+    LEFT JOIN etsy_accounts ea ON ea.shop_id = d.shop_id AND d.channel != 'shopify'
+    LEFT JOIN shopify_accounts sa ON sa.id = d.shop_id AND d.channel = 'shopify'
+    ORDER BY d.shop_id IS NULL DESC, owner_shop_name, d.is_default DESC, d.id`).all()
     .map((row) => ({ ...shape(row), shopName: row.shop_id === null ? null : (row.owner_airtable_name || row.owner_shop_name || null) }));
 }
 

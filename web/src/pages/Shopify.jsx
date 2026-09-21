@@ -119,13 +119,14 @@ function ConnectionPanel({ status }) {
 
       {accounts.length > 0 && (
         <table className="data mb16">
-          <thead><tr><th /><th>Store</th><th>Via</th><th /></tr></thead>
+          <thead><tr><th /><th>Store</th><th>Via</th><th>Airtable name</th><th /></tr></thead>
           <tbody>
             {accounts.map((a) => (
               <tr key={a.id}>
                 <td>{a.isActive ? <span className="badge green">active</span> : <span className="badge grey">idle</span>}</td>
                 <td className="mono small">{a.shopName || a.shopDomain}</td>
                 <td className="small dim">{a.connectedVia === 'oauth' ? 'OAuth app' : 'custom token'}</td>
+                <td><AirtableNameCell account={a} onSaved={status.reload} /></td>
                 <td>
                   <div className="flex gap4">
                     {!a.isActive && <button className="btn xs" onClick={() => useStore(a.id)}>Use this</button>}
@@ -449,6 +450,40 @@ function OrdersPanel() {
         />
       )}
     </section>
+  );
+}
+
+/** The name this store goes by in Airtable's shop/store column - separate
+ *  from the domain, since a select column in Airtable is often spelled
+ *  differently. Mirrors Etsy's own "Shop names in Airtable" panel, just
+ *  scoped to Shopify stores instead of Etsy shops. */
+function AirtableNameCell({ account, onSaved }) {
+  const showError = useErrorToast();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(account.airtableName || '');
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.put(`/shopify/accounts/${account.id}`, { airtableName: value });
+      setEditing(false); onSaved?.();
+    } catch (err) { showError(err, 'Could not save'); } finally { setBusy(false); }
+  };
+
+  if (!editing) {
+    return (
+      <button className="btn xs ghost" onClick={() => { setValue(account.airtableName || ''); setEditing(true); }}>
+        {account.airtableName || <span className="muted">add</span>}
+      </button>
+    );
+  }
+  return (
+    <span className="flex gap4">
+      <input className="input sm" style={{ width: 120 }} autoFocus value={value} onChange={(e) => setValue(e.target.value)}
+             onKeyDown={(e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false); }} />
+      <button className="btn xs primary" onClick={save} disabled={busy}>✓</button>
+    </span>
   );
 }
 

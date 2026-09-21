@@ -592,13 +592,14 @@ function ShopNames({ destinations = [] }) {
   return (
     <section className="card">
       <div className="card-head">
-        <h3>Shop names in Airtable</h3>
+        <h3>Etsy shop names in Airtable</h3>
       </div>
       <p className="small muted">
-        A shop column (MAĞAZA, Shop, Store…) is what tells your sheet which shop a row came from, and it is what
-        the per-shop views filter on. Set the exact wording each shop should be filed under — it does not have to
-        match Etsy's spelling. Map that column to <strong>Shop name as written in Airtable</strong> and one
-        destination can serve every shop.
+        A shop column (MAĞAZA, Shop, Store…) is what tells your sheet which Etsy shop a row came from, and it is
+        what the per-shop views filter on. Set the exact wording each shop should be filed under — it does not have
+        to match Etsy's spelling. Map that column to <strong>Shop name as written in Airtable</strong> and one
+        destination can serve every shop. For a Shopify store's own Airtable name, use the Connection tab on the
+        Shopify page instead — Shopify stores keep this setting separately from Etsy shops.
       </p>
 
       <table className="data">
@@ -707,20 +708,29 @@ function RatesPanel() {
 
 /* ------------------------------------------------------------ run history */
 
+/** Sends from both channels, each against its own active shop/store - merged
+ *  here (with a channel badge, same as the destinations list above) rather
+ *  than shown as two separate tables, since a mixed timeline of "what did I
+ *  just send" is the whole point of a recent-activity list. */
 function RunHistory() {
-  const runs = useAsync(() => api.get('/airtable/runs?limit=10'), []);
-  if (!runs.data?.length) return null;
+  const etsyRuns = useAsync(() => api.get('/airtable/runs?limit=10&channel=etsy'), []);
+  const shopifyRuns = useAsync(() => api.get('/airtable/runs?limit=10&channel=shopify'), []);
+  const runs = [...(etsyRuns.data ?? []).map((r) => ({ ...r, channel: 'etsy' })),
+    ...(shopifyRuns.data ?? []).map((r) => ({ ...r, channel: 'shopify' }))]
+    .sort((a, b) => Date.parse(b.ran_at) - Date.parse(a.ran_at)).slice(0, 10);
+  if (!runs.length) return null;
   return (
     <section className="card">
       <h3>Recent sends</h3>
       <table className="data">
         <thead>
-          <tr><th>When</th><th>Destination</th><th>Mode</th><th>Added</th><th>Updated</th><th>Deleted</th><th>Skipped</th></tr>
+          <tr><th>When</th><th>Channel</th><th>Destination</th><th>Mode</th><th>Added</th><th>Updated</th><th>Deleted</th><th>Skipped</th></tr>
         </thead>
         <tbody>
-          {runs.data.map((r) => (
-            <tr key={r.id}>
+          {runs.map((r) => (
+            <tr key={`${r.channel}-${r.id}`}>
               <td className="small">{fmtDateTime(Date.parse(r.ran_at) / 1000)}</td>
+              <td><span className="badge muted">{r.channel === 'shopify' ? 'Shopify' : 'Etsy'}</span></td>
               <td>{r.label ?? '—'}</td>
               <td className="small">{r.mode}</td>
               <td>{r.created}</td>
