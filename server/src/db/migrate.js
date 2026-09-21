@@ -116,6 +116,11 @@ export function migrateSchema(db) {
   addColumn(db, 'shopify_order_line_items', 'warehouse_photo_id', 'TEXT');
   addColumn(db, 'shopify_fulfillments', 'supplier_order_ref', "TEXT DEFAULT ''");
   addColumn(db, 'shopify_fulfillments', 'supply_tracking_number', "TEXT DEFAULT ''");
+  addColumn(db, 'shopify_orders', 'discount_codes', 'TEXT');
+  addColumn(db, 'shopify_orders', 'risk_level', 'TEXT');
+  addColumn(db, 'shopify_orders', 'source_name', 'TEXT');
+  addColumn(db, 'shopify_orders', 'attribution_source', 'TEXT');
+  addColumn(db, 'shopify_orders', 'attribution_landing_page', 'TEXT');
   addColumn(db, 'etsy_accounts', 'offsite_ads_rate', 'REAL DEFAULT 0.12');
   addColumn(db, 'sku_meta', 'variant_supply_link', "TEXT DEFAULT ''");
   addColumn(db, 'sku_meta', 'variant_image_url', "TEXT DEFAULT ''");
@@ -305,6 +310,15 @@ export function migrateData(db) {
       db.exec('DROP TABLE shopify_variant_meta_old');
     })();
     log.info(`shopify_variant_meta rebuilt with shop scoping${anyShop ? ` (existing rows assigned to store ${anyShop})` : ''}`);
+  }
+
+  // shopifyqlQuery (Shop Campaigns ad spend) needs API version 2025-10 or
+  // later. A store connected before that requirement existed is still
+  // pinned to whatever version it first saved - bump it forward so the new
+  // query works without anyone having to notice and reconnect.
+  if (hasTable(db, 'shopify_accounts')) {
+    const bumped = db.prepare(`UPDATE shopify_accounts SET api_version = '2025-10' WHERE api_version < '2025-10'`).run();
+    if (bumped.changes) log.info(`bumped ${bumped.changes} Shopify store(s) to API version 2025-10 (needed for ShopifyQL)`);
   }
 }
 

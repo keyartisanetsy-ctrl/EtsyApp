@@ -87,7 +87,7 @@ export const SETTING_DEFS = {
   // Domain/token/connected-via/Airtable-name all live per store now, on
   // shopify_accounts - only the app itself (which any number of stores can
   // install) stays a single global setting here.
-  'shopify.api_version':      { env: process.env.SHOPIFY_API_VERSION || '', def: '2025-01', label: 'Admin API version (default for a newly connected store)' },
+  'shopify.api_version':      { env: process.env.SHOPIFY_API_VERSION || '', def: '2025-10', label: 'Admin API version (default for a newly connected store)' },
   'shopify.oauth_client_id':     { env: process.env.SHOPIFY_CLIENT_ID || '', def: '', label: 'Shopify app Client ID' },
   'shopify.oauth_client_secret': { env: process.env.SHOPIFY_CLIENT_SECRET || '', def: '', secret: true, label: 'Shopify app Client Secret' },
   // Same reasoning as etsy.redirect_uri: localhost uses the raw host:port a

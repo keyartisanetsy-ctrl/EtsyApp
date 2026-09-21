@@ -168,10 +168,12 @@ export function listOrders({ search = '', limit = 100, offset = 0 } = {}) {
 
   const rows = db.prepare(`
     SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
-           f.supplier_order_ref, f.supply_tracking_number,
+           f.supplier_order_ref, f.supply_tracking_number, al.airtable_pushed_at,
            (SELECT COUNT(*) FROM shopify_order_line_items x WHERE x.order_id = o.order_id) AS item_count
     FROM shopify_orders o
     LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
+    LEFT JOIN (SELECT receipt_id, MAX(last_pushed_at) AS airtable_pushed_at
+               FROM airtable_links GROUP BY receipt_id) al ON al.receipt_id = o.order_id
     ${clause}
     ORDER BY o.created_at_shopify DESC
     LIMIT ? OFFSET ?`).all(...params, limit, offset);
@@ -198,6 +200,12 @@ function shapeOrder(r) {
     pushedAt: r.pushed_at || null,
     supplierOrderRef: r.supplier_order_ref || '',
     supplyTrackingNumber: r.supply_tracking_number || '',
+    discountCodes: parse(r.discount_codes, []),
+    riskLevel: r.risk_level || null,
+    sourceName: r.source_name || null,
+    attributionSource: r.attribution_source || null,
+    attributionLandingPage: r.attribution_landing_page || null,
+    airtablePushedAt: r.airtable_pushed_at || null,
   };
 }
 
@@ -206,8 +214,10 @@ export function getOrder(orderId) {
   const db = getDb();
   const o = db.prepare(`
     SELECT o.*, f.tracking_number, f.tracking_company, f.tracking_url, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
-           f.supplier_order_ref, f.supply_tracking_number
+           f.supplier_order_ref, f.supply_tracking_number, al.airtable_pushed_at
     FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
+    LEFT JOIN (SELECT receipt_id, MAX(last_pushed_at) AS airtable_pushed_at
+               FROM airtable_links GROUP BY receipt_id) al ON al.receipt_id = o.order_id
     WHERE o.order_id = ? AND o.shop_id = ?`).get(orderId, shopId);
   if (!o) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
   const items = db.prepare('SELECT * FROM shopify_order_line_items WHERE order_id = ?').all(orderId).map((i) => ({

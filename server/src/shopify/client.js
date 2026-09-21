@@ -81,7 +81,7 @@ export function listShopifyAccounts() {
     shopName: r.shop_name,
     label: r.label || '',
     airtableName: r.airtable_name || '',
-    apiVersion: r.api_version || '2025-01',
+    apiVersion: r.api_version || '2025-10',
     connectedVia: r.connected_via || '',
     isActive: !!r.is_active,
     connectedAt: r.connected_at,
@@ -159,7 +159,7 @@ export function saveShopifyToken({ shopDomain, shopName, adminToken, connectedVi
   const info = db.prepare(`
     INSERT INTO shopify_accounts (shop_domain, shop_name, admin_token, connected_via, api_version, is_active)
     VALUES (?,?,?,?,?,?)`)
-    .run(domain, shopName ?? null, sealedToken, connectedVia ?? null, apiVersion || '2025-01', isFirst ? 1 : 0);
+    .run(domain, shopName ?? null, sealedToken, connectedVia ?? null, apiVersion || '2025-10', isFirst ? 1 : 0);
   return getAccountById(info.lastInsertRowid);
 }
 
@@ -173,7 +173,7 @@ export function getCredentials(account) {
   const acct = account !== undefined ? account : getStoredShopifyToken();
   return {
     shopDomain: acct?.shop_domain ? cleanDomain(acct.shop_domain) : '',
-    apiVersion: acct?.api_version || readSetting('shopify.api_version') || '2025-01',
+    apiVersion: acct?.api_version || readSetting('shopify.api_version') || '2025-10',
     clientId: readSetting('shopify.oauth_client_id'),
     clientSecret: readSetting('shopify.oauth_client_secret'),
     adminToken: acct?.admin_token || '',
@@ -224,6 +224,18 @@ export async function gql(query, variables = {}, { maxRetries = 4, account } = {
       await sleep(Math.max(500, Math.ceil(1000 / restore) * 200));
       attempt += 1;
       continue;
+    }
+    // A field the current token's scope doesn't cover comes back as one entry
+    // in `errors` (code ACCESS_DENIED) with `data` still present for
+    // everything else - Shopify's normal shape for "you asked for more than
+    // you're allowed to see," not a broken query. Sinking the whole sync over
+    // one such field (as happened when an order query touched customer data
+    // before read_customers was granted) throws away every order it could
+    // otherwise read; skipping just that field and logging it once is enough.
+    if (res.ok && body.data && Array.isArray(body.errors) && body.errors.length
+        && body.errors.every((e) => e.extensions?.code === 'ACCESS_DENIED')) {
+      log.warn(`field(s) skipped (missing scope): ${body.errors.map((e) => e.message).join('; ')}`);
+      return body.data;
     }
     if (!res.ok || body.errors) {
       const message = (Array.isArray(body.errors) ? body.errors.map((e) => e.message).join('; ') : body.errors) || `HTTP ${res.status}`;

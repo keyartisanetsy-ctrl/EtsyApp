@@ -19,12 +19,30 @@ import { gql, saveShopifyToken } from './client.js';
 
 const log = createLogger('shopify-oauth');
 
-// read_customers: the orders sync reads customer.displayName for the buyer
-// name shown on an order. Shopify only grants what is asked for here at
-// OAuth time - the scopes listed in the app's own Dashboard config are just
-// what it is ALLOWED to request, not what a given install actually gets.
-export const DEFAULT_SCOPES = ['read_products', 'write_products', 'read_inventory', 'write_inventory',
-  'read_orders', 'write_orders', 'read_fulfillments', 'write_fulfillments', 'read_customers'];
+// Shopify only grants what is asked for here at OAuth time - the scopes
+// listed in the app's own Dashboard config are just what it is ALLOWED to
+// request, not what a given install actually gets. Read-only scopes are
+// requested for data this app only displays and never writes (customers,
+// discounts, order edits, reports); Shopify's own review guidance flags apps
+// that request write access, or a scope, they have no real use for, so this
+// list stops short of the app's full declared scope set on purpose. Deliberately
+// left out: the customer_* / unauthenticated_* scopes, which belong to the
+// separate Customer Account / Storefront APIs this app never calls.
+export const DEFAULT_SCOPES = [
+  'read_products', 'write_products',
+  'read_inventory', 'write_inventory',
+  'read_orders', 'write_orders',
+  'read_fulfillments', 'write_fulfillments',
+  // The buyer name shown on an order.
+  'read_customers',
+  // Discount code + amount shown on an order.
+  'read_discounts', 'read_price_rules',
+  // Order edits (an order changed after it was placed).
+  'read_order_edits',
+  // Shop Campaigns ad spend via ShopifyQL - also needs Shopify's separate
+  // Level 2 Protected Customer Data approval before it returns real data.
+  'read_reports',
+];
 
 const cleanDomain = (d) => String(d ?? '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();
 

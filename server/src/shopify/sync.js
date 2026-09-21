@@ -100,13 +100,19 @@ query Orders($cursor: String) {
     nodes {
       id name email phone note tags createdAt cancelledAt
       displayFinancialStatus displayFulfillmentStatus
-      customer { displayName }
+      customer { displayName phone }
       shippingAddress { ${ADDR_FIELDS} }
       currentSubtotalPriceSet { shopMoney { amount currencyCode } }
       currentTotalTaxSet { shopMoney { amount } }
       currentTotalPriceSet { shopMoney { amount } }
       totalShippingPriceSet { shopMoney { amount } }
       totalDiscountsSet { shopMoney { amount } }
+      discountCodes
+      sourceName
+      risk { assessments { riskLevel } }
+      customerJourneySummary {
+        firstVisit { source landingPage referrerUrl }
+      }
       lineItems(first: 100) {
         nodes {
           id title variantTitle sku quantity
@@ -128,16 +134,24 @@ export async function syncOrders({ pages = 5 } = {}) {
     INSERT INTO shopify_orders (order_id, shop_id, name, email, phone, financial_status, fulfillment_status,
       currency, subtotal_amount, total_tax_amount, total_shipping_amount, total_discounts_amount, total_amount,
       customer_name, ship_name, ship_address1, ship_address2, ship_city, ship_province, ship_zip, ship_country,
-      ship_phone, note, tags, created_at_shopify, cancelled_at, raw, synced_at)
+      ship_phone, note, tags, created_at_shopify, cancelled_at, discount_codes, risk_level, source_name,
+      attribution_source, attribution_landing_page, raw, synced_at)
     VALUES (@id,@shopId,@name,@email,@phone,@financialStatus,@fulfillmentStatus,@currency,@subtotal,@tax,@shipping,
       @discounts,@total,@customerName,@shipName,@shipAddress1,@shipAddress2,@shipCity,@shipProvince,@shipZip,
-      @shipCountry,@shipPhone,@note,@tags,@createdAt,@cancelledAt,@raw,datetime('now'))
+      @shipCountry,@shipPhone,@note,@tags,@createdAt,@cancelledAt,@discountCodes,@riskLevel,@sourceName,
+      @attributionSource,@attributionLandingPage,@raw,datetime('now'))
     ON CONFLICT(order_id) DO UPDATE SET shop_id=excluded.shop_id, financial_status=excluded.financial_status,
       fulfillment_status=excluded.fulfillment_status, subtotal_amount=excluded.subtotal_amount,
       total_tax_amount=excluded.total_tax_amount, total_shipping_amount=excluded.total_shipping_amount,
       total_discounts_amount=excluded.total_discounts_amount, total_amount=excluded.total_amount,
-      note=excluded.note, tags=excluded.tags, cancelled_at=excluded.cancelled_at, raw=excluded.raw,
-      synced_at=excluded.synced_at`);
+      email=excluded.email, phone=excluded.phone, customer_name=excluded.customer_name,
+      ship_name=excluded.ship_name, ship_address1=excluded.ship_address1, ship_address2=excluded.ship_address2,
+      ship_city=excluded.ship_city, ship_province=excluded.ship_province, ship_zip=excluded.ship_zip,
+      ship_country=excluded.ship_country, ship_phone=excluded.ship_phone,
+      note=excluded.note, tags=excluded.tags, cancelled_at=excluded.cancelled_at,
+      discount_codes=excluded.discount_codes, risk_level=excluded.risk_level, source_name=excluded.source_name,
+      attribution_source=excluded.attribution_source, attribution_landing_page=excluded.attribution_landing_page,
+      raw=excluded.raw, synced_at=excluded.synced_at`);
   const clearItems = db.prepare('DELETE FROM shopify_order_line_items WHERE order_id = ?');
   const insertItem = db.prepare(`
     INSERT INTO shopify_order_line_items (line_item_id, order_id, product_id, variant_id, sku, title,
@@ -151,8 +165,9 @@ export async function syncOrders({ pages = 5 } = {}) {
     const data = await gql(ORDERS_QUERY, { cursor });
     for (const o of data.orders.nodes) {
       const addr = o.shippingAddress ?? {};
+      const firstVisit = o.customerJourneySummary?.firstVisit ?? null;
       upsertOrder.run({
-        id: o.id, shopId, name: o.name, email: o.email ?? null, phone: o.phone ?? null,
+        id: o.id, shopId, name: o.name, email: o.email ?? null, phone: o.phone ?? o.customer?.phone ?? null,
         financialStatus: o.displayFinancialStatus ?? null, fulfillmentStatus: o.displayFulfillmentStatus ?? null,
         currency: o.currentTotalPriceSet?.shopMoney?.currencyCode ?? null,
         subtotal: num(o.currentSubtotalPriceSet?.shopMoney?.amount),
@@ -165,6 +180,11 @@ export async function syncOrders({ pages = 5 } = {}) {
         shipCity: addr.city ?? null, shipProvince: addr.provinceCode ?? null, shipZip: addr.zip ?? null,
         shipCountry: addr.countryCodeV2 ?? null, shipPhone: addr.phone ?? null,
         note: o.note ?? null, tags: json(o.tags ?? []), createdAt: o.createdAt, cancelledAt: o.cancelledAt ?? null,
+        discountCodes: json(o.discountCodes ?? []),
+        riskLevel: o.risk?.assessments?.[0]?.riskLevel ?? null,
+        sourceName: o.sourceName ?? null,
+        attributionSource: firstVisit?.source ?? null,
+        attributionLandingPage: firstVisit?.landingPage ?? null,
         raw: json(o),
       });
       clearItems.run(o.id);

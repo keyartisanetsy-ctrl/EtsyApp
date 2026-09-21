@@ -11,6 +11,7 @@
  */
 import { getDb } from '../db/index.js';
 import { activeShopId, currentShop } from '../etsy/shop.js';
+import { activeShopifyShopId } from '../shopify/shop.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 import * as at from '../airtable/client.js';
@@ -23,6 +24,14 @@ import { enrichReceiptContacts } from './sync.js';
 const log = createLogger('airtable');
 
 const parse = (json, fallback) => { try { return JSON.parse(json ?? ''); } catch { return fallback; } };
+
+// Which "shop" owns a destination/link/run depends on the channel it belongs
+// to - a Shopify destination is scoped to the active Shopify store, never to
+// whichever Etsy shop happens to be open. Getting this wrong (calling
+// activeShopId() unconditionally, as this file did before) makes a
+// store-specific Shopify destination invisible whenever the active Etsy
+// shop's id doesn't happen to match it - which is always.
+const shopIdForChannel = (channel) => (channel === 'shopify' ? activeShopifyShopId() : activeShopId());
 
 const shape = (row) => (row ? {
   id: row.id,
@@ -52,11 +61,10 @@ const shape = (row) => (row ? {
 // ------------------------------------------------------------ destinations
 
 export function listDestinations() {
-  const shopId = activeShopId();
   return getDb().prepare(`
     SELECT * FROM airtable_destinations
-    WHERE shop_id IS ? OR shop_id IS NULL
-    ORDER BY is_default DESC, id`).all(shopId).map(shape);
+    WHERE shop_id IS NULL OR shop_id IS ? OR shop_id IS ?
+    ORDER BY is_default DESC, id`).all(activeShopId(), activeShopifyShopId()).map(shape);
 }
 
 /**
@@ -113,7 +121,7 @@ export function saveDestination(input = {}) {
   // shop; only a brand-new one, or one that was "all shops" and is having
   // that turned off right now, picks up the shop you are currently in.
   const existingShopId = id ? getDb().prepare('SELECT shop_id FROM airtable_destinations WHERE id = ?').get(id)?.shop_id ?? null : null;
-  const shopId = allShops ? null : (id && existingShopId !== null ? existingShopId : activeShopId());
+  const shopId = allShops ? null : (id && existingShopId !== null ? existingShopId : shopIdForChannel(channel));
   const args = {
     shop_id: shopId,
     label: label.trim(),
@@ -361,13 +369,13 @@ export async function buildRecords(destination, receiptIds, { table: known = nul
 
 // ------------------------------------------------------------------- links
 
-function rememberLink(destinationId, receiptId, transactionId, recordId) {
+function rememberLink(destinationId, receiptId, transactionId, recordId, shopId) {
   getDb().prepare(`
     INSERT INTO airtable_links (destination_id, shop_id, receipt_id, transaction_id, record_id, last_pushed_at)
     VALUES (?,?,?,?,?, datetime('now'))
     ON CONFLICT(destination_id, receipt_id, transaction_id)
     DO UPDATE SET record_id = excluded.record_id, last_pushed_at = excluded.last_pushed_at`)
-    .run(destinationId, activeShopId(), receiptId, transactionId ?? 0, recordId);
+    .run(destinationId, shopId, receiptId, transactionId ?? 0, recordId);
 }
 
 export function linksFor(destinationId, receiptIds = []) {
@@ -380,7 +388,7 @@ export function linksFor(destinationId, receiptIds = []) {
 }
 
 /** Which of these orders have already been sent, for the badge in the list. */
-export function syncedReceiptIds(receiptIds = []) {
+export function syncedReceiptIds(receiptIds = [], channel = 'etsy') {
   if (!receiptIds.length) return {};
   const holes = receiptIds.map(() => '?').join(',');
   const rows = getDb().prepare(`
@@ -388,25 +396,25 @@ export function syncedReceiptIds(receiptIds = []) {
     FROM airtable_links l
     JOIN airtable_destinations d ON d.id = l.destination_id
     WHERE l.shop_id IS ? AND l.receipt_id IN (${holes})
-    GROUP BY l.receipt_id`).all(activeShopId(), ...receiptIds);
+    GROUP BY l.receipt_id`).all(shopIdForChannel(channel), ...receiptIds);
   return Object.fromEntries(rows.map((r) => [r.receipt_id, { lastPushedAt: r.last_pushed_at, rows: r.rows_pushed }]));
 }
 
 // -------------------------------------------------------------------- push
 
-function recordRun(destinationId, mode, summary) {
+function recordRun(destinationId, mode, summary, shopId) {
   getDb().prepare(`
     INSERT INTO airtable_runs (destination_id, shop_id, mode, created, updated, deleted, skipped, failed, detail)
     VALUES (?,?,?,?,?,?,?,?,?)`)
-    .run(destinationId, activeShopId(), mode, summary.created ?? 0, summary.updated ?? 0,
+    .run(destinationId, shopId, mode, summary.created ?? 0, summary.updated ?? 0,
       summary.deleted ?? 0, summary.skipped ?? 0, summary.failed ?? 0, JSON.stringify(summary.detail ?? {}));
 }
 
-export function listRuns(limit = 20) {
+export function listRuns(limit = 20, channel = 'etsy') {
   return getDb().prepare(`
     SELECT r.*, d.label FROM airtable_runs r
     LEFT JOIN airtable_destinations d ON d.id = r.destination_id
-    WHERE r.shop_id IS ? ORDER BY r.id DESC LIMIT ?`).all(activeShopId(), limit)
+    WHERE r.shop_id IS ? ORDER BY r.id DESC LIMIT ?`).all(shopIdForChannel(channel), limit)
     .map((r) => ({ ...r, detail: parse(r.detail, {}) }));
 }
 
@@ -423,8 +431,12 @@ export async function push({ destinationId, receiptIds = [], mode = 'upsert', dr
   if (!receiptIds.length) throw badRequest('Select at least one order.');
   const destination = destinationId ? getDestination(destinationId) : defaultDestination(channel);
   if (!destination) throw badRequest('No Airtable destination is set up yet. Add one in Settings > Airtable.');
+  // A destination's own channel is the authority on which "shop" owns its
+  // links/runs, not the caller's - a Shopify destination stays scoped to the
+  // active Shopify store even if this got here through an Etsy code path.
+  const shopId = shopIdForChannel(destination.channel);
 
-  if (mode === 'delete') return remove(destination, receiptIds, dryRun);
+  if (mode === 'delete') return remove(destination, receiptIds, dryRun, shopId);
 
   if (!destination.fieldMap.length && !Object.keys(destination.constants ?? {}).length) {
     throw badRequest(`"${destination.label}" has no field mapping yet. Open it in Settings > Airtable and match the fields.`);
@@ -495,7 +507,7 @@ export async function push({ destinationId, receiptIds = [], mode = 'upsert', dr
         { typecast },
       );
       summary.updated += updated.length;
-      withId.forEach((r) => rememberLink(destination.id, r.receiptId, r.transactionId, r.id));
+      withId.forEach((r) => rememberLink(destination.id, r.receiptId, r.transactionId, r.id, shopId));
     }
 
     if (fresh.length) {
@@ -515,7 +527,7 @@ export async function push({ destinationId, receiptIds = [], mode = 'upsert', dr
         const byKey = new Map(fresh.map((r) => [keyOf(r.fields), r]));
         res.records.forEach((rec) => {
           const row = byKey.get(keyOf(rec?.fields));
-          if (row && rec?.id) rememberLink(destination.id, row.receiptId, row.transactionId, rec.id);
+          if (row && rec?.id) rememberLink(destination.id, row.receiptId, row.transactionId, rec.id, shopId);
         });
       } else {
         const created = await at.createRecords(
@@ -524,26 +536,26 @@ export async function push({ destinationId, receiptIds = [], mode = 'upsert', dr
         summary.created += created.length;
         created.forEach((rec, i) => {
           const row = fresh[i];
-          if (row && rec?.id) rememberLink(destination.id, row.receiptId, row.transactionId, rec.id);
+          if (row && rec?.id) rememberLink(destination.id, row.receiptId, row.transactionId, rec.id, shopId);
         });
       }
     }
   } catch (err) {
     summary.failed = records.length - summary.created - summary.updated;
     summary.errors.push(err.message);
-    recordRun(destination.id, mode, { ...summary, detail: { error: err.message } });
+    recordRun(destination.id, mode, { ...summary, detail: { error: err.message } }, shopId);
     throw err;
   }
 
   getDb().prepare("UPDATE airtable_destinations SET last_push_at = datetime('now') WHERE id = ?").run(destination.id);
-  recordRun(destination.id, mode, summary);
+  recordRun(destination.id, mode, summary, shopId);
   log.info(`pushed ${summary.created} new and ${summary.updated} updated rows to ${destination.label}`);
 
   return { ...summary, destination: { id: destination.id, label: destination.label, table: table.name }, mode };
 }
 
 /** Remove the Airtable rows this app created for these orders. */
-async function remove(destination, receiptIds, dryRun) {
+async function remove(destination, receiptIds, dryRun, shopId) {
   const links = linksFor(destination.id, receiptIds);
   if (!links.length) return { deleted: 0, skipped: receiptIds.length, mode: 'delete', note: 'Nothing was pushed to this destination yet.' };
   if (dryRun) {
@@ -557,7 +569,7 @@ async function remove(destination, receiptIds, dryRun) {
     db.prepare('DELETE FROM airtable_links WHERE destination_id = ? AND receipt_id = ? AND transaction_id = ?')
       .run(destination.id, l.receipt_id, l.transaction_id);
   }
-  recordRun(destination.id, 'delete', { deleted: deleted.length });
+  recordRun(destination.id, 'delete', { deleted: deleted.length }, shopId);
   return { deleted: deleted.length, mode: 'delete', destination: { id: destination.id, label: destination.label } };
 }
 

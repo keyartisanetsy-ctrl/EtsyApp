@@ -90,21 +90,24 @@ router.post('/match', asyncRoute(async (req, res) => {
 
 /** What would be sent, without sending it. */
 router.post('/preview', asyncRoute(async (req, res) => {
-  const { destinationId, receiptIds = [], mode = 'upsert' } = req.body ?? {};
-  res.json(await service.push({ destinationId, receiptIds, mode, dryRun: true }));
+  const { destinationId, receiptIds = [], mode = 'upsert', channel = 'etsy' } = req.body ?? {};
+  res.json(await service.push({ destinationId, receiptIds, mode, channel, dryRun: true }));
 }));
 
 router.post('/push', asyncRoute(async (req, res) => {
-  const { destinationId, receiptIds = [], mode = 'upsert' } = req.body ?? {};
-  res.json(await service.push({ destinationId, receiptIds, mode }));
+  const { destinationId, receiptIds = [], mode = 'upsert', channel = 'etsy' } = req.body ?? {};
+  res.json(await service.push({ destinationId, receiptIds, mode, channel }));
 }));
 
 /** Which of these orders are already in Airtable, for the list badges. */
 router.post('/synced', asyncRoute(async (req, res) => {
-  res.json(service.syncedReceiptIds(req.body?.receiptIds ?? []));
+  const { receiptIds = [], channel = 'etsy' } = req.body ?? {};
+  res.json(service.syncedReceiptIds(receiptIds, channel));
 }));
 
-router.get('/runs', asyncRoute(async (req, res) => res.json(service.listRuns(Number(req.query.limit) || 20))));
+router.get('/runs', asyncRoute(async (req, res) => {
+  res.json(service.listRuns(Number(req.query.limit) || 20, req.query.channel || 'etsy'));
+}));
 
 // ------------------------------------------------------------- shop names
 

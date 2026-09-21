@@ -412,7 +412,7 @@ function OrdersPanel() {
                           onChange={() => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.orderId)))} />
               </th>
               <th>Order</th><th>Buyer</th><th>Financial</th><th>Fulfillment</th>
-              <th className="num">Total</th><th className="right">Shipping cost</th><th>Tracking</th><th className="col-tight" />
+              <th className="num">Total</th><th className="right">Shipping cost</th><th>Tracking</th><th>Airtable</th><th className="col-tight" />
             </tr>
           </thead>
           <tbody>
@@ -426,6 +426,11 @@ function OrdersPanel() {
                 <td className="num">{fmtMoney(o.total, o.currency)}</td>
                 <td className="right"><ShippingCostCell row={o} onSaved={reload} /></td>
                 <td className="small mono">{o.trackingNumber || '—'}</td>
+                <td>
+                  {o.airtablePushedAt
+                    ? <span className="badge green" title={`Sent ${fmtDateTime(Date.parse(o.airtablePushedAt) / 1000)}`}>✓</span>
+                    : <span className="muted small">—</span>}
+                </td>
                 <td><button className="btn xs" onClick={() => setDetail(o.orderId)}>Open</button></td>
               </tr>
             ))}
@@ -520,11 +525,59 @@ function OrderDetail({ orderId, onClose, onChanged }) {
       {loading || !data ? <Spinner /> : (
         <>
           <dl className="kv mb16">
-            <dt>Buyer</dt><dd>{data.customerName || '—'} {data.email ? `· ${data.email}` : ''}</dd>
+            <dt>Buyer</dt>
+            <dd>
+              {data.customerName || '—'} {data.email ? `· ${data.email}` : ''}
+              {data.phone && <div className="small dim">{data.phone}</div>}
+            </dd>
             <dt>Ship to</dt><dd>{[data.shipName, data.shipAddress1, data.shipCity, data.shipCountry].filter(Boolean).join(', ') || '—'}</dd>
             <dt>Financial</dt><dd>{data.financialStatus}</dd>
             <dt>Fulfillment</dt><dd>{data.fulfillmentStatus || 'UNFULFILLED'}</dd>
             <dt>Total</dt><dd>{fmtMoney(data.total, data.currency)}</dd>
+            {data.discountCodes?.length > 0 && (
+              <>
+                <dt>Discount</dt>
+                <dd>{data.discountCodes.join(', ')} {data.discounts ? `(−${fmtMoney(data.discounts, data.currency)})` : ''}</dd>
+              </>
+            )}
+            {data.tags?.length > 0 && (
+              <>
+                <dt>Tags</dt>
+                <dd>{data.tags.map((t) => <span key={t} className="badge muted" style={{ marginRight: 4 }}>{t}</span>)}</dd>
+              </>
+            )}
+            {data.riskLevel && (
+              <>
+                <dt>Risk</dt>
+                <dd>
+                  <span className={`badge ${data.riskLevel === 'HIGH' ? 'red' : data.riskLevel === 'MEDIUM' ? 'amber' : 'green'}`}>
+                    {data.riskLevel.toLowerCase()}
+                  </span>
+                </dd>
+              </>
+            )}
+            {(data.sourceName || data.attributionSource) && (
+              <>
+                <dt>Source</dt>
+                <dd>
+                  {data.sourceName || '—'}
+                  {data.attributionSource && data.attributionSource !== data.sourceName && ` (${data.attributionSource})`}
+                  {data.attributionLandingPage && <div className="small dim">Landing: {data.attributionLandingPage}</div>}
+                </dd>
+              </>
+            )}
+            {data.note && (
+              <>
+                <dt>Note</dt>
+                <dd>{data.note}</dd>
+              </>
+            )}
+            <dt>Airtable</dt>
+            <dd>
+              {data.airtablePushedAt
+                ? <span className="badge green">Sent {fmtDateTime(Date.parse(data.airtablePushedAt) / 1000)}</span>
+                : <span className="muted small">not sent yet</span>}
+            </dd>
           </dl>
 
           <div className="section-title">Items</div>

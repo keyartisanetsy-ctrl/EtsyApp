@@ -838,6 +838,19 @@ CREATE TABLE IF NOT EXISTS shopify_orders (
   tags                    TEXT,
   created_at_shopify      TEXT,
   cancelled_at            TEXT,
+  -- Discount code(s) actually applied, alongside the amount already in
+  -- total_discounts_amount.
+  discount_codes          TEXT,
+  -- Shopify's own fraud/chargeback read on the order (low/medium/high),
+  -- straight from Order.risk - nothing this app computes itself.
+  risk_level              TEXT,
+  -- Where the order came from: "web", "pos", "shop" (Shopify's own Shop app
+  -- marketplace), an app name, etc. - Order.sourceName, needs no extra scope.
+  source_name             TEXT,
+  -- The buyer's first visit before this order: which channel brought them in
+  -- and what page they landed on - Order.customerJourneySummary.firstVisit.
+  attribution_source      TEXT,
+  attribution_landing_page TEXT,
   raw                     TEXT,
   synced_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );

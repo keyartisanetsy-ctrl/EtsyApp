@@ -176,6 +176,7 @@ function orderSummary(r) {
     alertReason: r.alert_reason || '',
     lastEventText: r.last_event_text,
     lastEventAt: r.last_event_at,
+    airtablePushedAt: r.airtable_pushed_at || null,
   };
 }
 

@@ -257,6 +257,9 @@ export default function Orders() {
                       {o.trackingStatus && <span className={`badge ${TRACK_BADGE[o.trackingStatus] ?? 'grey'}`}>{o.trackingStatusLabel}</span>}
                       {!o.trackingStatus && o.isShipped && <span className="badge blue">shipped</span>}
                       {o.alert && <span className="badge red" title={o.alertReason}>⚠ {o.daysSinceMove}d</span>}
+                      {o.airtablePushedAt && (
+                        <span className="badge green" title={`Sent to Airtable ${fmtDateTime(Date.parse(o.airtablePushedAt) / 1000)}`}>Airtable ✓</span>
+                      )}
                     </div>
                   </td>
                   <td><button className="btn xs" onClick={() => setDetailId(o.receiptId)}>Open</button></td>
@@ -617,6 +620,12 @@ function OrderDetail({ id, onClose, onChanged }) {
                   )}
                 </dd>
                 <dt>Payment</dt><dd>{order.paymentMethod || '—'}</dd>
+                <dt>Airtable</dt>
+                <dd>
+                  {order.airtablePushedAt
+                    ? <span className="badge green">Sent {fmtDateTime(Date.parse(order.airtablePushedAt) / 1000)}</span>
+                    : <span className="muted small">not sent yet</span>}
+                </dd>
               </dl>
 
               <div className="section-title">
