@@ -9,6 +9,8 @@ import {
 } from '../components/ui.jsx';
 import { SendToAirtable } from './Airtable.jsx';
 import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
+import MessagePreviewModal from '../components/MessagePreview.jsx';
+import MessageTemplatesModal from '../components/MessageTemplates.jsx';
 
 const LIMIT = 60;
 
@@ -30,6 +32,8 @@ export default function Orders() {
   const [detailId, setDetailId] = useState(null);
   const [trackingOpen, setTrackingOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [airtableMessagePreview, setAirtableMessagePreview] = useState(null);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
 
   const toast = useToast();
   const showError = useErrorToast();
@@ -141,6 +145,7 @@ export default function Orders() {
           </button>
           <button className="btn sm" onClick={exportXlsx}>⤓ Excel</button>
           <button className="btn sm" onClick={syncOrders}>↻ Sync</button>
+          <button className="btn sm" onClick={() => setTemplatesOpen(true)}>✉ Message templates</button>
           <button className="btn sm primary" onClick={() => setTrackingOpen(true)}>➤ Bulk tracking</button>
         </>
       }
@@ -275,9 +280,18 @@ export default function Orders() {
         <SendToAirtable
           receiptIds={sendingToAirtable}
           onClose={() => setSendingToAirtable(null)}
-          onDone={refreshAll}
+          onDone={() => { setAirtableMessagePreview([...sendingToAirtable]); refreshAll(); }}
         />
       )}
+      {airtableMessagePreview && (
+        <MessagePreviewModal
+          receiptIds={airtableMessagePreview}
+          kind="airtable_pushed"
+          title="Sent to Airtable - message ready to copy"
+          onClose={() => setAirtableMessagePreview(null)}
+        />
+      )}
+      {templatesOpen && <MessageTemplatesModal onClose={() => setTemplatesOpen(false)} />}
     </TablePage>
   );
 }

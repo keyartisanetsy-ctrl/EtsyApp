@@ -11,6 +11,7 @@ import { listAccounts } from '../etsy/client.js';
 import * as sync from '../services/sync.js';
 import * as addresses from '../services/addresscheck.js';
 import * as warehouse from '../services/warehousecheck.js';
+import * as messages from '../services/messagetemplates.js';
 import { getDb } from '../db/index.js';
 import { sha256 } from '../lib/crypto.js';
 
@@ -37,6 +38,36 @@ router.get('/', asyncRoute(async (req, res) => {
 }));
 
 router.get('/counters', asyncRoute(async (req, res) => res.json(orders.orderCounters())));
+
+// ---------------------------------------------------- canned buyer messages
+// Registered ahead of the generic '/:id' route below - '/message-templates'
+// would otherwise match it first (id = "message-templates") and never reach
+// these handlers at all.
+
+/** The saved message texts (one library, filtered by kind: airtable_pushed | delivered). */
+router.get('/message-templates', asyncRoute(async (req, res) => {
+  res.json(messages.listTemplates(req.query.kind));
+}));
+
+router.post('/message-templates', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  required(b, ['name', 'kind', 'body']);
+  res.status(201).json(messages.saveTemplate(b));
+}));
+
+router.put('/message-templates/:id', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  required(b, ['name', 'kind', 'body']);
+  res.json(messages.saveTemplate({ ...b, id: Number(req.params.id) }));
+}));
+
+router.post('/message-templates/:id/default', asyncRoute(async (req, res) => {
+  res.json(messages.setDefaultTemplate(Number(req.params.id)));
+}));
+
+router.delete('/message-templates/:id', asyncRoute(async (req, res) => {
+  res.json(messages.deleteTemplate(Number(req.params.id)));
+}));
 
 router.post('/sync', asyncRoute(async (req, res) => {
   res.json(await sync.syncReceipts({ full: bool(req.body?.full), sinceDays: int(req.body?.sinceDays) }));
@@ -183,6 +214,12 @@ router.post('/:id/items/:transactionId/warehouse-check', asyncRoute(async (req, 
 
 router.get('/:id/items/:transactionId/warehouse-check', asyncRoute(async (req, res) => {
   res.json(warehouse.getCheck('etsy', Number(req.params.transactionId)) ?? { checked: false });
+}));
+
+/** The default template for one order, rendered and ready to copy. */
+router.get('/:id/message-preview', asyncRoute(async (req, res) => {
+  required(req.query, ['kind']);
+  res.json(messages.previewFor(Number(req.params.id), req.query.kind));
 }));
 
 export default router;

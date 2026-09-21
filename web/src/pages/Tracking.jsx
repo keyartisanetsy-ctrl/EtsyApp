@@ -6,6 +6,7 @@ import {
   Spinner, Empty, Banner, Checkbox, Pager, Drawer, Modal, CopyButton, Stat,
   useAsync, useDebounced, useToast, useErrorToast, fmtDateTime, fmtAgo, TRACK_BADGE, DecimalInput,
 } from '../components/ui.jsx';
+import MessagePreviewModal from '../components/MessagePreview.jsx';
 
 const LIMIT = 100;
 
@@ -25,6 +26,7 @@ export default function Tracking() {
   const [selected, setSelected] = useState(new Set());
   const [blocked, setBlocked] = useState(null);
   const [aiOpen, setAiOpen] = useState(false);
+  const [deliveredConfirm, setDeliveredConfirm] = useState(null);
 
   const toast = useToast();
   const showError = useErrorToast();
@@ -78,18 +80,35 @@ export default function Tracking() {
     return next;
   });
 
-  /** Set the same status on every selected parcel, by hand. */
-  const markSelected = async (newStatus) => {
-    const codes = [...selected];
-    if (!codes.length) return;
-    const label = statuses?.labels?.[newStatus] ?? newStatus;
-    if (!confirm(`Mark ${codes.length} parcel(s) as "${label}"?`)) return;
+  const applyStatus = async (codes, newStatus, label) => {
     try {
       const r = await api.post('/tracking/status', { codes, status: newStatus, note: `Set by hand to ${label}` });
       toast({ kind: 'ok', title: `${r.updated} parcel(s) marked ${label}` });
       setSelected(new Set());
       refreshAll();
     } catch (err) { showError(err, 'Could not set the status'); }
+  };
+
+  /** Set the same status on every selected parcel, by hand. Marking a parcel
+   *  delivered by hand is the same moment the "delivered" message would have
+   *  fired automatically, so it gets the same warning-plus-preview instead of
+   *  a plain confirm() - the buyer message is one click away either way. */
+  const markSelected = async (newStatus) => {
+    const codes = [...selected];
+    if (!codes.length) return;
+    const label = statuses?.labels?.[newStatus] ?? newStatus;
+    if (newStatus === 'delivered') {
+      const receiptIds = [...new Set(rows.filter((r) => codes.includes(r.trackingCode) && r.receiptId).map((r) => r.receiptId))];
+      if (receiptIds.length) { setDeliveredConfirm({ codes, label, receiptIds }); return; }
+      // No order behind any of these tracking codes (a manually-added parcel,
+      // or one whose order was never synced) - nothing to preview a message
+      // for, so fall back to the plain confirm.
+      if (!confirm(`Mark ${codes.length} parcel(s) as "${label}"?`)) return;
+      applyStatus(codes, newStatus, label);
+      return;
+    }
+    if (!confirm(`Mark ${codes.length} parcel(s) as "${label}"?`)) return;
+    applyStatus(codes, newStatus, label);
   };
 
   return (
@@ -249,6 +268,16 @@ export default function Tracking() {
         onApplied={() => { setAiOpen(false); setSelected(new Set()); refreshAll(); }}
       />
       <ParcelDetail code={detail} onClose={() => setDetail(null)} onChanged={refreshAll} statuses={statuses} />
+      {deliveredConfirm && (
+        <MessagePreviewModal
+          receiptIds={deliveredConfirm.receiptIds}
+          kind="delivered"
+          title={`Mark ${deliveredConfirm.codes.length} parcel(s) delivered? A "delivered" message will be ready to send.`}
+          confirmLabel="Mark delivered"
+          onClose={() => setDeliveredConfirm(null)}
+          onConfirm={() => { applyStatus(deliveredConfirm.codes, 'delivered', deliveredConfirm.label); setDeliveredConfirm(null); }}
+        />
+      )}
     </TablePage>
   );
 }

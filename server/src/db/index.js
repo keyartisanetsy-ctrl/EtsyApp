@@ -29,6 +29,7 @@ export async function initDb() {
   db.exec(fs.readFileSync(path.join(here, 'schema.sql'), 'utf8'));
   migrateData(db);
   seedDefaults(db);
+  seedMessageTemplates(db);
   log.info(`ready at ${config.dbFile} (${driverKind()})`);
   return db;
 }
@@ -205,6 +206,37 @@ function seedDefaults(database) {
   });
   run(DEFAULT_PROMPTS);
   log.info(`seeded ${DEFAULT_PROMPTS.length} starter prompts`);
+}
+
+/**
+ * Placeholders {buyerName}, {orderNumber}, {shopName}, {trackingCode},
+ * {carrier} get filled in per order when the text is rendered - see
+ * services/messagetemplates.js. Starting text only; edit or replace freely.
+ */
+const DEFAULT_MESSAGE_TEMPLATES = [
+  {
+    name: 'Thanks for your order',
+    kind: 'airtable_pushed',
+    is_default: 1,
+    body: `Hi {buyerName}! Thanks so much for your order (#{orderNumber}) from {shopName} - we've got it and we're getting it ready for you. We'll let you know the moment it ships!`,
+  },
+  {
+    name: 'Delivered - hope you love it',
+    kind: 'delivered',
+    is_default: 1,
+    body: `Hi {buyerName}! Just checking in - tracking shows your order (#{orderNumber}) was delivered. We hope you love it! If anything isn't right, just reply here and we'll sort it out right away.`,
+  },
+];
+
+function seedMessageTemplates(database) {
+  const count = database.prepare('SELECT COUNT(*) AS c FROM message_templates').get().c;
+  if (count > 0) return;
+  const insert = database.prepare('INSERT INTO message_templates (name, kind, body, is_default) VALUES (?,?,?,?)');
+  const run = database.transaction((rows) => {
+    for (const t of rows) insert.run(t.name, t.kind, t.body, t.is_default ? 1 : 0);
+  });
+  run(DEFAULT_MESSAGE_TEMPLATES);
+  log.info(`seeded ${DEFAULT_MESSAGE_TEMPLATES.length} starter message templates`);
 }
 
 export default getDb;

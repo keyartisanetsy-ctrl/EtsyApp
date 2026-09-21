@@ -396,6 +396,22 @@ CREATE TABLE IF NOT EXISTS prompts (
 );
 CREATE INDEX IF NOT EXISTS idx_prompts_kind ON prompts(kind, is_default DESC);
 
+-- Canned buyer messages the seller copies and pastes into Etsy's own
+-- messaging - Etsy's API has no way for an app to send one itself, so this
+-- is the closest a third party can get: a saved, editable, one-click-to-copy
+-- text, rendered with this order's own details. Etsy-only; Shopify has no
+-- equivalent buyer-seller messaging surface to hook into.
+CREATE TABLE IF NOT EXISTS message_templates (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL,
+  kind        TEXT NOT NULL,   -- airtable_pushed | delivered
+  body        TEXT NOT NULL,
+  is_default  INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_message_templates_kind ON message_templates(kind, is_default DESC);
+
 CREATE TABLE IF NOT EXISTS ai_runs (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   kind         TEXT NOT NULL,
