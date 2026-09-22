@@ -484,6 +484,9 @@ function DraftEditor({ id, onClose, onChanged }) {
           <MaterialsPicker value={merged.materials ?? []} changed={isChanged('materials')}
                            onChange={(materials) => save({ materials })} />
 
+          <div className="section-title">Variations</div>
+          <DraftVariations draft={draft} />
+
           <div className="section-title">
             Etsy needs these
             {isChanged('taxonomy_id') && <span className="badge amber" style={{ marginLeft: 6 }}>category changed</span>}
@@ -718,6 +721,96 @@ function Field({ name, label, value, changed, etsyValue, save, textarea, rows, o
             : <input className="input" type={type ?? 'text'} step={step} min={min} max={max}
                      value={local} onChange={(e) => onType(e.target.value)} />}
       {hint && <div className="hint">{hint}</div>}
+    </div>
+  );
+}
+
+/**
+ * The variations already on this draft, editable in place (SKU / price /
+ * stock per combination) - the same grid the SKUs page shows, scoped to just
+ * this one listing so a seller pulling up a draft they know has variants
+ * (Etsy's own "Manage variations" screen shows them) sees them right here
+ * instead of having to know to go hunt them down on a separate page.
+ *
+ * Etsy's inventory endpoints only exist for a listing_id it has already
+ * issued - createDraftListing has to run first. A draft that has never been
+ * sent (isLocalOnly) has no such id yet, so there is nothing here to fetch
+ * or write until after the first "Send to Etsy".
+ */
+function DraftVariations({ draft }) {
+  const toast = useToast();
+  const showError = useErrorToast();
+  const [edits, setEdits] = useState({}); // productId -> { sku, price, quantity }
+  const [saving, setSaving] = useState(false);
+  const { data, loading, reload } = useAsync(
+    () => (draft.isLocalOnly ? null : api.get('/skus', { listingId: draft.listingId })),
+    [draft.listingId, draft.isLocalOnly],
+    { immediate: !draft.isLocalOnly },
+  );
+
+  if (draft.isLocalOnly) {
+    return (
+      <div className="hint">
+        This draft has not been sent to Etsy yet, so it has no variations there to show. Etsy only lets you set
+        SKU/price/stock per variation once a listing exists - send this as a draft first, then variations open up here.
+      </div>
+    );
+  }
+
+  const rows = data?.rows ?? [];
+  const stage = (productId, field, value) => setEdits((e) => ({ ...e, [productId]: { ...e[productId], [field]: value } }));
+  const dirtyCount = Object.keys(edits).length;
+
+  const saveAll = async () => {
+    setSaving(true);
+    try {
+      await api.put(`/skus/inventory/${draft.listingId}`, { changes: edits });
+      toast({ kind: 'ok', title: `${dirtyCount} variation(s) sent to Etsy` });
+      setEdits({});
+      reload();
+    } catch (err) { showError(err, 'Etsy rejected the change'); } finally { setSaving(false); }
+  };
+
+  if (loading && !data) return <Spinner />;
+  if (!rows.length) {
+    return <div className="hint">This listing has a single, un-varied product - nothing to show here.</div>;
+  }
+
+  return (
+    <div>
+      <table className="data">
+        <thead>
+          <tr><th>Variation</th><th>SKU</th><th className="num">Price</th><th className="num">Stock</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const edit = edits[r.productId] ?? {};
+            return (
+              <tr key={r.productId}>
+                <td className="small">{r.variation || '—'}</td>
+                <td>
+                  <input className="input sm mono" style={{ width: 130 }} value={edit.sku ?? r.sku}
+                         onChange={(e) => stage(r.productId, 'sku', e.target.value)} />
+                </td>
+                <td className="num">
+                  <DecimalInput className="input sm right" style={{ width: 76 }} value={edit.price ?? r.priceFull ?? ''}
+                                 onChange={(v) => stage(r.productId, 'price', v)} />
+                </td>
+                <td className="num">
+                  <input className="input sm right" type="number" min={0} style={{ width: 64 }}
+                         value={edit.quantity ?? r.quantity ?? ''}
+                         onChange={(e) => stage(r.productId, 'quantity', e.target.value)} />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {dirtyCount > 0 && (
+        <button className="btn xs primary mt8" disabled={saving} onClick={saveAll}>
+          {saving ? <Spinner /> : `Send ${dirtyCount} variation change(s) to Etsy`}
+        </button>
+      )}
     </div>
   );
 }
