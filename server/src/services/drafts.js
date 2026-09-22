@@ -413,7 +413,7 @@ export function remove(listingId) {
 }
 
 /** Which of these a draft can be missing, in the order the button reports them. */
-const AUTOFILL_FIELDS = ['materials', 'tags', 'taxonomy_id', 'description', 'who_made', 'when_made'];
+const AUTOFILL_FIELDS = ['materials', 'tags', 'taxonomy_id', 'attributes', 'description', 'who_made', 'when_made'];
 
 // Settings-like fields: this shop's own defaults are the only way any of
 // these ever gets filled -- neither the AI nor plain lookups guess at a
@@ -465,8 +465,13 @@ export function setDraftDefaults(patch = {}) {
 function missingFields(merged) {
   return {
     materials: !(merged.materials?.length),
-    tags: !(merged.tags?.length),
+    // Etsy allows up to 13; this shop wants every slot used, so "missing"
+    // means "not yet at 13", not just "empty".
+    tags: (merged.tags?.length ?? 0) < 13,
     taxonomy_id: !merged.taxonomy_id,
+    // Only meaningful once a category is picked -- Etsy's attributes are
+    // per-category, so there is nothing to fill in before then.
+    attributes: !!merged.taxonomy_id && !(merged.attributes && Object.keys(merged.attributes).length),
     description: !merged.description?.trim(),
     who_made: !merged.who_made,
     when_made: !merged.when_made,
@@ -551,13 +556,53 @@ function materialsFromText(text) {
   return MATERIAL_KEYWORDS.filter((m) => new RegExp(`\\b${escapeRegExp(m.toLowerCase())}\\b`).test(lower));
 }
 
-/** Meaningful words straight out of a title -- no AI, just stopwords and length limits. */
-function tagsFromTitle(title) {
-  const words = title
+/**
+ * Meaningful words straight out of the title and description -- no AI, just
+ * stopwords and length limits. `existing` tags are kept as-is and never
+ * duplicated; the result tops them up toward Etsy's 13-tag cap rather than
+ * replacing them, so re-running this after a manual tag never throws that
+ * tag away.
+ */
+function tagsFromText(text, existing = []) {
+  const have = new Set(existing.map((t) => t.toLowerCase()));
+  const words = text
     .split(/[^\p{L}\p{Nd}]+/u)
     .map((w) => w.trim().toLowerCase())
-    .filter((w) => w.length >= 3 && w.length <= 20 && !/^\d+$/.test(w) && !TAG_STOPWORDS.has(w));
-  return [...new Set(words)].slice(0, 13);
+    .filter((w) => w.length >= 3 && w.length <= 20 && !/^\d+$/.test(w) && !TAG_STOPWORDS.has(w) && !have.has(w));
+  const fresh = [...new Set(words)].slice(0, Math.max(0, 13 - existing.length));
+  return [...existing, ...fresh];
+}
+
+/**
+ * Category attributes, guessed with the same no-AI approach as materials and
+ * tags: for every property Etsy offers on this category, check whether one
+ * of its own possible value names shows up as a whole word in the title or
+ * description. A multi-valued property (e.g. "Occasion") can pick up several
+ * matches; a single-valued one keeps only the first. A property whose values
+ * are free text (nothing Etsy standardises, so nothing to match against) is
+ * left alone - same as the manual picker does, that one is typed by hand.
+ * Result is keyed by property_id, each value shaped {valueId, name} exactly
+ * as push() expects it in draft.attributes.
+ */
+async function attributesFromText(taxonomyId, text) {
+  const lower = text.toLowerCase();
+  let properties = [];
+  try {
+    const res = await research.taxonomyProperties(taxonomyId);
+    properties = res?.results ?? [];
+  } catch { return {}; }
+
+  const out = {};
+  for (const p of properties) {
+    const values = p.possible_values ?? [];
+    if (!values.length) continue;
+    const hits = values.filter((v) => v.name
+      && new RegExp(`\\b${escapeRegExp(String(v.name).toLowerCase())}\\b`).test(lower));
+    if (!hits.length) continue;
+    const picked = p.is_multivalued ? hits.slice(0, p.max_values_allowed || hits.length) : hits.slice(0, 1);
+    out[p.property_id] = picked.map((v) => ({ valueId: v.value_id, name: v.name }));
+  }
+  return out;
 }
 
 /**
@@ -577,7 +622,21 @@ async function autofillWithAI(merged, missing) {
   const patch = {};
   const filled = [];
   if (missing.materials && result.listing.materials?.length) { patch.materials = result.listing.materials; filled.push('materials'); }
-  if (missing.tags && result.listing.tags?.length) { patch.tags = result.listing.tags; filled.push('tags'); }
+  if (missing.tags) {
+    // Merge onto whatever tags already exist rather than replacing them, then
+    // top up with the same word-scan the no-AI path uses if the AI still
+    // leaves it short of Etsy's 13-tag cap.
+    const existing = merged.tags ?? [];
+    const have = new Set(existing.map((t) => t.toLowerCase()));
+    const fromAi = (result.listing.tags ?? []).filter((t) => !have.has(t.toLowerCase()));
+    const merged13 = [...existing, ...fromAi].slice(0, 13);
+    const text = `${merged.title || ''} ${merged.description || result.listing.description || ''}`;
+    const topped = merged13.length < 13 ? tagsFromText(text, merged13) : merged13;
+    if (topped.length > existing.length) {
+      patch.tags = topped;
+      filled.push(topped.length === 13 ? 'tags (all 13)' : `tags (${topped.length}/13)`);
+    }
+  }
   if (missing.description && result.listing.description?.trim()) { patch.description = result.listing.description; filled.push('description'); }
   if (missing.who_made && result.listing.who_made) { patch.who_made = result.listing.who_made; filled.push('who made it'); }
   if (missing.when_made && result.listing.when_made) { patch.when_made = result.listing.when_made; filled.push('when made'); }
@@ -610,13 +669,27 @@ async function autofillWithRules(merged, missing) {
     if (found.length) { patch.materials = found.slice(0, 13); filled.push('materials'); } else unresolved.push('materials');
   }
   if (missing.tags) {
-    const found = merged.title ? tagsFromTitle(merged.title) : [];
-    if (found.length) { patch.tags = found; filled.push('tags'); } else unresolved.push('tags');
+    const existing = merged.tags ?? [];
+    const found = tagsFromText(text, existing);
+    if (found.length > existing.length) {
+      patch.tags = found;
+      filled.push(found.length === 13 ? 'tags (all 13)' : `tags (${found.length}/13)`);
+    } else unresolved.push('tags');
   }
   if (missing.taxonomy_id) {
     const found = merged.title ? await research.searchTaxonomy(merged.title, { limit: 1 }) : null;
     if (found?.results?.[0]) { patch.taxonomy_id = found.results[0].id; filled.push(`category (${found.results[0].name})`); }
     else unresolved.push('category');
+  }
+  // Only once a category is settled - either already on the draft, or just
+  // resolved above in this same pass.
+  const taxonomyId = patch.taxonomy_id ?? merged.taxonomy_id;
+  if (missing.attributes && taxonomyId) {
+    const found = await attributesFromText(taxonomyId, text);
+    if (Object.keys(found).length) {
+      patch.attributes = { ...(merged.attributes ?? {}), ...found };
+      filled.push(`attributes (${Object.keys(found).length})`);
+    } else unresolved.push('attributes');
   }
   if (missing.who_made) { patch.who_made = 'i_did'; filled.push('who made it'); }
   if (missing.when_made) { patch.when_made = '2020_2026'; filled.push('when made'); }
@@ -714,6 +787,7 @@ export function preview(listingId) {
   if (!merged.who_made) problems.push('"Who made it" is required.');
   if (!merged.when_made) problems.push('"When was it made" is required.');
   if ((merged.tags ?? []).length > 13) problems.push(`${merged.tags.length} tags; Etsy allows 13.`);
+  else if ((merged.tags ?? []).length < 13) problems.push(`${(merged.tags ?? []).length}/13 tags filled - use all 13 before this goes to Etsy.`);
   if ((merged.tags ?? []).some((t) => t.length > 20)) problems.push('A tag is longer than 20 characters.');
   // Etsy: "Required when listing type is physical".
   const isPhysical = (merged.type ?? 'physical') === 'physical';

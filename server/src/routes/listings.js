@@ -84,6 +84,12 @@ router.delete('/:id/images/:imageId', asyncRoute(async (req, res) => {
   res.json(await listings.deleteImage(Number(req.params.id), Number(req.params.imageId)));
 }));
 
+/** Full display order for this listing's photos, as an ordered array of image ids. */
+router.put('/:id/images/reorder', asyncRoute(async (req, res) => {
+  required(req.body ?? {}, ['imageIds']);
+  res.json(await listings.reorderImages(Number(req.params.id), req.body.imageIds));
+}));
+
 router.get('/:id/variation-images', asyncRoute(async (req, res) => {
   res.json(await call('getListingVariationImages', { shop_id: requireShopId(), listing_id: Number(req.params.id) }));
 }));

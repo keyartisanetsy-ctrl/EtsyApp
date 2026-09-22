@@ -269,6 +269,20 @@ function ListingMedia({ listingId, images, videos, onChanged }) {
     } catch (err) { showError(err, 'Could not remove that'); } finally { setBusy(false); }
   };
 
+  /** Etsy has no per-image move - the whole new order goes to updateListing's
+   *  image_ids in one call. */
+  const moveImage = async (images_, index, dir) => {
+    const j = index + dir;
+    if (j < 0 || j >= images_.length) return;
+    setBusy(true);
+    try {
+      const order = images_.map((i) => i.id);
+      [order[index], order[j]] = [order[j], order[index]];
+      await api.put(`/listings/${listingId}/images/reorder`, { imageIds: order });
+      onChanged();
+    } catch (err) { showError(err, 'Could not reorder that'); } finally { setBusy(false); }
+  };
+
   const Row = ({ kind, items, max }) => {
     const kindPending = pending.filter((p) => p.kind === kind);
     const count = items.length + kindPending.length;
@@ -285,7 +299,7 @@ function ListingMedia({ listingId, images, videos, onChanged }) {
         </div>
         {count > 0 && (
           <div className="flex gap4 mt8" style={{ flexWrap: 'wrap' }}>
-            {items.map((it) => (
+            {items.map((it, index) => (
               <div key={it.id} style={{ position: 'relative' }}>
                 {kind === 'image'
                   ? <Thumb src={it.url} size="lg" />
@@ -293,6 +307,16 @@ function ListingMedia({ listingId, images, videos, onChanged }) {
                 <button type="button" className="btn xs" disabled={busy}
                         style={{ position: 'absolute', top: -6, right: -6, borderRadius: '50%', padding: '0 6px' }}
                         onClick={() => remove(kind, it.id)} aria-label="Remove">×</button>
+                {kind === 'image' && items.length > 1 && (
+                  <div className="flex gap4" style={{ position: 'absolute', bottom: -6, left: 0, right: 0, justifyContent: 'center' }}>
+                    <button type="button" className="btn xs" disabled={busy || index === 0}
+                            style={{ padding: '0 4px', opacity: index === 0 ? 0.3 : 1 }}
+                            onClick={() => moveImage(items, index, -1)} aria-label="Move earlier" title="Move earlier">◀</button>
+                    <button type="button" className="btn xs" disabled={busy || index === items.length - 1}
+                            style={{ padding: '0 4px', opacity: index === items.length - 1 ? 0.3 : 1 }}
+                            onClick={() => moveImage(items, index, 1)} aria-label="Move later" title="Move later">▶</button>
+                  </div>
+                )}
               </div>
             ))}
             {kindPending.map((p) => (

@@ -300,6 +300,20 @@ export async function uploadImage(listingId, { buffer, filename, mime, rank = 1,
   return res;
 }
 
+/**
+ * Reorder the photos already on a listing. Etsy has no per-image "move"
+ * endpoint - updateListing's image_ids takes the full order in one call.
+ * Its response is the bare ShopListing (no image data), so the local mirror
+ * is refreshed from getListingImages afterwards rather than assumed to match.
+ */
+export async function reorderImages(listingId, imageIds) {
+  const ids = (imageIds ?? []).map(Number).filter(Boolean);
+  if (!ids.length) throw badRequest('No image order was given.');
+  await updateListing(listingId, { image_ids: ids });
+  await refreshImages(listingId);
+  return { reordered: ids };
+}
+
 export async function refreshImages(listingId) {
   const res = await call('getListingImages', { listing_id: listingId });
   saveImages(listingId, res?.results || []);
