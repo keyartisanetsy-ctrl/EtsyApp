@@ -72,21 +72,27 @@ const trackingLink = (code) => (code
   ? (readSetting('tracking.url_template') || 'https://www.yuntrack.com/parcelTracking?id={code}').replace('{code}', encodeURIComponent(code))
   : null);
 
+/** The trailing numeric part of a Shopify GID, e.g. "gid://shopify/Order/123" -> "123". */
+const numericIdFrom = (gid) => {
+  const s = String(gid ?? '');
+  const n = s.split('/').pop();
+  return /^\d+$/.test(n) ? n : null;
+};
+
 /**
- * The catalogue. `group` only drives how the UI clusters the dropdown;
- * `hint` is what the AI matcher reads to understand a field it cannot infer
- * from the key alone.
+ * The catalogue every mapping dropdown draws from - split by channel because
+ * Etsy and Shopify are different platforms with different fields, not one
+ * catalogue with some entries that happen not to apply. `SHARED_FIELDS` holds
+ * only what genuinely means the same thing on both (money, address, rates,
+ * your own flags); everything platform-specific - order id, status, links,
+ * ad spend - has its own definition per channel, with its own correct label,
+ * so a Shopify mapping never offers or shows a field that says "Etsy".
+ *
+ * `group` only drives how the UI clusters the dropdown; `hint` is what the AI
+ * matcher reads to understand a field it cannot infer from the key alone.
  */
-export const SOURCE_FIELDS = [
+const SHARED_FIELDS = [
   // ---------------------------------------------------------------- order
-  { key: 'order.id', group: 'Order', label: 'Order ID (Etsy receipt id)', hint: 'The Etsy order/receipt number, digits only, e.g. 4166419738',
-    get: ({ order }) => String(order.receipt_id) },
-  { key: 'order.id_hash', group: 'Order', label: 'Order ID with a # in front (rarely wanted)',
-    hint: 'Only use if the sheet really wants #4166419738. The plain order.id is the normal choice.',
-    get: ({ order }) => `#${order.receipt_id}` },
-  { key: 'order.code', group: 'Order', label: 'Short order code (26-0709-01)',
-    hint: 'A short code built from the order date and its position that day. Every item of the same order shares it.',
-    get: ({ order }) => codeFor(order.receipt_id, { shopId: order.shop_id, createdTs: order.created_ts }) },
   { key: 'order.month', group: 'Order', label: 'Month of the order (2026 Eylül)',
     hint: 'The month the order arrived, Turkish, e.g. "2026 Eylül"',
     get: ({ order }) => monthLabelTr(order.created_ts) },
@@ -97,22 +103,12 @@ export const SOURCE_FIELDS = [
     get: ({ order }) => isoDate(order.created_ts) },
   { key: 'order.datetime', group: 'Order', label: 'Order date and time (ISO)', hint: 'Full ISO timestamp of the order',
     get: ({ order }) => iso(order.created_ts) },
-  { key: 'order.status', group: 'Order', label: 'Etsy status', hint: 'Etsy order status such as Paid, Completed, Open',
-    get: ({ order }) => clean(order.status) },
   { key: 'order.is_paid', group: 'Order', label: 'Paid?', hint: 'true/false checkbox for payment received',
     get: ({ order }) => !!order.was_paid },
   { key: 'order.is_shipped', group: 'Order', label: 'Shipped?', hint: 'true/false checkbox for dispatched',
     get: ({ order }) => !!order.was_shipped },
-  { key: 'order.is_gift', group: 'Order', label: 'Gift?', hint: 'true/false, buyer marked the order as a gift',
-    get: ({ order }) => !!order.is_gift },
-  { key: 'order.gift_message', group: 'Order', label: 'Gift message', hint: 'The gift note the buyer wrote',
-    get: ({ order }) => clean(order.gift_message) },
-  { key: 'order.buyer_message', group: 'Order', label: 'Buyer note / message', hint: 'Free-text note the buyer left with the order',
-    get: ({ order }) => clean(order.message_from_buyer) },
   { key: 'order.item_count', group: 'Order', label: 'Number of lines in the order', hint: 'How many distinct items this order contains',
     get: ({ items }) => items.length },
-  { key: 'order.etsy_url', group: 'Order', label: 'Etsy order link', hint: 'Deep link to this order in the Etsy seller dashboard',
-    get: ({ order }) => `https://www.etsy.com/your/orders/sold?order_id=${order.receipt_id}` },
 
   // --------------------------------------------------------------- totals
   { key: 'total.grand', group: 'Totals', label: 'Order total', hint: 'What the buyer paid in total, as a number',
@@ -131,20 +127,6 @@ export const SOURCE_FIELDS = [
   // ----------------------------------------------------------- buyer info
   { key: 'buyer.name', group: 'Buyer', label: 'Buyer full name', hint: 'Name on the shipping label',
     get: ({ order }) => clean(order.name) },
-  // Etsy fills buyer_email on some orders and leaves it null on others, but it
-  // sends payment_email in the same receipt - and it is the same person. Taking
-  // only the first was why this column arrived empty, so the plain "email"
-  // field now uses whichever one Etsy actually sent.
-  { key: 'buyer.email', group: 'Buyer', label: 'Buyer email', hint: 'The buyer\u2019s email - Etsy\u2019s buyer address, or the payment address when that is the one it sent',
-    get: ({ order }) => clean(order.buyer_email || order.payment_email) },
-  { key: 'buyer.email_buyer', group: 'Buyer', label: 'Buyer email (buyer field only)', hint: 'Strictly Etsy\u2019s buyer_email, blank when Etsy did not send one',
-    get: ({ order }) => clean(order.buyer_email) },
-  { key: 'buyer.email_payment', group: 'Buyer', label: 'Buyer email (payment field only)', hint: 'Strictly Etsy\u2019s payment_email',
-    get: ({ order }) => clean(order.payment_email) },
-  { key: 'buyer.email_source', group: 'Buyer', label: 'Which email field was used', hint: 'Says whether the address came from Etsy\u2019s buyer field, its payment field, or neither',
-    get: ({ order }) => (order.buyer_email ? 'buyer' : order.payment_email ? 'payment' : null) },
-  { key: 'buyer.user_id', group: 'Buyer', label: 'Buyer user id', hint: 'Etsy\u2019s numeric id for the buyer',
-    get: ({ order }) => order.buyer_user_id ?? null },
   { key: 'address.line1', group: 'Address', label: 'Street line 1', hint: 'First address line',
     get: ({ order }) => clean(order.first_line) },
   { key: 'address.line2', group: 'Address', label: 'Street line 2', hint: 'Second address line, often empty',
@@ -176,7 +158,7 @@ export const SOURCE_FIELDS = [
     get: ({ item, items, rowMode }) => (rowMode === 'item' ? (item?.quantity ?? null) : items.reduce((n, i) => n + (i.quantity || 0), 0)) },
   { key: 'item.price', group: 'Item', label: 'Unit price (one unit)', hint: 'What a single unit sold for. For the figure a price column normally wants, use the subtotal instead.',
     get: ({ item, rowMode }) => (rowMode === 'item' ? money(item?.price_amount, item?.price_divisor) : null) },
-  { key: 'item.line_subtotal', group: 'Item', label: 'Line subtotal (unit price \u00d7 quantity)',
+  { key: 'item.line_subtotal', group: 'Item', label: 'Line subtotal (unit price × quantity)',
     hint: 'What this line came to: the unit price times how many were bought.',
     get: ({ item, items, rowMode }) => {
       const lineOf = (i) => {
@@ -187,32 +169,8 @@ export const SOURCE_FIELDS = [
       const sum = items.reduce((n, i) => n + (lineOf(i) ?? 0), 0);
       return items.length ? Math.round(sum * 100) / 100 : null;
     } },
-  { key: 'item.variations', group: 'Item', label: 'Variant (what the buyer picked)',
-    hint: 'Only the chosen values, no option titles, e.g. "Silver / 8 US"',
-    get: ({ item, items, rowMode }) => (rowMode === 'item' ? variationValues(item ?? {}) : joinItems(items, variationValues, ' | ')) },
-  { key: 'item.variations_full', group: 'Item', label: 'Variant with option titles',
-    hint: 'The long form including the property names, e.g. "Colour: Silver / Ring size: 8 US"',
-    get: ({ item, items, rowMode }) => (rowMode === 'item' ? variationPairs(item ?? {}) : joinItems(items, variationPairs, ' | ')) },
   { key: 'item.image_url', group: 'Item', label: 'Product image URL', hint: 'Direct link to the listing photo',
     get: ({ item, items, rowMode }) => (rowMode === 'item' ? item?.image_url ?? null : joinItems(items, (i) => i.image_url, ' ')) },
-  { key: 'item.variant_image_url', group: 'Item', label: 'Variant image URL (the chosen option)',
-    hint: 'Photo Etsy has attached to the exact option the buyer chose. Empty when the listing has no per-variation photos.',
-    get: ({ item, items, rowMode }) => (rowMode === 'item'
-      ? imageForTransaction(item)
-      : joinItems(items, (i) => imageForTransaction(i), ' ')) },
-  { key: 'item.image_any', group: 'Item', label: 'Best available image URL',
-    hint: 'The variant photo when there is one, otherwise the listing photo. Use this if you just want a picture.',
-    get: ({ item, items, rowMode }) => {
-      const best = (i) => imageForTransaction(i) ?? i?.image_url ?? null;
-      return rowMode === 'item' ? best(item) : joinItems(items, best, ' ');
-    } },
-  { key: 'item.listing_id', group: 'Item', label: 'Etsy listing id', hint: 'Numeric id of the listing',
-    get: ({ item, rowMode }) => (rowMode === 'item' ? (item?.listing_id ?? null) : null) },
-  { key: 'item.etsy_link', group: 'Item', label: 'Etsy listing link', hint: 'Public etsy.com URL of the product',
-    get: ({ item, items, rowMode }) => {
-      const id = rowMode === 'item' ? item?.listing_id : items[0]?.listing_id;
-      return id ? `https://www.etsy.com/listing/${id}` : null;
-    } },
   { key: 'item.supply_link', group: 'Item', label: 'Supplier link (from SKU manager)', hint: 'The buying/dropshipping URL saved against this SKU',
     get: ({ item, items, rowMode }) => (rowMode === 'item' ? clean(item?.supply_link) : joinItems(items, (i) => i.supply_link, ' ')) },
   { key: 'item.supplier_name', group: 'Item', label: 'Supplier name', hint: 'Supplier saved against this SKU',
@@ -225,69 +183,11 @@ export const SOURCE_FIELDS = [
       ? clean(item?.variant_supply_link)
       : joinItems(items, (i) => i.variant_supply_link, ' ')) },
   { key: 'item.supply_link_any', group: 'Item', label: 'Supply link (variant, else main)',
-    hint: 'The variant supplier page when there is one, otherwise the main product page. Use this for a single "\u00dcr\u00fcn Tedarik Link" column.',
+    hint: 'The variant supplier page when there is one, otherwise the main product page. Use this for a single "Ürün Tedarik Link" column.',
     get: ({ item, items, rowMode }) => {
       const pick = (i) => i?.variant_supply_link || i?.supply_link || null;
       return rowMode === 'item' ? clean(pick(item)) : joinItems(items, pick, ' ');
     } },
-
-  // --------------------------------------------------- pictures of the item
-  // Three separate columns, because a sheet wants different things in each:
-  // the id to match rows on, the URL to look at, and the link to click.
-  { key: 'item.variant_image_id', group: 'Item images', label: 'Variant image id',
-    hint: 'Etsy\u2019s numeric id for the photo pinned to the chosen option. Stable, so it makes a good key.',
-    get: ({ item, items, rowMode }) => {
-      const idOf = (i) => resolveForTransaction(i)?.variant?.imageId ?? null;
-      return rowMode === 'item' ? idOf(item) : joinItems(items, idOf, ' ');
-    } },
-  { key: 'item.variant_image', group: 'Item images', label: 'Variant image (URL)',
-    hint: 'The photo for the exact option bought. Falls back to the listing\u2019s cover shot when the listing has no per-option photos.',
-    get: ({ item, items, rowMode }) => {
-      const pick = (i) => resolveForTransaction(i)?.best?.url ?? null;
-      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
-    } },
-  { key: 'item.variant_link', group: 'Item images', label: 'Variant link on Etsy',
-    hint: 'The listing URL pinned to this option, e.g. \u2026/listing/4447531240?variation0=6251766498',
-    get: ({ item, items, rowMode }) => (rowMode === 'item'
-      ? variantUrlForTransaction(item)
-      : joinItems(items, variantUrlForTransaction, ' ')) },
-  { key: 'item.first_image', group: 'Item images', label: 'First listing photo',
-    hint: 'The cover shot. This is what to use when a listing has no per-option photos.',
-    get: ({ item, items, rowMode }) => {
-      const pick = (i) => (i?.listing_id ? listingImages(i.listing_id)[0]?.url ?? null : null);
-      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
-    } },
-  { key: 'item.last_image', group: 'Item images', label: 'Last listing photo',
-    hint: 'The final photo, which on these listings is usually the size or layout chart.',
-    get: ({ item, items, rowMode }) => {
-      const pick = (i) => {
-        if (!i?.listing_id) return null;
-        const all = listingImages(i.listing_id);
-        return all.length > 1 ? all[all.length - 1].url : all[0]?.url ?? null;
-      };
-      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
-    } },
-  { key: 'item.first_last_image', group: 'Item images', label: 'First and last photo together',
-    hint: 'Both URLs in one cell, for a listing with no per-option photos. Airtable shows both as attachments.',
-    get: ({ item, items, rowMode }) => {
-      const pick = (i) => {
-        if (!i?.listing_id) return null;
-        const all = listingImages(i.listing_id);
-        if (!all.length) return null;
-        const ends = all.length > 1 ? [all[0].url, all[all.length - 1].url] : [all[0].url];
-        return ends.filter(Boolean).join(' ') || null;
-      };
-      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
-    } },
-  { key: 'item.all_images', group: 'Item images', label: 'Every listing photo',
-    hint: 'All the listing\u2019s photo URLs, space separated, in the order they appear on Etsy.',
-    get: ({ item, items, rowMode }) => {
-      const pick = (i) => (i?.listing_id ? listingImages(i.listing_id).map((x) => x.url).filter(Boolean).join(' ') || null : null);
-      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
-    } },
-  { key: 'item.image_count', group: 'Item images', label: 'How many photos',
-    hint: 'Number of photos on the listing, as a number',
-    get: ({ item, rowMode }) => (rowMode === 'item' && item?.listing_id ? listingImages(item.listing_id).length : null) },
 
   // -------------------------------------------------------------- parcels
   { key: 'tracking.code', group: 'Tracking', label: 'Tracking number', hint: 'Parcel tracking number',
@@ -316,33 +216,6 @@ export const SOURCE_FIELDS = [
   { key: 'tracking.supply_cost_usd', group: 'Tracking', label: 'Supply cost in USD',
     hint: 'The supply cost converted to USD at the rate of the order date',
     get: ({ order }) => round2(convert(order.supply_cost, order.supply_cost_currency || 'CNY', 'USD', isoDate(order.created_ts))) },
-
-  // ----------------------------------------------------------- offsite ads
-  // Etsy does not report which orders came from an offsite ad, so this
-  // follows the button you press on the order.
-  { key: 'order.offsite_ads', group: 'Offsite ads', label: 'Came from an offsite ad?',
-    hint: 'true/false. Whether you marked this order as having come from an Etsy Offsite Ad.',
-    get: ({ order }) => !!order.offsite_ads },
-  { key: 'order.offsite_ads_yesno', group: 'Offsite ads', label: 'Offsite ad (YES / empty)',
-    hint: 'Writes "YES" when the order came from an offsite ad and nothing when it did not - for a select column',
-    get: ({ order }) => (order.offsite_ads ? 'YES' : null) },
-  { key: 'order.offsite_ads_fee', group: 'Offsite ads', label: 'Offsite ads fee (order currency)',
-    hint: "Etsy's advertising fee on this order, in the order's own currency, capped at $100",
-    get: ({ order }) => offsiteFeeFor(order)?.fee ?? null },
-  { key: 'order.offsite_ads_fee_usd', group: 'Offsite ads', label: 'Offsite ads fee in USD',
-    hint: "Etsy's advertising fee on this order converted to USD at the order date, capped at $100",
-    get: ({ order }) => offsiteFeeFor(order)?.feeUsd ?? null },
-  { key: 'order.offsite_ads_rate', group: 'Offsite ads', label: 'Offsite ads rate (%)',
-    hint: 'The percentage this shop pays on offsite ad orders, 12 or 15',
-    get: ({ order }) => offsiteFeeFor(order)?.ratePercent ?? null },
-  { key: 'order.after_offsite_ads', group: 'Offsite ads', label: 'Order total after the offsite ads fee',
-    hint: 'The order total with the advertising fee already taken off, in the order currency',
-    get: ({ order }) => {
-      const fee = offsiteFeeFor(order);
-      const total = money(order.grandtotal_amount, order.grandtotal_divisor);
-      if (total === null) return null;
-      return round2(fee ? total - fee.fee : total);
-    } },
 
   // ------------------------------------------------- rates and conversions
   // Everything here uses the rate published for the order's own day (the last
@@ -390,11 +263,6 @@ export const SOURCE_FIELDS = [
     hint: 'The name this shop goes by in your sheets (KeyArtisann, KeyArtisanUS, CutieGiftsUS). '
       + 'This is what a shop/MAĞAZA column should be filled with, since it decides which view the row lands in.',
     get: ({ shop }) => clean(shop?.airtableName || shop?.shopName) },
-  { key: 'shop.name', group: 'Shop', label: 'Shop name exactly as Etsy has it',
-    hint: 'The shop name Etsy returns, which may be spelled differently from your Airtable option',
-    get: ({ shop }) => clean(shop?.shopName) },
-  { key: 'shop.id', group: 'Shop', label: 'Shop id', hint: 'Numeric Etsy shop id',
-    get: ({ shop }) => (shop?.shopId ?? null) },
 
   // ------------------------------------------------------- your own flags
   { key: 'flags.done', group: 'Your flags', label: 'Marked done?', hint: 'true/false, your own done tick in this app',
@@ -407,6 +275,218 @@ export const SOURCE_FIELDS = [
     get: ({ order }) => clean(order.notes) },
 ];
 
+const ETSY_ONLY_FIELDS = [
+  { key: 'order.id', group: 'Order', label: 'Order ID (Etsy receipt id)', hint: 'The Etsy order/receipt number, digits only, e.g. 4166419738',
+    get: ({ order }) => String(order.receipt_id) },
+  { key: 'order.id_hash', group: 'Order', label: 'Order ID with a # in front (rarely wanted)',
+    hint: 'Only use if the sheet really wants #4166419738. The plain order.id is the normal choice.',
+    get: ({ order }) => `#${order.receipt_id}` },
+  { key: 'order.code', group: 'Order', label: 'Short order code (26-0709-01)',
+    hint: 'A short code built from the order date and its position that day. Every item of the same order shares it.',
+    get: ({ order }) => codeFor(order.receipt_id, { shopId: order.shop_id, createdTs: order.created_ts }) },
+  { key: 'order.status', group: 'Order', label: 'Etsy status', hint: 'Etsy order status such as Paid, Completed, Open',
+    get: ({ order }) => clean(order.status) },
+  { key: 'order.is_gift', group: 'Order', label: 'Gift?', hint: 'true/false, buyer marked the order as a gift',
+    get: ({ order }) => !!order.is_gift },
+  { key: 'order.gift_message', group: 'Order', label: 'Gift message', hint: 'The gift note the buyer wrote',
+    get: ({ order }) => clean(order.gift_message) },
+  { key: 'order.buyer_message', group: 'Order', label: 'Buyer note / message', hint: 'Free-text note the buyer left with the order',
+    get: ({ order }) => clean(order.message_from_buyer) },
+  { key: 'order.etsy_url', group: 'Order', label: 'Etsy order link', hint: 'Deep link to this order in the Etsy seller dashboard',
+    get: ({ order }) => `https://www.etsy.com/your/orders/sold?order_id=${order.receipt_id}` },
+
+  // Etsy fills buyer_email on some orders and leaves it null on others, but it
+  // sends payment_email in the same receipt - and it is the same person. Taking
+  // only the first was why this column arrived empty, so the plain "email"
+  // field now uses whichever one Etsy actually sent.
+  { key: 'buyer.email', group: 'Buyer', label: 'Buyer email', hint: 'The buyer’s email - Etsy’s buyer address, or the payment address when that is the one it sent',
+    get: ({ order }) => clean(order.buyer_email || order.payment_email) },
+  { key: 'buyer.email_buyer', group: 'Buyer', label: 'Buyer email (buyer field only)', hint: 'Strictly Etsy’s buyer_email, blank when Etsy did not send one',
+    get: ({ order }) => clean(order.buyer_email) },
+  { key: 'buyer.email_payment', group: 'Buyer', label: 'Buyer email (payment field only)', hint: 'Strictly Etsy’s payment_email',
+    get: ({ order }) => clean(order.payment_email) },
+  { key: 'buyer.email_source', group: 'Buyer', label: 'Which email field was used', hint: 'Says whether the address came from Etsy’s buyer field, its payment field, or neither',
+    get: ({ order }) => (order.buyer_email ? 'buyer' : order.payment_email ? 'payment' : null) },
+  { key: 'buyer.user_id', group: 'Buyer', label: 'Buyer user id', hint: 'Etsy’s numeric id for the buyer',
+    get: ({ order }) => order.buyer_user_id ?? null },
+
+  { key: 'item.variations', group: 'Item', label: 'Variant (what the buyer picked)',
+    hint: 'Only the chosen values, no option titles, e.g. "Silver / 8 US"',
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? variationValues(item ?? {}) : joinItems(items, variationValues, ' | ')) },
+  { key: 'item.variations_full', group: 'Item', label: 'Variant with option titles',
+    hint: 'The long form including the property names, e.g. "Colour: Silver / Ring size: 8 US"',
+    get: ({ item, items, rowMode }) => (rowMode === 'item' ? variationPairs(item ?? {}) : joinItems(items, variationPairs, ' | ')) },
+  { key: 'item.variant_image_url', group: 'Item', label: 'Variant image URL (the chosen option)',
+    hint: 'Photo Etsy has attached to the exact option the buyer chose. Empty when the listing has no per-variation photos.',
+    get: ({ item, items, rowMode }) => (rowMode === 'item'
+      ? imageForTransaction(item)
+      : joinItems(items, (i) => imageForTransaction(i), ' ')) },
+  { key: 'item.image_any', group: 'Item', label: 'Best available image URL',
+    hint: 'The variant photo when there is one, otherwise the listing photo. Use this if you just want a picture.',
+    get: ({ item, items, rowMode }) => {
+      const best = (i) => imageForTransaction(i) ?? i?.image_url ?? null;
+      return rowMode === 'item' ? best(item) : joinItems(items, best, ' ');
+    } },
+  { key: 'item.listing_id', group: 'Item', label: 'Etsy listing id', hint: 'Numeric id of the listing',
+    get: ({ item, rowMode }) => (rowMode === 'item' ? (item?.listing_id ?? null) : null) },
+  { key: 'item.etsy_link', group: 'Item', label: 'Etsy listing link', hint: 'Public etsy.com URL of the product',
+    get: ({ item, items, rowMode }) => {
+      const id = rowMode === 'item' ? item?.listing_id : items[0]?.listing_id;
+      return id ? `https://www.etsy.com/listing/${id}` : null;
+    } },
+
+  // --------------------------------------------------- pictures of the item
+  // Three separate columns, because a sheet wants different things in each:
+  // the id to match rows on, the URL to look at, and the link to click.
+  { key: 'item.variant_image_id', group: 'Item images', label: 'Variant image id',
+    hint: 'Etsy’s numeric id for the photo pinned to the chosen option. Stable, so it makes a good key.',
+    get: ({ item, items, rowMode }) => {
+      const idOf = (i) => resolveForTransaction(i)?.variant?.imageId ?? null;
+      return rowMode === 'item' ? idOf(item) : joinItems(items, idOf, ' ');
+    } },
+  { key: 'item.variant_image', group: 'Item images', label: 'Variant image (URL)',
+    hint: 'The photo for the exact option bought. Falls back to the listing’s cover shot when the listing has no per-option photos.',
+    get: ({ item, items, rowMode }) => {
+      const pick = (i) => resolveForTransaction(i)?.best?.url ?? null;
+      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
+    } },
+  { key: 'item.variant_link', group: 'Item images', label: 'Variant link on Etsy',
+    hint: 'The listing URL pinned to this option, e.g. …/listing/4447531240?variation0=6251766498',
+    get: ({ item, items, rowMode }) => (rowMode === 'item'
+      ? variantUrlForTransaction(item)
+      : joinItems(items, variantUrlForTransaction, ' ')) },
+  { key: 'item.first_image', group: 'Item images', label: 'First listing photo',
+    hint: 'The cover shot. This is what to use when a listing has no per-option photos.',
+    get: ({ item, items, rowMode }) => {
+      const pick = (i) => (i?.listing_id ? listingImages(i.listing_id)[0]?.url ?? null : null);
+      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
+    } },
+  { key: 'item.last_image', group: 'Item images', label: 'Last listing photo',
+    hint: 'The final photo, which on these listings is usually the size or layout chart.',
+    get: ({ item, items, rowMode }) => {
+      const pick = (i) => {
+        if (!i?.listing_id) return null;
+        const all = listingImages(i.listing_id);
+        return all.length > 1 ? all[all.length - 1].url : all[0]?.url ?? null;
+      };
+      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
+    } },
+  { key: 'item.first_last_image', group: 'Item images', label: 'First and last photo together',
+    hint: 'Both URLs in one cell, for a listing with no per-option photos. Airtable shows both as attachments.',
+    get: ({ item, items, rowMode }) => {
+      const pick = (i) => {
+        if (!i?.listing_id) return null;
+        const all = listingImages(i.listing_id);
+        if (!all.length) return null;
+        const ends = all.length > 1 ? [all[0].url, all[all.length - 1].url] : [all[0].url];
+        return ends.filter(Boolean).join(' ') || null;
+      };
+      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
+    } },
+  { key: 'item.all_images', group: 'Item images', label: 'Every listing photo',
+    hint: 'All the listing’s photo URLs, space separated, in the order they appear on Etsy.',
+    get: ({ item, items, rowMode }) => {
+      const pick = (i) => (i?.listing_id ? listingImages(i.listing_id).map((x) => x.url).filter(Boolean).join(' ') || null : null);
+      return rowMode === 'item' ? pick(item) : joinItems(items, pick, ' ');
+    } },
+  { key: 'item.image_count', group: 'Item images', label: 'How many photos',
+    hint: 'Number of photos on the listing, as a number',
+    get: ({ item, rowMode }) => (rowMode === 'item' && item?.listing_id ? listingImages(item.listing_id).length : null) },
+
+  // ----------------------------------------------------------- offsite ads
+  // Etsy does not report which orders came from an offsite ad, so this
+  // follows the button you press on the order.
+  { key: 'order.offsite_ads', group: 'Offsite ads', label: 'Came from an offsite ad?',
+    hint: 'true/false. Whether you marked this order as having come from an Etsy Offsite Ad.',
+    get: ({ order }) => !!order.offsite_ads },
+  { key: 'order.offsite_ads_yesno', group: 'Offsite ads', label: 'Offsite ad (YES / empty)',
+    hint: 'Writes "YES" when the order came from an offsite ad and nothing when it did not - for a select column',
+    get: ({ order }) => (order.offsite_ads ? 'YES' : null) },
+  { key: 'order.offsite_ads_fee', group: 'Offsite ads', label: 'Offsite ads fee (order currency)',
+    hint: "Etsy's advertising fee on this order, in the order's own currency, capped at $100",
+    get: ({ order }) => offsiteFeeFor(order)?.fee ?? null },
+  { key: 'order.offsite_ads_fee_usd', group: 'Offsite ads', label: 'Offsite ads fee in USD',
+    hint: "Etsy's advertising fee on this order converted to USD at the order date, capped at $100",
+    get: ({ order }) => offsiteFeeFor(order)?.feeUsd ?? null },
+  { key: 'order.offsite_ads_rate', group: 'Offsite ads', label: 'Offsite ads rate (%)',
+    hint: 'The percentage this shop pays on offsite ad orders, 12 or 15',
+    get: ({ order }) => offsiteFeeFor(order)?.ratePercent ?? null },
+  { key: 'order.after_offsite_ads', group: 'Offsite ads', label: 'Order total after the offsite ads fee',
+    hint: 'The order total with the advertising fee already taken off, in the order currency',
+    get: ({ order }) => {
+      const fee = offsiteFeeFor(order);
+      const total = money(order.grandtotal_amount, order.grandtotal_divisor);
+      if (total === null) return null;
+      return round2(fee ? total - fee.fee : total);
+    } },
+
+  { key: 'shop.name', group: 'Shop', label: 'Shop name exactly as Etsy has it',
+    hint: 'The shop name Etsy returns, which may be spelled differently from your Airtable option',
+    get: ({ shop }) => clean(shop?.shopName) },
+  { key: 'shop.id', group: 'Shop', label: 'Shop id', hint: 'Numeric Etsy shop id',
+    get: ({ shop }) => (shop?.shopId ?? null) },
+];
+
+const SHOPIFY_ONLY_FIELDS = [
+  // Shopify's own order.name ("#2385") is what a seller actually recognises -
+  // the internal id this app stores it under (a GID) is not something anyone
+  // types into a sheet.
+  { key: 'order.id', group: 'Order', label: 'Order ID (Shopify order number, #2385)',
+    hint: 'Shopify’s own order number exactly as it shows it, e.g. #2385',
+    get: ({ order }) => clean(order.order_name) || `#${numericIdFrom(order.receipt_id)}` },
+  { key: 'order.id_numeric', group: 'Order', label: 'Order ID (numeric, no #)',
+    hint: 'Just the digits, for a sheet that wants a plain number instead of "#2385"',
+    get: ({ order }) => numericIdFrom(order.receipt_id) },
+  { key: 'order.financial_status', group: 'Order', label: 'Payment status', hint: 'Shopify’s payment status: paid, pending, refunded, ...',
+    get: ({ order }) => clean(order.financial_status) },
+  { key: 'order.fulfillment_status', group: 'Order', label: 'Fulfillment status', hint: 'Shopify’s fulfillment status: fulfilled, unfulfilled, partial, ...',
+    get: ({ order }) => clean(order.fulfillment_status) },
+  { key: 'order.note', group: 'Order', label: 'Order note', hint: 'The note on the order in Shopify',
+    get: ({ order }) => clean(order.note) },
+  { key: 'order.tags', group: 'Order', label: 'Order tags', hint: 'Comma-separated tags Shopify has on the order',
+    get: ({ order }) => clean(order.tags) },
+  { key: 'order.discount_codes', group: 'Order', label: 'Discount code(s) used', hint: 'The discount code(s) applied at checkout, if any',
+    get: ({ order }) => { try { return (JSON.parse(order.discount_codes || '[]') || []).join(', ') || null; } catch { return null; } } },
+  { key: 'order.risk_level', group: 'Order', label: 'Fraud risk level', hint: 'Shopify’s own fraud/chargeback read on the order: low, medium, high',
+    get: ({ order }) => clean(order.risk_level) },
+  { key: 'order.source_name', group: 'Order', label: 'Order source', hint: 'Where the order came from: web, pos, an app name, or "shop" for Shopify’s own Shop app',
+    get: ({ order }) => clean(order.source_name) },
+  { key: 'order.shopify_url', group: 'Order', label: 'Shopify admin order link', hint: 'Deep link to this order in the Shopify admin',
+    get: ({ order, shop }) => (shop?.shopDomain ? `https://${shop.shopDomain}/admin/orders/${numericIdFrom(order.receipt_id)}` : null) },
+
+  { key: 'buyer.email', group: 'Buyer', label: 'Buyer email', hint: 'The buyer’s email address',
+    get: ({ order }) => clean(order.buyer_email) },
+  { key: 'buyer.phone', group: 'Buyer', label: 'Buyer phone', hint: 'Phone number on the order, when Shopify has one',
+    get: ({ order }) => clean(order.phone) },
+
+  { key: 'item.product_id', group: 'Item', label: 'Shopify product id', hint: 'Numeric id of the product',
+    get: ({ item, rowMode }) => (rowMode === 'item' ? numericIdFrom(item?.listing_id) : null) },
+  { key: 'item.shopify_link', group: 'Item', label: 'Shopify admin product link', hint: 'Deep link to this product in the Shopify admin',
+    get: ({ item, items, rowMode, shop }) => {
+      if (!shop?.shopDomain) return null;
+      const id = rowMode === 'item' ? item?.listing_id : items[0]?.listing_id;
+      const numeric = numericIdFrom(id);
+      return numeric ? `https://${shop.shopDomain}/admin/products/${numeric}` : null;
+    } },
+
+  { key: 'shop.name', group: 'Shop', label: 'Store name exactly as Shopify has it',
+    hint: 'The store name Shopify returns, which may be spelled differently from your Airtable option',
+    get: ({ shop }) => clean(shop?.shopName) },
+  { key: 'shop.domain', group: 'Shop', label: 'Store domain (yourstore.myshopify.com)', hint: 'The store’s myshopify.com domain',
+    get: ({ shop }) => clean(shop?.shopDomain) },
+];
+
+export const ETSY_SOURCE_FIELDS = [...SHARED_FIELDS, ...ETSY_ONLY_FIELDS];
+export const SHOPIFY_SOURCE_FIELDS = [...SHARED_FIELDS, ...SHOPIFY_ONLY_FIELDS];
+
+/** The right catalogue for a channel. Falls back to Etsy's for an unknown channel. */
+export const sourceFieldsFor = (channel) => (channel === 'shopify' ? SHOPIFY_SOURCE_FIELDS : ETSY_SOURCE_FIELDS);
+
+// Kept for anything that still wants "every field that exists anywhere" -
+// resolveSource() below, which just needs to look a key up regardless of
+// which channel offered it in the UI.
+export const SOURCE_FIELDS = [...SHARED_FIELDS, ...ETSY_ONLY_FIELDS, ...SHOPIFY_ONLY_FIELDS];
+
 /**
  * When one order becomes several rows (one per item), most of what it carries
  * belongs to the order, not to the line: the money, the address, the parcel.
@@ -417,9 +497,9 @@ export const SOURCE_FIELDS = [
  * `item.*` field is written on the first row only.
  */
 export const REPEATED_ON_EVERY_ROW = new Set([
-  'order.id', 'order.id_hash', 'order.code',
+  'order.id', 'order.id_hash', 'order.code', 'order.id_numeric',
   'order.date', 'order.datetime', 'order.month', 'order.month_en',
-  'shop.airtable_name', 'shop.name', 'shop.id',
+  'shop.airtable_name', 'shop.name', 'shop.id', 'shop.domain',
 ]);
 
 /** True when this source should only be filled on an order's first row. */
@@ -437,11 +517,21 @@ export const isVariantImageSource = (key) => String(key).startsWith('item.varian
   || key === 'item.image_any' || key === 'item.first_image' || key === 'item.last_image'
   || key === 'item.first_last_image' || key === 'item.all_images' || key === 'item.image_count';
 
-export const SOURCE_BY_KEY = new Map(SOURCE_FIELDS.map((f) => [f.key, f]));
+// Etsy and Shopify each define their own 'order.id'/'shop.name'/'buyer.email'
+// etc. (same key, different meaning and resolver per channel), so the lookup
+// used to resolve a saved mapping must be built per channel - a single global
+// map would let whichever channel's array comes last silently win for every
+// destination, Etsy included.
+const SOURCE_BY_KEY_ETSY = new Map(ETSY_SOURCE_FIELDS.map((f) => [f.key, f]));
+const SOURCE_BY_KEY_SHOPIFY = new Map(SHOPIFY_SOURCE_FIELDS.map((f) => [f.key, f]));
+/** @deprecated kept for any caller not yet passing a channel; resolves the Etsy definition for a shared key. */
+export const SOURCE_BY_KEY = SOURCE_BY_KEY_ETSY;
 
-/** Resolve one source key against a row context. Unknown keys resolve to null. */
-export function resolveSource(key, ctx) {
-  const def = SOURCE_BY_KEY.get(key);
+export const sourceByKeyFor = (channel) => (channel === 'shopify' ? SOURCE_BY_KEY_SHOPIFY : SOURCE_BY_KEY_ETSY);
+
+/** Resolve one source key against a row context, for the given channel. Unknown keys resolve to null. */
+export function resolveSource(key, ctx, channel = 'etsy') {
+  const def = sourceByKeyFor(channel).get(key);
   if (!def) return null;
   try { return def.get(ctx); } catch { return null; }
 }
@@ -508,6 +598,7 @@ function loadShopifyRows(orderIds, { rowMode = 'item' } = {}) {
   // shop info below is resolved per order, straight from the row that owns it.
   const orders = db.prepare(`
     SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency,
+           f.supplier_order_ref,
            sa.shop_domain AS sa_domain, sa.shop_name AS sa_shop_name, sa.airtable_name AS sa_airtable_name
     FROM shopify_orders o
     LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
@@ -539,11 +630,16 @@ function loadShopifyRows(orderIds, { rowMode = 'item' } = {}) {
   for (const o of orders) {
     const shop = {
       shopId: o.shop_id, shopName: o.sa_shop_name || o.sa_domain,
-      airtableName: o.sa_airtable_name || o.sa_domain,
+      airtableName: o.sa_airtable_name || o.sa_domain, shopDomain: o.sa_domain,
     };
     const lines = byOrder.get(o.order_id) ?? [];
     const order = {
       receipt_id: o.order_id, shop_id: o.shop_id, status: (o.financial_status || '').toLowerCase(),
+      financial_status: o.financial_status, fulfillment_status: o.fulfillment_status,
+      // Shopify's own "#1001" the seller actually recognises, distinct from
+      // `name` below (the buyer's name) and from the GID in `receipt_id`.
+      order_name: o.name, phone: o.phone, note: o.note,
+      tags: o.tags, discount_codes: o.discount_codes, risk_level: o.risk_level, source_name: o.source_name,
       name: o.customer_name, buyer_email: o.email, first_line: o.ship_address1, second_line: o.ship_address2,
       city: o.ship_city, state: o.ship_province, zip: o.ship_zip, country_iso: o.ship_country,
       formatted_address: [o.ship_address1, o.ship_address2, o.ship_city, o.ship_province, o.ship_zip, o.ship_country].filter(Boolean).join(', '),
@@ -555,7 +651,7 @@ function loadShopifyRows(orderIds, { rowMode = 'item' } = {}) {
       created_ts: toUnixSeconds(o.created_at_shopify), tracking_code: o.tracking_number,
       carrier_name: o.tracking_company, tracking_status: null,
       shipping_cost: o.shipping_cost, shipping_cost_currency: o.shipping_cost_currency,
-      is_done: 0, supplier_ordered: 0, supplier_order_ref: null, notes: null,
+      is_done: 0, supplier_ordered: 0, supplier_order_ref: o.supplier_order_ref || null, notes: null,
     };
     if (rowMode === 'order' || lines.length === 0) {
       rows.push({ receiptId: o.order_id, transactionId: null, order, item: lines[0] ?? null, items: lines, shop, rowMode: 'order' });
@@ -633,5 +729,5 @@ export function sampleValues(rowMode = 'item', channel = 'etsy') {
   if (!latest) return {};
   const [row] = loadRows([latest.receipt_id], { rowMode, channel });
   if (!row) return {};
-  return Object.fromEntries(SOURCE_FIELDS.map((f) => [f.key, resolveSource(f.key, row)]));
+  return Object.fromEntries(sourceFieldsFor(channel).map((f) => [f.key, resolveSource(f.key, row, channel)]));
 }

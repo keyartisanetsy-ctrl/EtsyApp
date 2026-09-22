@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { asyncRoute } from '../lib/http.js';
 import * as client from '../airtable/client.js';
 import * as service from '../services/airtable.js';
-import { SOURCE_FIELDS } from '../airtable/fields.js';
+import { sourceFieldsFor } from '../airtable/fields.js';
 import { readSetting, writeSetting } from '../services/settings.js';
 import { maskSecret } from '../lib/crypto.js';
 import { currentShop } from '../etsy/shop.js';
@@ -48,9 +48,11 @@ router.get('/bases/:baseId/tables', asyncRoute(async (req, res) => {
   res.json(await client.listTables(req.params.baseId));
 }));
 
-/** The fields this app can send, for the mapping dropdowns. */
+/** The fields this app can send, for the mapping dropdowns - scoped to the channel, so a Shopify
+ * destination never sees an Etsy-only field (or the reverse). */
 router.get('/source-fields', asyncRoute(async (req, res) => {
-  res.json(SOURCE_FIELDS.map(({ key, label, group, hint }) => ({ key, label, group, hint })));
+  const channel = req.query.channel === 'shopify' ? 'shopify' : 'etsy';
+  res.json(sourceFieldsFor(channel).map(({ key, label, group, hint }) => ({ key, label, group, hint })));
 }));
 
 // ------------------------------------------------------------ destinations

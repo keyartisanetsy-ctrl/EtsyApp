@@ -28,7 +28,6 @@ export default function Airtable() {
   const toast = useToast();
   const showError = useErrorToast();
   const status = useAsync(() => api.get('/airtable/status'), []);
-  const sources = useAsync(() => api.get('/airtable/source-fields'), []);
 
   const [token, setToken] = useState('');
   const [testing, setTesting] = useState(false);
@@ -171,7 +170,6 @@ export default function Airtable() {
       {editing && (
         <DestinationEditor
           destination={editing.isNew ? null : editing}
-          sources={sources.data ?? []}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); status.reload(); }}
         />
@@ -244,7 +242,7 @@ function DuplicateDestinationModal({ destination, onClose, onDone }) {
 
 /* ------------------------------------------------------------------ editor */
 
-function DestinationEditor({ destination, sources, onClose, onSaved }) {
+function DestinationEditor({ destination, onClose, onSaved }) {
   const toast = useToast();
   const showError = useErrorToast();
 
@@ -253,6 +251,10 @@ function DestinationEditor({ destination, sources, onClose, onSaved }) {
   const [tableId, setTableId] = useState(destination?.tableId ?? '');
   const [viewId, setViewId] = useState(destination?.viewId ?? '');
   const [channel, setChannel] = useState(destination?.channel ?? 'etsy');
+  // Etsy and Shopify each have their own field catalogue - re-fetched whenever
+  // the sheet family changes, so switching it here immediately swaps what
+  // "Filled with" can offer instead of leaving the other channel's fields showing.
+  const sources = useAsync(() => api.get('/airtable/source-fields', { channel }), [channel]);
   const [rowMode, setRowMode] = useState(destination?.rowMode ?? 'item');
   const [fieldMap, setFieldMap] = useState(destination?.fieldMap ?? []);
   const [constants, setConstants] = useState(destination?.constants ?? {});
@@ -281,6 +283,16 @@ function DestinationEditor({ destination, sources, onClose, onSaved }) {
       .catch((err) => showError(err, 'Could not read that base'))
       .finally(() => setLoadingTables(false));
   }, [baseId]);
+
+  // Switching the sheet family swaps the whole field catalogue - drop any
+  // mapping entries that pointed at a field the new channel does not have
+  // (e.g. an Etsy-only field left over from before the switch) rather than
+  // silently keeping a mapping the destination can no longer resolve.
+  useEffect(() => {
+    if (!sources.data) return;
+    const valid = new Set(sources.data.map((s) => s.key));
+    setFieldMap((m) => m.filter((e) => valid.has(e.source)));
+  }, [sources.data]);
 
   const setTarget = (targetName, value) => {
     if (value === '') {
@@ -336,7 +348,7 @@ function DestinationEditor({ destination, sources, onClose, onSaved }) {
     } catch (err) { showError(err, 'Could not save'); } finally { setSaving(false); }
   };
 
-  const sourceGroups = groupSources(sources);
+  const sourceGroups = groupSources(sources.data ?? []);
   const mapByTarget = new Map(fieldMap.map((e) => [e.target, e]));
   const mergeable = (table?.fields ?? []).filter((f) => f.writable && MERGEABLE.has(f.type));
 

@@ -11,8 +11,14 @@
  * Both return the same shape, so the UI, the preview and the push engine treat
  * an AI mapping exactly like a hand-made one - it stays visible and editable
  * instead of being a black box.
+ *
+ * Etsy and Shopify each have their own field catalogue (see fields.js) - a
+ * key like "order.id" or "shop.name" means something different, and resolves
+ * differently, on each. The synonym table mirrors that split, so a Shopify
+ * destination is never matched against an Etsy-only field like order.code or
+ * item.etsy_link.
  */
-import { SOURCE_FIELDS, sampleValues } from './fields.js';
+import { sourceFieldsFor, sampleValues } from './fields.js';
 import { run, parseJsonish } from '../services/ai/index.js';
 import { badRequest } from '../lib/errors.js';
 
@@ -22,24 +28,22 @@ export function normalise(text) {
     .toLocaleLowerCase('tr')
     .replace(/ı/g, 'i').replace(/ş/g, 's').replace(/ğ/g, 'g')
     .replace(/ü/g, 'u').replace(/ö/g, 'o').replace(/ç/g, 'c')
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 }
 
 /**
- * Airtable column name (normalised) -> source key. Covers the English and
- * Turkish column names these sheets actually use.
+ * Airtable column name (normalised) -> source key, for whatever means the
+ * same thing on both channels (dates, money, the address block, tracking).
  */
-const SYNONYMS = {
+const COMMON_SYNONYMS = {
   'order id': 'order.id',
   'order no': 'order.id',
   'order number': 'order.id',
   'siparis id': 'order.id',
   'siparis no': 'order.id',
   'siparis numarasi': 'order.id',
-  'etsy order number': 'order.id',
-  'receipt id': 'order.id',
 
   'sale date': 'order.date',
   'order date': 'order.date',
@@ -54,18 +58,6 @@ const SYNONYMS = {
   alici: 'buyer.name',
   'buyer name': 'buyer.name',
   'customer name': 'buyer.name',
-
-  email: 'buyer.email',
-  'e mail': 'buyer.email',
-  mail: 'buyer.email',
-  eposta: 'buyer.email',
-  'e posta': 'buyer.email',
-  'buyer email': 'buyer.email',
-  'musteri mail': 'buyer.email',
-  'musteri email': 'buyer.email',
-  'alici mail': 'buyer.email',
-  'mail adresi': 'buyer.email',
-  'email adresi': 'buyer.email',
 
   street: 'address.street',
   address: 'address.street',
@@ -94,16 +86,13 @@ const SYNONYMS = {
   postcode: 'address.zip',
   'postal code': 'address.zip',
   'posta kodu': 'address.zip',
+  'ship zip': 'address.zip',
 
   country: 'address.country',
   countrycode: 'address.country',
   'country code': 'address.country',
   'ship country': 'address.country',
   ulke: 'address.country',
-
-  phone: 'buyer.phone',
-  'phone number': 'buyer.phone',
-  telefon: 'buyer.phone',
 
   quantity: 'item.quantity',
   qty: 'item.quantity',
@@ -114,6 +103,7 @@ const SYNONYMS = {
   total: 'total.grand',
   toplam: 'total.grand',
   tutar: 'total.grand',
+  revenue: 'total.grand',
 
   // A price column on these sheets means the order subtotal, not the unit
   // price - that is what the shop reconciles against, so every wording of
@@ -130,45 +120,22 @@ const SYNONYMS = {
   'ara tutar': 'total.subtotal',
   'urun tutari': 'total.subtotal',
 
-  // The columns in these sheets, by the names they actually carry.
-  'baslik ilk 40': 'item.title40',
-  'baslik ilk40': 'item.title40',
-  'etsy link': 'item.etsy_link',
-  'etsy linki': 'item.etsy_link',
-  'urun linki': 'item.etsy_link',
-  'urun tedarik link': 'item.supply_link_any',
-  'urun tedarik linki': 'item.supply_link_any',
-  'tedarik link': 'item.supply_link_any',
-  'tedarik linki': 'item.supply_link_any',
-  'varyant tedarik link': 'item.variant_supply_link',
-  'varyant gorsel id': 'item.variant_image_id',
-  'varyant gorsel': 'item.variant_image',
-  'varyant gorseli': 'item.variant_image',
-  'variant image': 'item.variant_image',
-  'variant image id': 'item.variant_image_id',
-  'varyant link': 'item.variant_link',
-  'variants': 'item.variations',
-  'varyant': 'item.variations',
-  'varyantlar': 'item.variations',
-  'ilk gorsel': 'item.first_image',
-  'son gorsel': 'item.last_image',
-  'first image': 'item.first_image',
-  'last image': 'item.last_image',
-  'urun gorseli': 'item.image_any',
-  'gorsel': 'item.image_any',
-  'image': 'item.image_any',
-  'image url': 'item.image_any',
-
-  // The address block, as the sheets name it.
-  'sokak': 'address.street',
-  'ship zip': 'address.zip',
-  revenue: 'total.grand',
   'shipping cost': 'total.shipping',
   kargo: 'total.shipping',
   tax: 'total.tax',
   vergi: 'total.tax',
   currency: 'total.currency',
   'para birimi': 'total.currency',
+
+  'baslik ilk 40': 'item.title40',
+  'baslik ilk40': 'item.title40',
+  'title 40': 'item.title40',
+  'urun tedarik link': 'item.supply_link_any',
+  'urun tedarik linki': 'item.supply_link_any',
+  'tedarik link': 'item.supply_link_any',
+  'tedarik linki': 'item.supply_link_any',
+  'varyant tedarik link': 'item.variant_supply_link',
+  sokak: 'address.street',
 
   sku: 'item.sku',
   'stok kodu': 'item.sku',
@@ -178,22 +145,14 @@ const SYNONYMS = {
   'product title': 'item.title',
   urun: 'item.title',
   'urun adi': 'item.title',
-  'title 40': 'item.title40',
 
-  variant: 'item.variations',
-  variation: 'item.variations',
-  'variant name': 'item.variations',
-  varyasyon: 'item.variations',
-  'varyant adi': 'item.variations',
-
-  'image link': 'item.image_any',
-  'urun gorsel': 'item.image_any',
-  'product image': 'item.image_any',
-
-  'product url': 'item.etsy_link',
-  'marketplace url': 'item.etsy_link',
-  'listing link': 'item.etsy_link',
-  'order link': 'order.etsy_url',
+  'image link': 'item.image_url',
+  'urun gorsel': 'item.image_url',
+  'urun gorseli': 'item.image_url',
+  'product image': 'item.image_url',
+  gorsel: 'item.image_url',
+  image: 'item.image_url',
+  'image url': 'item.image_url',
 
   // These two now resolve to the variant link when one is saved, falling back
   // to the main product link, which is what a single "tedarik link" column wants.
@@ -216,19 +175,6 @@ const SYNONYMS = {
   carrier: 'tracking.carrier',
   'shipping company': 'tracking.carrier',
 
-  'offsite ads var mi': 'order.offsite_ads_yesno',
-  'offsite ads': 'order.offsite_ads_yesno',
-  'offsite ad': 'order.offsite_ads_yesno',
-  'offsite ads fee': 'order.offsite_ads_fee',
-  'offsite ads ucreti': 'order.offsite_ads_fee',
-  'reklam maliyeti': 'order.offsite_ads_fee',
-
-  kod: 'order.code',
-  code: 'order.code',
-  'siparis kodu': 'order.code',
-  'paket kodu': 'order.code',
-  'order code': 'order.code',
-
   month: 'order.month',
   ay: 'order.month',
 
@@ -247,22 +193,86 @@ const SYNONYMS = {
   'kargo masrafi': 'tracking.shipping_cost',
   'shipping cost usd': 'tracking.shipping_cost_usd',
 
-  // A variant-image column should never come back empty just because the
-  // listing has no per-option photo, so these use the falling-back source.
-  'varyant gorsel link': 'item.variant_image',
-  'variant image url': 'item.variant_image',
-
   // A shop column decides which per-shop view a row shows up in, so it is fed
-  // by the name the sheet uses rather than Etsy's own spelling.
+  // by the name the sheet uses rather than either platform's own spelling.
   magaza: 'shop.airtable_name',
   shop: 'shop.airtable_name',
   store: 'shop.airtable_name',
   'shop name': 'shop.airtable_name',
-  'etsy magaza': 'shop.airtable_name',
   'magaza adi': 'shop.airtable_name',
   channel: 'shop.airtable_name',
 
-  // "NOT 1" is what the buyer wrote; "NOT 2" is your own note.
+  'not 2': 'flags.notes',
+  notes: 'flags.notes',
+  'note section': 'flags.notes',
+  'kendi notum': 'flags.notes',
+};
+
+/** Synonyms that only make sense - and only resolve - on an Etsy destination. */
+const ETSY_SYNONYMS = {
+  'etsy order number': 'order.id',
+  'receipt id': 'order.id',
+
+  email: 'buyer.email',
+  'e mail': 'buyer.email',
+  mail: 'buyer.email',
+  eposta: 'buyer.email',
+  'e posta': 'buyer.email',
+  'buyer email': 'buyer.email',
+  'musteri mail': 'buyer.email',
+  'musteri email': 'buyer.email',
+  'alici mail': 'buyer.email',
+  'mail adresi': 'buyer.email',
+  'email adresi': 'buyer.email',
+
+  'etsy link': 'item.etsy_link',
+  'etsy linki': 'item.etsy_link',
+  'urun linki': 'item.etsy_link',
+  'product url': 'item.etsy_link',
+  'marketplace url': 'item.etsy_link',
+  'listing link': 'item.etsy_link',
+  'order link': 'order.etsy_url',
+
+  'varyant gorsel id': 'item.variant_image_id',
+  'varyant gorsel': 'item.variant_image',
+  'varyant gorseli': 'item.variant_image',
+  'variant image': 'item.variant_image',
+  'variant image id': 'item.variant_image_id',
+  'varyant gorsel link': 'item.variant_image',
+  'variant image url': 'item.variant_image',
+  'varyant link': 'item.variant_link',
+  variants: 'item.variations',
+  varyant: 'item.variations',
+  varyantlar: 'item.variations',
+  variant: 'item.variations',
+  variation: 'item.variations',
+  'variant name': 'item.variations',
+  varyasyon: 'item.variations',
+  'varyant adi': 'item.variations',
+  'ilk gorsel': 'item.first_image',
+  'son gorsel': 'item.last_image',
+  'first image': 'item.first_image',
+  'last image': 'item.last_image',
+
+  'offsite ads var mi': 'order.offsite_ads_yesno',
+  'offsite ads': 'order.offsite_ads_yesno',
+  'offsite ad': 'order.offsite_ads_yesno',
+  'offsite ads fee': 'order.offsite_ads_fee',
+  'offsite ads ucreti': 'order.offsite_ads_fee',
+  'reklam maliyeti': 'order.offsite_ads_fee',
+
+  kod: 'order.code',
+  code: 'order.code',
+  'siparis kodu': 'order.code',
+  'paket kodu': 'order.code',
+  'order code': 'order.code',
+
+  'gift message': 'order.gift_message',
+  status: 'order.status',
+  durum: 'order.status',
+  'siparis durum': 'order.status',
+
+  // "NOT 1" is what the buyer wrote on the order.
   'not 1': 'order.buyer_message',
   note: 'order.buyer_message',
   not: 'order.buyer_message',
@@ -270,15 +280,72 @@ const SYNONYMS = {
   'musteri mesaji': 'order.buyer_message',
   'musteri notu': 'order.buyer_message',
   message: 'order.buyer_message',
-  'not 2': 'flags.notes',
-  notes: 'flags.notes',
-  'note section': 'flags.notes',
-  'kendi notum': 'flags.notes',
-  'gift message': 'order.gift_message',
-  status: 'order.status',
-  durum: 'order.status',
-  'siparis durum': 'order.status',
+
+  'etsy magaza': 'shop.airtable_name',
 };
+
+/** Synonyms that only make sense - and only resolve - on a Shopify destination. */
+const SHOPIFY_SYNONYMS = {
+  'order name': 'order.id',
+  'shopify order number': 'order.id',
+
+  email: 'buyer.email',
+  'e mail': 'buyer.email',
+  mail: 'buyer.email',
+  eposta: 'buyer.email',
+  'e posta': 'buyer.email',
+  'buyer email': 'buyer.email',
+  'musteri mail': 'buyer.email',
+  'musteri email': 'buyer.email',
+  'alici mail': 'buyer.email',
+  'mail adresi': 'buyer.email',
+  'email adresi': 'buyer.email',
+
+  phone: 'buyer.phone',
+  'phone number': 'buyer.phone',
+  telefon: 'buyer.phone',
+
+  'product url': 'item.shopify_link',
+  'marketplace url': 'item.shopify_link',
+  'listing link': 'item.shopify_link',
+  'shopify link': 'item.shopify_link',
+  'order link': 'order.shopify_url',
+  'shopify order link': 'order.shopify_url',
+
+  'payment status': 'order.financial_status',
+  status: 'order.financial_status',
+  durum: 'order.financial_status',
+  'siparis durum': 'order.financial_status',
+  'odeme durumu': 'order.financial_status',
+  'fulfillment status': 'order.fulfillment_status',
+  'teslimat durumu': 'order.fulfillment_status',
+  'kargo durumu': 'order.fulfillment_status',
+
+  tags: 'order.tags',
+  etiketler: 'order.tags',
+  'discount code': 'order.discount_codes',
+  'discount codes': 'order.discount_codes',
+  'indirim kodu': 'order.discount_codes',
+  'risk level': 'order.risk_level',
+  'risk seviyesi': 'order.risk_level',
+  source: 'order.source_name',
+  'order source': 'order.source_name',
+  'siparis kaynagi': 'order.source_name',
+
+  // Shopify's own note field on the order.
+  'not 1': 'order.note',
+  note: 'order.note',
+  not: 'order.note',
+  'buyer note': 'order.note',
+  'musteri mesaji': 'order.note',
+  'musteri notu': 'order.note',
+  'siparis notu': 'order.note',
+  message: 'order.note',
+};
+
+const synonymsFor = (channel) => (channel === 'shopify'
+  ? { ...COMMON_SYNONYMS, ...SHOPIFY_SYNONYMS }
+  : { ...COMMON_SYNONYMS, ...ETSY_SYNONYMS });
 
 const tokens = (text) => normalise(text).split(' ').filter(Boolean);
 
@@ -296,7 +363,9 @@ function overlap(a, b) {
  * Deterministic mapping. Returns one entry per writable Airtable field it is
  * reasonably sure about, each carrying why it matched so the UI can show it.
  */
-export function matchByName(fields = []) {
+export function matchByName(fields = [], channel = 'etsy') {
+  const synonyms = synonymsFor(channel);
+  const sourceFields = sourceFieldsFor(channel);
   const map = [];
   const unmatched = [];
   // A guessed match may claim a source once. Exact synonym hits may repeat,
@@ -309,15 +378,15 @@ export function matchByName(fields = []) {
     const key = normalise(field.name);
 
     // 1. straight synonym hit
-    let source = SYNONYMS[key] ?? null;
+    let source = synonyms[key] ?? null;
     let confidence = source ? 'high' : null;
     let why = source ? `"${field.name}" is a known name for this field` : null;
 
     // 2. synonym hit after dropping a trailing "copy"/number Airtable adds
     if (!source) {
       const trimmed = key.replace(/\b(copy|copy copy|[0-9]+)\b/g, '').trim();
-      if (trimmed && SYNONYMS[trimmed]) {
-        source = SYNONYMS[trimmed];
+      if (trimmed && synonyms[trimmed]) {
+        source = synonyms[trimmed];
         confidence = 'medium';
         why = `matched "${field.name}" to "${trimmed}"`;
       }
@@ -326,7 +395,7 @@ export function matchByName(fields = []) {
     // 3. best token overlap against the catalogue's labels
     if (!source) {
       let best = { score: 0, key: null, label: null };
-      for (const candidate of SOURCE_FIELDS) {
+      for (const candidate of sourceFields) {
         const score = Math.max(overlap(field.name, candidate.label), overlap(field.name, candidate.key.split('.').pop()));
         if (score > best.score) best = { score, key: candidate.key, label: candidate.label };
       }
@@ -337,7 +406,7 @@ export function matchByName(fields = []) {
       }
     }
 
-    const known = source && SOURCE_FIELDS.some((f) => f.key === source);
+    const known = source && sourceFields.some((f) => f.key === source);
     const alreadyTaken = confidence !== 'high' && claimed.has(source);
     if (known && !alreadyTaken) {
       claimed.add(source);
@@ -382,6 +451,7 @@ export async function matchByAi({ table, fields = [], provider, shopName, rowMod
   const writable = fields.filter((f) => f.writable);
   if (!writable.length) throw badRequest('That table has no writable columns.');
 
+  const sourceFields = sourceFieldsFor(channel);
   const samples = sampleValues(rowMode, channel);
   const context = {
     airtableTable: table,
@@ -390,7 +460,7 @@ export async function matchByAi({ table, fields = [], provider, shopName, rowMod
       type: f.type,
       ...(f.choices?.length ? { existingOptions: f.choices.slice(0, 12) } : {}),
     })),
-    sourceFields: SOURCE_FIELDS.map((f) => ({
+    sourceFields: sourceFields.map((f) => ({
       key: f.key,
       means: f.hint,
       sample: samples[f.key] ?? null,
@@ -412,7 +482,7 @@ export async function matchByAi({ table, fields = [], provider, shopName, rowMod
   if (!parsed) throw badRequest('The AI did not return a usable mapping. Try again, or map the fields by name.');
 
   const validNames = new Set(writable.map((f) => f.name));
-  const validSources = new Set(SOURCE_FIELDS.map((f) => f.key));
+  const validSources = new Set(sourceFields.map((f) => f.key));
   const mergeable = new Set(writable
     .filter((f) => ['singleLineText', 'multilineText', 'number', 'currency', 'percent', 'singleSelect', 'multipleSelects', 'date', 'dateTime', 'autoNumber', 'email', 'url', 'phoneNumber']
       .includes(f.type))
@@ -455,7 +525,7 @@ export async function matchByAi({ table, fields = [], provider, shopName, rowMod
  */
 export function suggestMergeFields(map = [], fields = []) {
   const byName = new Map(fields.map((f) => [f.name, f]));
-  const orderish = map.filter((m) => m.source === 'order.id' || m.source === 'order.id_hash');
+  const orderish = map.filter((m) => m.source === 'order.id' || m.source === 'order.id_hash' || m.source === 'order.id_numeric');
   return orderish
     .filter((m) => byName.get(m.target) && !['multipleRecordLinks', 'multipleAttachments', 'checkbox'].includes(byName.get(m.target).type))
     .map((m) => m.target)

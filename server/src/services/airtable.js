@@ -15,7 +15,7 @@ import { activeShopifyShopId } from '../shopify/shop.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 import * as at from '../airtable/client.js';
-import { loadRows, resolveSource, SOURCE_FIELDS, isOrderLevel, isVariantImageSource } from '../airtable/fields.js';
+import { loadRows, resolveSource, sourceFieldsFor, isOrderLevel, isVariantImageSource } from '../airtable/fields.js';
 import { matchByName, matchByAi, suggestMergeFields } from '../airtable/mapping.js';
 import { ensureRates } from './fx.js';
 import { syncForReceipts } from './variantimages.js';
@@ -352,7 +352,7 @@ export async function buildRecords(destination, receiptIds, { table: known = nul
         continue;
       }
 
-      const raw = resolveSource(entry.source, row);
+      const raw = resolveSource(entry.source, row, destination.channel);
       const out = coerce(raw, field, { createLinks: destination.createLinks });
       if (out.skip) {
         if (out.reason) skipped.push(`${entry.target}: ${out.reason}`);
@@ -592,7 +592,7 @@ export async function proposeMapping({ baseId, tableId, mode = 'name', provider,
   const result = mode === 'ai'
     ? await matchByAi({ table: table.name, fields: table.fields, provider,
       shopName: shop?.airtableName || shop?.shopName, rowMode, channel })
-    : matchByName(table.fields);
+    : matchByName(table.fields, channel);
 
   const mergeFields = result.mergeFields?.length ? result.mergeFields : suggestMergeFields(result.map, table.fields);
 
@@ -600,6 +600,6 @@ export async function proposeMapping({ baseId, tableId, mode = 'name', provider,
     ...result,
     mergeFields,
     table: { id: table.id, name: table.name, fields: table.fields },
-    sourceFields: SOURCE_FIELDS.map(({ key, label, group, hint }) => ({ key, label, group, hint })),
+    sourceFields: sourceFieldsFor(channel).map(({ key, label, group, hint }) => ({ key, label, group, hint })),
   };
 }
