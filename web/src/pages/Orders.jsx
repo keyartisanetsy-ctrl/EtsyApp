@@ -270,8 +270,8 @@ export default function Orders() {
                       )}
                     </div>
                   </td>
-                  <td><SupplyCell order={o} /></td>
-                  <td><WarehouseCell order={o} /></td>
+                  <td><SupplyCell order={o} channel="etsy" onChanged={refreshAll} /></td>
+                  <td><WarehouseCell order={o} channel="etsy" onChanged={refreshAll} /></td>
                   <td><button className="btn xs" onClick={() => setDetailId(o.receiptId)}>Open</button></td>
                 </tr>
               ))}

@@ -108,35 +108,57 @@ export function listOrders({
            s.tracking_code, s.carrier_name, s.pushed_to_etsy,
            t.status AS tracking_status, t.days_since_move, t.is_stale, t.alert_reason,
            t.last_event_text, t.last_event_at, COALESCE(t.alert_ack,0) AS alert_ack,
-           (SELECT COUNT(*) FROM receipt_transactions x WHERE x.receipt_id = r.receipt_id) AS item_count,
-           -- One representative supply link and warehouse photo for the list
-           -- preview - the first item (by transaction id) that has one, plus
-           -- how many of the order's items actually have one, so a multi-item
-           -- order does not silently claim coverage it does not have.
-           (SELECT COALESCE(NULLIF(m.variant_supply_link,''), NULLIF(m.supply_link,''))
-              FROM receipt_transactions x LEFT JOIN sku_meta m ON m.sku = x.sku AND m.shop_id IS r.shop_id AND x.sku <> ''
-              WHERE x.receipt_id = r.receipt_id AND COALESCE(NULLIF(m.variant_supply_link,''), NULLIF(m.supply_link,'')) IS NOT NULL
-              ORDER BY x.transaction_id LIMIT 1) AS supply_link,
-           (SELECT COUNT(*) FROM receipt_transactions x LEFT JOIN sku_meta m ON m.sku = x.sku AND m.shop_id IS r.shop_id AND x.sku <> ''
-              WHERE x.receipt_id = r.receipt_id AND (COALESCE(m.variant_supply_link,'') <> '' OR COALESCE(m.supply_link,'') <> '')) AS items_with_supply_link,
-           (SELECT x.warehouse_photo_id FROM receipt_transactions x
-              WHERE x.receipt_id = r.receipt_id AND x.warehouse_photo_id IS NOT NULL ORDER BY x.transaction_id LIMIT 1) AS warehouse_photo_id,
-           (SELECT COUNT(*) FROM receipt_transactions x
-              WHERE x.receipt_id = r.receipt_id AND x.warehouse_photo_id IS NOT NULL) AS items_with_photo
+           (SELECT COUNT(*) FROM receipt_transactions x WHERE x.receipt_id = r.receipt_id) AS item_count
     ${base} ORDER BY ${orderBy} ${order} LIMIT ? OFFSET ?`).all(...params, limit, offset);
 
   const total = db.prepare(`SELECT COUNT(*) AS c ${base}`).get(...params).c;
+  const supplyPreview = loadSupplyPreview(db, activeShopId(), rows.map((r) => r.receipt_id));
 
   return {
     total, limit, offset,
     // The currency the shop reports in, so the list can put a converted figure
     // under a lira total without every row asking the server what it is.
     reportingCurrency: reportingCurrency(),
-    rows: rows.map(orderSummary),
+    rows: rows.map((r) => orderSummary(r, supplyPreview.get(r.receipt_id))),
   };
 }
 
-function orderSummary(r) {
+/**
+ * Per-order preview of the supply chain side of an order, for the list: which
+ * item to show (and edit) a supply link and a warehouse photo against, plus
+ * how many of the order's items actually have one so a multi-item order does
+ * not silently claim coverage it does not have.
+ *
+ * The item shown is the first one (by transaction id) that actually has a
+ * link/photo, so the preview never shows a value that came from some other
+ * item than the one the inline editor then targets. When nothing is set yet,
+ * the very first item of the order is the edit target, so "add" always has
+ * somewhere to go.
+ */
+function loadSupplyPreview(db, shopId, receiptIds) {
+  const map = new Map();
+  if (!receiptIds.length) return map;
+  const holes = receiptIds.map(() => '?').join(',');
+  const items = db.prepare(`
+    SELECT x.receipt_id, x.transaction_id, x.sku, x.warehouse_photo_id,
+           COALESCE(NULLIF(m.variant_supply_link,''), NULLIF(m.supply_link,'')) AS supply_link
+    FROM receipt_transactions x
+    LEFT JOIN sku_meta m ON m.sku = x.sku AND m.shop_id IS ? AND x.sku <> ''
+    WHERE x.receipt_id IN (${holes})
+    ORDER BY x.transaction_id`).all(shopId, ...receiptIds);
+
+  for (const it of items) {
+    if (!map.has(it.receipt_id)) map.set(it.receipt_id, { firstItem: it, linkItem: null, linkCount: 0, photoItem: null, photoCount: 0 });
+    const entry = map.get(it.receipt_id);
+    if (it.supply_link) { entry.linkCount += 1; if (!entry.linkItem) entry.linkItem = it; }
+    if (it.warehouse_photo_id) { entry.photoCount += 1; if (!entry.photoItem) entry.photoItem = it; }
+  }
+  return map;
+}
+
+function orderSummary(r, preview) {
+  const linkItem = preview?.linkItem ?? preview?.firstItem ?? null;
+  const photoItem = preview?.photoItem ?? preview?.firstItem ?? null;
   return {
     receiptId: r.receipt_id,
     name: r.name,
@@ -178,11 +200,16 @@ function orderSummary(r) {
     supplyTrackingNumber: r.supply_tracking_number || '',
     notes: r.notes || '',
     // Preview of what the Items tab holds, so the list does not need opening
-    // just to see whether the supply chain side of an order is covered.
-    supplyLink: r.supply_link || null,
-    itemsWithSupplyLink: r.items_with_supply_link || 0,
-    warehousePhotoUrl: r.warehouse_photo_id ? `/api/ai/attachments/${r.warehouse_photo_id}` : null,
-    itemsWithPhoto: r.items_with_photo || 0,
+    // just to see - or change - whether the supply chain side of an order is
+    // covered. Each carries the item (transaction id + sku) the value belongs
+    // to, so an inline edit on the list writes to exactly the item shown.
+    supplyLink: linkItem?.supply_link || null,
+    supplyLinkTransactionId: linkItem?.transaction_id ?? null,
+    supplyLinkSku: linkItem?.sku || null,
+    itemsWithSupplyLink: preview?.linkCount || 0,
+    warehousePhotoUrl: photoItem?.warehouse_photo_id ? `/api/ai/attachments/${photoItem.warehouse_photo_id}` : null,
+    warehousePhotoTransactionId: photoItem?.transaction_id ?? null,
+    itemsWithPhoto: preview?.photoCount || 0,
     // tracking
     trackingCode: r.tracking_code || null,
     trackingUrl: r.tracking_code ? trackingUrl(r.tracking_code) : null,

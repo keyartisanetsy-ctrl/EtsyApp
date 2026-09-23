@@ -437,8 +437,8 @@ function OrdersPanel() {
                     ? <span className="badge green" title={`Sent ${fmtDateTime(Date.parse(o.airtablePushedAt) / 1000)}`}>✓</span>
                     : <span className="muted small">—</span>}
                 </td>
-                <td><SupplyCell order={o} /></td>
-                <td><WarehouseCell order={o} /></td>
+                <td><SupplyCell order={o} channel="shopify" onChanged={reload} /></td>
+                <td><WarehouseCell order={o} channel="shopify" onChanged={reload} /></td>
                 <td><button className="btn xs" onClick={() => setDetail(o.orderId)}>Open</button></td>
               </tr>
             ))}

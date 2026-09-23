@@ -143,17 +143,30 @@ export async function updateVariants(productId, changes = {}) {
   return { productId, updated: updated.length, variants: updated };
 }
 
-/** Supply link / supplier for a Shopify SKU, the same idea as sku_meta for Etsy. */
-export function saveVariantMeta(sku, { supplyLink, supplierName, supplyCurrency, notes } = {}) {
+/**
+ * Supply link / supplier for a Shopify SKU, the same idea as sku_meta for
+ * Etsy. Merges onto whatever is already saved - a caller that only ever
+ * touches one field (the Orders list inline editor sends just `supplyLink`)
+ * must not blank out the others.
+ */
+export function saveVariantMeta(sku, meta = {}) {
   const shopId = requireShopifyShopId();
   if (!sku) throw badRequest('This variation has no SKU yet. Set one first.');
-  getDb().prepare(`
+  const db = getDb();
+  const existing = db.prepare('SELECT * FROM shopify_variant_meta WHERE shop_id = ? AND sku = ?').get(shopId, sku) || {};
+  const merged = {
+    supply_link: meta.supplyLink ?? existing.supply_link ?? '',
+    supplier_name: meta.supplierName ?? existing.supplier_name ?? '',
+    supply_currency: meta.supplyCurrency ?? existing.supply_currency ?? 'CNY',
+    notes: meta.notes ?? existing.notes ?? '',
+  };
+  db.prepare(`
     INSERT INTO shopify_variant_meta (shop_id, sku, supply_link, supplier_name, supply_currency, notes, updated_at)
     VALUES (?,?,?,?,?,?, datetime('now'))
     ON CONFLICT(shop_id, sku) DO UPDATE SET supply_link=excluded.supply_link, supplier_name=excluded.supplier_name,
       supply_currency=excluded.supply_currency, notes=excluded.notes, updated_at=excluded.updated_at`)
-    .run(shopId, sku, supplyLink ?? '', supplierName ?? '', supplyCurrency ?? 'CNY', notes ?? '');
-  return getDb().prepare('SELECT * FROM shopify_variant_meta WHERE shop_id = ? AND sku = ?').get(shopId, sku);
+    .run(shopId, sku, merged.supply_link, merged.supplier_name, merged.supply_currency, merged.notes);
+  return db.prepare('SELECT * FROM shopify_variant_meta WHERE shop_id = ? AND sku = ?').get(shopId, sku);
 }
 
 // --------------------------------------------------------------- orders
@@ -169,21 +182,7 @@ export function listOrders({ search = '', limit = 100, offset = 0 } = {}) {
   const rows = db.prepare(`
     SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
            f.supplier_order_ref, f.supply_tracking_number, al.airtable_pushed_at,
-           (SELECT COUNT(*) FROM shopify_order_line_items x WHERE x.order_id = o.order_id) AS item_count,
-           -- Same list-preview idea as the Etsy orders list: the first item's
-           -- supply link and warehouse photo, plus how many items actually
-           -- have one, so a multi-item order does not overclaim coverage.
-           (SELECT m.supply_link FROM shopify_order_line_items x
-              LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND m.shop_id = o.shop_id AND x.sku <> ''
-              WHERE x.order_id = o.order_id AND COALESCE(m.supply_link,'') <> ''
-              ORDER BY x.line_item_id LIMIT 1) AS supply_link,
-           (SELECT COUNT(*) FROM shopify_order_line_items x
-              LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND m.shop_id = o.shop_id AND x.sku <> ''
-              WHERE x.order_id = o.order_id AND COALESCE(m.supply_link,'') <> '') AS items_with_supply_link,
-           (SELECT x.warehouse_photo_id FROM shopify_order_line_items x
-              WHERE x.order_id = o.order_id AND x.warehouse_photo_id IS NOT NULL ORDER BY x.line_item_id LIMIT 1) AS warehouse_photo_id,
-           (SELECT COUNT(*) FROM shopify_order_line_items x
-              WHERE x.order_id = o.order_id AND x.warehouse_photo_id IS NOT NULL) AS items_with_photo
+           (SELECT COUNT(*) FROM shopify_order_line_items x WHERE x.order_id = o.order_id) AS item_count
     FROM shopify_orders o
     LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
     LEFT JOIN (SELECT receipt_id, MAX(last_pushed_at) AS airtable_pushed_at
@@ -193,14 +192,45 @@ export function listOrders({ search = '', limit = 100, offset = 0 } = {}) {
     LIMIT ? OFFSET ?`).all(...params, limit, offset);
 
   const total = db.prepare(`SELECT COUNT(*) AS c FROM shopify_orders o ${clause}`).get(...params).c;
+  const supplyPreview = loadSupplyPreview(db, shopId, rows.map((r) => r.order_id));
 
   return {
     total, limit, offset,
-    rows: rows.map((r) => shapeOrder(r)),
+    rows: rows.map((r) => shapeOrder(r, supplyPreview.get(r.order_id))),
   };
 }
 
-function shapeOrder(r) {
+/**
+ * Same idea as the Etsy orders list: which item to show (and edit) a supply
+ * link and a warehouse photo against, plus how many of the order's items
+ * actually have one. The item shown is the first one that actually has a
+ * link/photo, so the preview and the inline editor it feeds always agree on
+ * which item they are talking about; with nothing set yet, the very first
+ * item of the order is the edit target, so "add" always has somewhere to go.
+ */
+function loadSupplyPreview(db, shopId, orderIds) {
+  const map = new Map();
+  if (!orderIds.length) return map;
+  const holes = orderIds.map(() => '?').join(',');
+  const items = db.prepare(`
+    SELECT x.order_id, x.line_item_id, x.sku, x.warehouse_photo_id, m.supply_link
+    FROM shopify_order_line_items x
+    LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND m.shop_id = ? AND x.sku <> ''
+    WHERE x.order_id IN (${holes})
+    ORDER BY x.line_item_id`).all(shopId, ...orderIds);
+
+  for (const it of items) {
+    if (!map.has(it.order_id)) map.set(it.order_id, { firstItem: it, linkItem: null, linkCount: 0, photoItem: null, photoCount: 0 });
+    const entry = map.get(it.order_id);
+    if (it.supply_link) { entry.linkCount += 1; if (!entry.linkItem) entry.linkItem = it; }
+    if (it.warehouse_photo_id) { entry.photoCount += 1; if (!entry.photoItem) entry.photoItem = it; }
+  }
+  return map;
+}
+
+function shapeOrder(r, preview) {
+  const linkItem = preview?.linkItem ?? preview?.firstItem ?? null;
+  const photoItem = preview?.photoItem ?? preview?.firstItem ?? null;
   return {
     orderId: r.order_id, name: r.name, email: r.email, phone: r.phone,
     financialStatus: r.financial_status, fulfillmentStatus: r.fulfillment_status, currency: r.currency,
@@ -214,10 +244,17 @@ function shapeOrder(r) {
     pushedAt: r.pushed_at || null,
     supplierOrderRef: r.supplier_order_ref || '',
     supplyTrackingNumber: r.supply_tracking_number || '',
-    supplyLink: r.supply_link || null,
-    itemsWithSupplyLink: r.items_with_supply_link || 0,
-    warehousePhotoUrl: r.warehouse_photo_id ? `/api/ai/attachments/${r.warehouse_photo_id}` : null,
-    itemsWithPhoto: r.items_with_photo || 0,
+    // Preview of what the Items tab holds, so the list does not need opening
+    // just to see - or change - whether the supply chain side of an order is
+    // covered. Each carries the item (line item id + sku) the value belongs
+    // to, so an inline edit on the list writes to exactly the item shown.
+    supplyLink: linkItem?.supply_link || null,
+    supplyLinkLineItemId: linkItem?.line_item_id ?? null,
+    supplyLinkSku: linkItem?.sku || null,
+    itemsWithSupplyLink: preview?.linkCount || 0,
+    warehousePhotoUrl: photoItem?.warehouse_photo_id ? `/api/ai/attachments/${photoItem.warehouse_photo_id}` : null,
+    warehousePhotoLineItemId: photoItem?.line_item_id ?? null,
+    itemsWithPhoto: preview?.photoCount || 0,
     discountCodes: parse(r.discount_codes, []),
     riskLevel: r.risk_level || null,
     sourceName: r.source_name || null,
