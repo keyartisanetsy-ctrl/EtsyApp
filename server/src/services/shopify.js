@@ -169,7 +169,21 @@ export function listOrders({ search = '', limit = 100, offset = 0 } = {}) {
   const rows = db.prepare(`
     SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
            f.supplier_order_ref, f.supply_tracking_number, al.airtable_pushed_at,
-           (SELECT COUNT(*) FROM shopify_order_line_items x WHERE x.order_id = o.order_id) AS item_count
+           (SELECT COUNT(*) FROM shopify_order_line_items x WHERE x.order_id = o.order_id) AS item_count,
+           -- Same list-preview idea as the Etsy orders list: the first item's
+           -- supply link and warehouse photo, plus how many items actually
+           -- have one, so a multi-item order does not overclaim coverage.
+           (SELECT m.supply_link FROM shopify_order_line_items x
+              LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND m.shop_id = o.shop_id AND x.sku <> ''
+              WHERE x.order_id = o.order_id AND COALESCE(m.supply_link,'') <> ''
+              ORDER BY x.line_item_id LIMIT 1) AS supply_link,
+           (SELECT COUNT(*) FROM shopify_order_line_items x
+              LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND m.shop_id = o.shop_id AND x.sku <> ''
+              WHERE x.order_id = o.order_id AND COALESCE(m.supply_link,'') <> '') AS items_with_supply_link,
+           (SELECT x.warehouse_photo_id FROM shopify_order_line_items x
+              WHERE x.order_id = o.order_id AND x.warehouse_photo_id IS NOT NULL ORDER BY x.line_item_id LIMIT 1) AS warehouse_photo_id,
+           (SELECT COUNT(*) FROM shopify_order_line_items x
+              WHERE x.order_id = o.order_id AND x.warehouse_photo_id IS NOT NULL) AS items_with_photo
     FROM shopify_orders o
     LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
     LEFT JOIN (SELECT receipt_id, MAX(last_pushed_at) AS airtable_pushed_at
@@ -200,6 +214,10 @@ function shapeOrder(r) {
     pushedAt: r.pushed_at || null,
     supplierOrderRef: r.supplier_order_ref || '',
     supplyTrackingNumber: r.supply_tracking_number || '',
+    supplyLink: r.supply_link || null,
+    itemsWithSupplyLink: r.items_with_supply_link || 0,
+    warehousePhotoUrl: r.warehouse_photo_id ? `/api/ai/attachments/${r.warehouse_photo_id}` : null,
+    itemsWithPhoto: r.items_with_photo || 0,
     discountCodes: parse(r.discount_codes, []),
     riskLevel: r.risk_level || null,
     sourceName: r.source_name || null,
@@ -220,10 +238,17 @@ export function getOrder(orderId) {
                FROM airtable_links GROUP BY receipt_id) al ON al.receipt_id = o.order_id
     WHERE o.order_id = ? AND o.shop_id = ?`).get(orderId, shopId);
   if (!o) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
-  const items = db.prepare('SELECT * FROM shopify_order_line_items WHERE order_id = ?').all(orderId).map((i) => ({
+  const items = db.prepare(`
+    SELECT x.*, m.supply_link, m.supplier_name
+    FROM shopify_order_line_items x
+    LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND m.shop_id = ? AND x.sku <> ''
+    WHERE x.order_id = ?`).all(shopId, orderId).map((i) => ({
     lineItemId: i.line_item_id, productId: i.product_id, variantId: i.variant_id, sku: i.sku || '',
     title: i.title, variantTitle: i.variant_title || '', quantity: i.quantity,
     price: i.price_amount, currency: i.currency, imageUrl: i.image_url,
+    // The supplier's page for this SKU, from the SKUs & variations tab -
+    // Shopify keeps one link per SKU, unlike Etsy's separate main/variant links.
+    supplyLink: i.supply_link || '', supplierName: i.supplier_name || '',
     // A photo taken at the warehouse, held next to this same item's own
     // picture - same idea as receipt_transactions on the Etsy side.
     warehousePhotoId: i.warehouse_photo_id || null,

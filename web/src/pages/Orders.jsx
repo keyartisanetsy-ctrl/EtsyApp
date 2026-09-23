@@ -9,6 +9,7 @@ import {
 } from '../components/ui.jsx';
 import { SendToAirtable } from './Airtable.jsx';
 import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
+import { SupplyCell, WarehouseCell } from '../components/OrderSupplyPreview.jsx';
 import MessagePreviewModal from '../components/MessagePreview.jsx';
 import MessageTemplatesModal from '../components/MessageTemplates.jsx';
 
@@ -211,6 +212,8 @@ export default function Orders() {
                 <SortTh label="Total" field="total" sort={sort} dir={dir} onSort={(f, d) => { setSort(f); setDir(d); }} className="right" />
                 <th>Tracking</th>
                 <th>Parcel</th>
+                <th title="Supplier link, order number and inbound tracking number">Supply</th>
+                <th title="Photo taken at the warehouse, next to the item's own listing photo">Warehouse</th>
                 <th className="col-tight" />
               </tr>
             </thead>
@@ -267,6 +270,8 @@ export default function Orders() {
                       )}
                     </div>
                   </td>
+                  <td><SupplyCell order={o} /></td>
+                  <td><WarehouseCell order={o} /></td>
                   <td><button className="btn xs" onClick={() => setDetailId(o.receiptId)}>Open</button></td>
                 </tr>
               ))}

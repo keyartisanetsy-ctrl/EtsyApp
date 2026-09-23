@@ -8,6 +8,7 @@ import {
 import { SendToAirtable } from './Airtable.jsx';
 import StockCheckCell from '../components/StockCheck.jsx';
 import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
+import { SupplyCell, WarehouseCell } from '../components/OrderSupplyPreview.jsx';
 
 /**
  * Shopify: connect a store, mirror its products/variants and orders, edit
@@ -414,7 +415,10 @@ function OrdersPanel() {
                           onChange={() => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.orderId)))} />
               </th>
               <th>Order</th><th>Buyer</th><th>Financial</th><th>Fulfillment</th>
-              <th className="num">Total</th><th className="right">Shipping cost</th><th>Tracking</th><th>Airtable</th><th className="col-tight" />
+              <th className="num">Total</th><th className="right">Shipping cost</th><th>Tracking</th><th>Airtable</th>
+              <th title="Supplier link, order number and inbound tracking number">Supply</th>
+              <th title="Photo taken at the warehouse, next to the item's own listing photo">Warehouse</th>
+              <th className="col-tight" />
             </tr>
           </thead>
           <tbody>
@@ -433,6 +437,8 @@ function OrdersPanel() {
                     ? <span className="badge green" title={`Sent ${fmtDateTime(Date.parse(o.airtablePushedAt) / 1000)}`}>✓</span>
                     : <span className="muted small">—</span>}
                 </td>
+                <td><SupplyCell order={o} /></td>
+                <td><WarehouseCell order={o} /></td>
                 <td><button className="btn xs" onClick={() => setDetail(o.orderId)}>Open</button></td>
               </tr>
             ))}
@@ -703,7 +709,7 @@ function OrderDetail({ orderId, onClose, onChanged }) {
 
           <div className="section-title">Items</div>
           <table className="data mb16">
-            <thead><tr><th>SKU</th><th>Title</th><th>Variant</th><th className="num">Qty</th><th className="num">Price</th><th>Depo görseli</th></tr></thead>
+            <thead><tr><th>SKU</th><th>Title</th><th>Variant</th><th className="num">Qty</th><th className="num">Price</th><th>Supply</th><th>Depo görseli</th></tr></thead>
             <tbody>
               {data.items.map((i) => (
                 <tr key={i.lineItemId}>
@@ -712,6 +718,12 @@ function OrderDetail({ orderId, onClose, onChanged }) {
                   <td className="small dim">{i.variantTitle}</td>
                   <td className="num">{i.quantity}</td>
                   <td className="num">{fmtMoney(i.price, i.currency)}</td>
+                  <td>
+                    {i.supplyLink ? (
+                      <a href={i.supplyLink} target="_blank" rel="noreferrer" className="btn xs"
+                         title={i.supplierName || "The supplier's page for this SKU"}>Open ↗</a>
+                    ) : <span className="muted small">—</span>}
+                  </td>
                   <td>
                     <WarehousePhotoCell channel="shopify" orderPath={orderPath} item={i} onChanged={() => { reload(); onChanged(); }} />
                   </td>
