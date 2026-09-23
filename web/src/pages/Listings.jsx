@@ -34,6 +34,7 @@ export default function Listings() {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [selectingAll, setSelectingAll] = useState(false);
+  const [fetchingMissing, setFetchingMissing] = useState(false);
 
   const nav = useNavigate();
   const toast = useToast();
@@ -90,6 +91,37 @@ export default function Listings() {
     } catch (err) { showError(err, 'Sync failed'); } finally { setSyncing(false); }
   };
 
+  /**
+   * One click instead of the filter-select-choose-action dance: find every
+   * listing with no cached photo, ask Etsy again for just those, and wait for
+   * the job to actually finish before saying so - a full "Sync" already tries
+   * every listing, but is slow and no more likely to succeed on the same
+   * stragglers than asking again just for them.
+   */
+  const fetchMissingImages = async () => {
+    setFetchingMissing(true);
+    try {
+      const missing = await api.get('/listings', { missingImages: true, limit: 5000 });
+      const ids = (missing.rows ?? []).map((r) => r.listingId);
+      if (!ids.length) {
+        toast({ kind: 'ok', title: 'Nothing missing', body: 'Every listing already has a photo.' });
+        return;
+      }
+      let job = await api.post('/bulk/jobs', { type: 'listing.refresh_images', targets: ids });
+      while (job.status === 'queued' || job.status === 'running') {
+        await new Promise((r) => setTimeout(r, 2000));
+        job = await api.get(`/bulk/jobs/${job.id}`);
+      }
+      toast({
+        kind: job.failed ? 'warn' : 'ok',
+        title: 'Missing photos fetched',
+        body: `${job.succeeded}/${job.total} listing(s) now have a photo`
+          + (job.failed ? ` — ${job.failed} still could not be read (Etsy may not have one for them)` : ''),
+      });
+      reload();
+    } catch (err) { showError(err, 'Could not fetch missing images'); } finally { setFetchingMissing(false); }
+  };
+
   const quickAction = async (type) => {
     const targets = [...selected];
     if (type === 'listing.delete' && !confirm(`Permanently delete ${targets.length} listing(s) on Etsy? This cannot be undone.`)) return;
@@ -114,6 +146,10 @@ export default function Listings() {
         <>
           <button className="btn sm" onClick={exportXlsx}>⤓ Excel</button>
           <button className="btn sm" onClick={sync} disabled={syncing}>{syncing ? <Spinner /> : '↻'} Sync</button>
+          <button className="btn sm" onClick={fetchMissingImages} disabled={fetchingMissing}
+                  title="Find every listing with no photo cached and ask Etsy again, just for those">
+            {fetchingMissing ? <Spinner /> : '🖼'} Fetch missing images
+          </button>
           <button className="btn sm primary" onClick={() => nav('/listings/new')}>＋ New listing</button>
         </>
       }

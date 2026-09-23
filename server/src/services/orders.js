@@ -140,7 +140,7 @@ function loadSupplyPreview(db, shopId, receiptIds) {
   if (!receiptIds.length) return map;
   const holes = receiptIds.map(() => '?').join(',');
   const items = db.prepare(`
-    SELECT x.receipt_id, x.transaction_id, x.sku, x.warehouse_photo_id,
+    SELECT x.receipt_id, x.transaction_id, x.sku, x.warehouse_photo_id, x.image_url, m.variant_image_url,
            COALESCE(NULLIF(m.variant_supply_link,''), NULLIF(m.supply_link,'')) AS supply_link
     FROM receipt_transactions x
     LEFT JOIN sku_meta m ON m.sku = x.sku AND m.shop_id IS ? AND x.sku <> ''
@@ -199,6 +199,13 @@ function orderSummary(r, preview) {
     supplierOrderRef: r.supplier_order_ref || '',
     supplyTrackingNumber: r.supply_tracking_number || '',
     notes: r.notes || '',
+    // The same item's own listing photo and (when one is saved) its
+    // variant-specific photo, so the list can show them right next to the
+    // warehouse photo above - a mix-up between two similar products is
+    // meant to be caught by eye (or the AI compare button) without opening
+    // the order first.
+    imageUrl: photoItem?.image_url || null,
+    variantImageUrl: photoItem?.variant_image_url || photoItem?.image_url || null,
     // Preview of what the Items tab holds, so the list does not need opening
     // just to see - or change - whether the supply chain side of an order is
     // covered. Each carries the item (transaction id + sku) the value belongs

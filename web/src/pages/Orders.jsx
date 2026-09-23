@@ -9,7 +9,7 @@ import {
 } from '../components/ui.jsx';
 import { SendToAirtable } from './Airtable.jsx';
 import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
-import { SupplyCell, WarehouseCell } from '../components/OrderSupplyPreview.jsx';
+import { SupplyCell, WarehouseCell, ProductImageCell } from '../components/OrderSupplyPreview.jsx';
 import MessagePreviewModal from '../components/MessagePreview.jsx';
 import MessageTemplatesModal from '../components/MessageTemplates.jsx';
 
@@ -213,6 +213,7 @@ export default function Orders() {
                 <th>Tracking</th>
                 <th>Parcel</th>
                 <th title="Supplier link, order number and inbound tracking number">Supply</th>
+                <th title="The item's own listing photo, and its variant photo when one is saved">Photo</th>
                 <th title="Photo taken at the warehouse, next to the item's own listing photo">Warehouse</th>
                 <th className="col-tight" />
               </tr>
@@ -271,6 +272,7 @@ export default function Orders() {
                     </div>
                   </td>
                   <td><SupplyCell order={o} channel="etsy" onChanged={refreshAll} /></td>
+                  <td><ProductImageCell order={o} /></td>
                   <td><WarehouseCell order={o} channel="etsy" onChanged={refreshAll} /></td>
                   <td><button className="btn xs" onClick={() => setDetailId(o.receiptId)}>Open</button></td>
                 </tr>

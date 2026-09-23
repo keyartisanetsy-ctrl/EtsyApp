@@ -213,7 +213,7 @@ function loadSupplyPreview(db, shopId, orderIds) {
   if (!orderIds.length) return map;
   const holes = orderIds.map(() => '?').join(',');
   const items = db.prepare(`
-    SELECT x.order_id, x.line_item_id, x.sku, x.warehouse_photo_id, m.supply_link
+    SELECT x.order_id, x.line_item_id, x.sku, x.warehouse_photo_id, x.image_url, m.supply_link
     FROM shopify_order_line_items x
     LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND m.shop_id = ? AND x.sku <> ''
     WHERE x.order_id IN (${holes})
@@ -252,6 +252,10 @@ function shapeOrder(r, preview) {
     supplyLinkLineItemId: linkItem?.line_item_id ?? null,
     supplyLinkSku: linkItem?.sku || null,
     itemsWithSupplyLink: preview?.linkCount || 0,
+    // Shopify resolves a line item's own image to the variant's photo already
+    // when the variant has one, so there is no separate main/variant split to
+    // carry here the way Etsy needs - one URL covers both.
+    imageUrl: photoItem?.image_url || null,
     warehousePhotoUrl: photoItem?.warehouse_photo_id ? `/api/ai/attachments/${photoItem.warehouse_photo_id}` : null,
     warehousePhotoLineItemId: photoItem?.line_item_id ?? null,
     itemsWithPhoto: preview?.photoCount || 0,

@@ -8,7 +8,7 @@ import {
 import { SendToAirtable } from './Airtable.jsx';
 import StockCheckCell from '../components/StockCheck.jsx';
 import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
-import { SupplyCell, WarehouseCell } from '../components/OrderSupplyPreview.jsx';
+import { SupplyCell, WarehouseCell, ProductImageCell } from '../components/OrderSupplyPreview.jsx';
 
 /**
  * Shopify: connect a store, mirror its products/variants and orders, edit
@@ -417,6 +417,7 @@ function OrdersPanel() {
               <th>Order</th><th>Buyer</th><th>Financial</th><th>Fulfillment</th>
               <th className="num">Total</th><th className="right">Shipping cost</th><th>Tracking</th><th>Airtable</th>
               <th title="Supplier link, order number and inbound tracking number">Supply</th>
+              <th title="The item's own listing/variant photo">Photo</th>
               <th title="Photo taken at the warehouse, next to the item's own listing photo">Warehouse</th>
               <th className="col-tight" />
             </tr>
@@ -438,6 +439,7 @@ function OrdersPanel() {
                     : <span className="muted small">—</span>}
                 </td>
                 <td><SupplyCell order={o} channel="shopify" onChanged={reload} /></td>
+                <td><ProductImageCell order={o} /></td>
                 <td><WarehouseCell order={o} channel="shopify" onChanged={reload} /></td>
                 <td><button className="btn xs" onClick={() => setDetail(o.orderId)}>Open</button></td>
               </tr>

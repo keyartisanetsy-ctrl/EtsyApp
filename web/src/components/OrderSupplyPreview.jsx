@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import api from '../lib/api.js';
-import { useErrorToast } from './ui.jsx';
+import { Thumb, useErrorToast } from './ui.jsx';
 import WarehousePhotoCell from './WarehousePhoto.jsx';
 
 /**
@@ -92,6 +92,27 @@ export function SupplyCell({ order, channel, onChanged }) {
         <span className="dim" style={{ width: 30, display: 'inline-block' }}>Trk#</span>
         <InlineField value={order.supplyTrackingNumber} placeholder="tracking #" mono onSave={(v) => saveOrderField('supplyTrackingNumber', v)} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * The order item's own photo(s), right next to the Warehouse column, so a
+ * mismatch between what was actually stocked and what the listing shows is
+ * catchable at a glance - or with the AI compare button in the Warehouse
+ * cell right beside it, which checks the warehouse photo against exactly
+ * this same item's picture. Etsy keeps a separate variant-specific photo
+ * (set on the SKU page) on top of the listing's own cover photo, so both
+ * show when they differ; Shopify already resolves one photo per line item,
+ * so there is only ever one to show there.
+ */
+export function ProductImageCell({ order }) {
+  const hasVariant = order.variantImageUrl && order.variantImageUrl !== order.imageUrl;
+  if (!order.imageUrl && !hasVariant) return <span className="muted small">no photo</span>;
+  return (
+    <div className="flex gap4">
+      {order.imageUrl && <Thumb src={order.imageUrl} alt="Listing photo" />}
+      {hasVariant && <Thumb src={order.variantImageUrl} alt="Variant photo" />}
     </div>
   );
 }
