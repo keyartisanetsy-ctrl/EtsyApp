@@ -1,17 +1,22 @@
-import React, { useState } from 'react';
+import React, { useSyncExternalStore } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import { Stat, Banner, Spinner, useToast, useErrorToast, fmtAgo, fmtMoney } from '../components/ui.jsx';
+import { beginSync, endSync, getActiveSync, subscribeSync } from '../lib/syncTracker.js';
 
 export default function Dashboard({ summary, onRefresh }) {
-  const [syncing, setSyncing] = useState(null);
+  // Lives outside this component (see syncTracker.js) so leaving this page
+  // mid-sync and coming back still shows it running, instead of resetting to
+  // idle while the fetch is still going on the network.
+  const active = useSyncExternalStore(subscribeSync, getActiveSync, getActiveSync);
+  const syncing = active?.kind ?? null;
   const nav = useNavigate();
   const toast = useToast();
   const showError = useErrorToast();
 
   const runSync = async (kind) => {
-    setSyncing(kind);
+    beginSync(kind);
     try {
       if (kind === 'all') {
         const r = await api.syncAll({ withInventory: true });
@@ -38,7 +43,7 @@ export default function Dashboard({ summary, onRefresh }) {
     } catch (err) {
       showError(err, 'Sync failed');
     } finally {
-      setSyncing(null);
+      endSync();
     }
   };
 
