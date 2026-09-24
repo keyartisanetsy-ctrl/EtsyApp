@@ -11,6 +11,7 @@ import { notFound, badRequest } from '../lib/errors.js';
 import { statusesFor } from './orderstatus.js';
 import { feeFor } from './offsiteads.js';
 import { reportingCurrency } from './reporting.js';
+import { resolveForTransaction } from './productimages.js';
 
 const asMoney = (amount, divisor, currency) =>
   amount == null ? null : { value: amount / (divisor || 100), currency };
@@ -140,7 +141,8 @@ function loadSupplyPreview(db, shopId, receiptIds) {
   if (!receiptIds.length) return map;
   const holes = receiptIds.map(() => '?').join(',');
   const items = db.prepare(`
-    SELECT x.receipt_id, x.transaction_id, x.sku, x.warehouse_photo_id, x.image_url, m.variant_image_url,
+    SELECT x.receipt_id, x.transaction_id, x.sku, x.warehouse_photo_id, x.image_url,
+           x.listing_id, x.product_id, x.variations, m.variant_image_url,
            COALESCE(NULLIF(m.variant_supply_link,''), NULLIF(m.supply_link,'')) AS supply_link
     FROM receipt_transactions x
     LEFT JOIN sku_meta m ON m.sku = x.sku AND m.shop_id IS ? AND x.sku <> ''
@@ -204,8 +206,14 @@ function orderSummary(r, preview) {
     // warehouse photo above - a mix-up between two similar products is
     // meant to be caught by eye (or the AI compare button) without opening
     // the order first.
-    imageUrl: photoItem?.image_url || null,
-    variantImageUrl: photoItem?.variant_image_url || photoItem?.image_url || null,
+    //
+    // Etsy's receipt/transaction sync leaves image_url blank on plenty of
+    // orders even though the listing itself already has synced photos, so
+    // this falls through to the same resolver Airtable's image columns use
+    // (listing photo, then variant photo when this line's variation has
+    // one) before finally giving up.
+    imageUrl: resolveForTransaction(photoItem)?.best?.url || photoItem?.image_url || null,
+    variantImageUrl: photoItem?.variant_image_url || null,
     // Preview of what the Items tab holds, so the list does not need opening
     // just to see - or change - whether the supply chain side of an order is
     // covered. Each carries the item (transaction id + sku) the value belongs
@@ -312,7 +320,9 @@ export function getOrder(receiptId) {
       variationLabel: (parse(i.variations, []) || [])
         .map((v) => `${v.formatted_name ?? v.property_name ?? ''}: ${v.formatted_value ?? v.value ?? ''}`.trim())
         .filter((s) => s !== ':').join(' / '),
-      imageUrl: i.image_url,
+      // Same resolver as the list view: fall through to the listing's own
+      // synced photos when Etsy left this transaction's own image_url blank.
+      imageUrl: resolveForTransaction(i)?.best?.url || i.image_url || null,
       isDigital: !!i.is_digital,
       // The supply record follows the product everywhere it appears, so the
       // order desk can reorder from the same links the SKU page holds.
@@ -322,7 +332,9 @@ export function getOrder(receiptId) {
       supplyCost: i.supply_cost ?? null,
       supplyCurrency: i.supply_currency || null,
       leadTimeDays: i.lead_time_days ?? null,
-      variantImageUrl: i.variant_image_url || i.image_url || null,
+      // Honest, not a copy of the main photo: blank when this variant has no
+      // photo of its own, same principle as the SKU page.
+      variantImageUrl: i.variant_image_url || null,
       // A photo taken at the warehouse, held next to this same item's own
       // picture so a mix-up between two similar products is caught before
       // the parcel ships - compared by eye, or by the AI check below.
@@ -444,6 +456,24 @@ export function orderCounters() {
     alerts: one(`SELECT COUNT(*) AS c FROM tracking WHERE shop_id IS ?
                  AND (is_stale = 1 OR status IN ('exception','not_found','returned')) AND alert_ack = 0`),
   };
+}
+
+/**
+ * Listings this shop's orders actually reference that have zero photos
+ * synced yet - the genuine residual case the image resolver above cannot
+ * help with. Feeds the same 'listing.refresh_images' bulk job the Listings
+ * page already uses for its "Fetch missing images" button.
+ */
+export function listingIdsMissingImages() {
+  const db = getDb();
+  const shopId = activeShopId();
+  return db.prepare(`
+    SELECT DISTINCT x.listing_id
+    FROM receipt_transactions x
+    JOIN receipts r ON r.receipt_id = x.receipt_id
+    WHERE r.shop_id IS ? AND x.listing_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM listing_images li WHERE li.listing_id = x.listing_id)
+  `).all(shopId).map((row) => row.listing_id);
 }
 
 // ------------------------------------------------------------ copy helpers

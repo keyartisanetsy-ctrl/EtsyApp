@@ -39,6 +39,11 @@ router.get('/', asyncRoute(async (req, res) => {
 
 router.get('/counters', asyncRoute(async (req, res) => res.json(orders.orderCounters())));
 
+/** Listings this shop's orders reference that have no photos synced yet. */
+router.get('/listings-missing-images', asyncRoute(async (req, res) => {
+  res.json({ listingIds: orders.listingIdsMissingImages() });
+}));
+
 // ---------------------------------------------------- canned buyer messages
 // Registered ahead of the generic '/:id' route below - '/message-templates'
 // would otherwise match it first (id = "message-templates") and never reach

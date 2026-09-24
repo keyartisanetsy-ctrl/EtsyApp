@@ -33,6 +33,7 @@ export default function Orders() {
   const [detailId, setDetailId] = useState(null);
   const [trackingOpen, setTrackingOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [fetchingMissing, setFetchingMissing] = useState(false);
   const [airtableMessagePreview, setAirtableMessagePreview] = useState(null);
   const [templatesOpen, setTemplatesOpen] = useState(false);
 
@@ -84,6 +85,30 @@ export default function Orders() {
     } catch (err) { showError(err, 'Could not ask Etsy'); } finally { setBusy(false); }
   };
   const refreshAll = () => { reload(); reloadCounters(); };
+
+  /** For every listing these orders reference with no photo cached yet, ask Etsy again just for those. */
+  const fetchMissingImages = async () => {
+    setFetchingMissing(true);
+    try {
+      const { listingIds } = await api.get('/orders/listings-missing-images');
+      if (!listingIds.length) {
+        toast({ kind: 'ok', title: 'Nothing missing', body: 'Every listing behind these orders already has a photo.' });
+        return;
+      }
+      let job = await api.post('/bulk/jobs', { type: 'listing.refresh_images', targets: listingIds });
+      while (job.status === 'queued' || job.status === 'running') {
+        await new Promise((r) => setTimeout(r, 2000));
+        job = await api.get(`/bulk/jobs/${job.id}`);
+      }
+      toast({
+        kind: job.failed ? 'warn' : 'ok',
+        title: 'Missing photos fetched',
+        body: `${job.succeeded}/${job.total} listing(s) now have a photo`
+          + (job.failed ? ` — ${job.failed} still could not be read (Etsy may not have one for them)` : ''),
+      });
+      refreshAll();
+    } catch (err) { showError(err, 'Could not fetch missing images'); } finally { setFetchingMissing(false); }
+  };
 
   const toggle = (id) => setSelected((s) => {
     const next = new Set(s);
@@ -143,6 +168,10 @@ export default function Orders() {
           <button className="btn sm" disabled={busy} onClick={chaseEmails}
             title="Ask Etsy for the buyer emails missing from recent orders">
             {busy ? <Spinner /> : '✉'} Find missing emails
+          </button>
+          <button className="btn sm" onClick={fetchMissingImages} disabled={fetchingMissing}
+            title="Find every listing behind these orders with no photo cached and ask Etsy again, just for those">
+            {fetchingMissing ? <Spinner /> : '🖼'} Fetch missing images
           </button>
           <button className="btn sm" onClick={exportXlsx}>⤓ Excel</button>
           <button className="btn sm" onClick={syncOrders}>↻ Sync</button>
