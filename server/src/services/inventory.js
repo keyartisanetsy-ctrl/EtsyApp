@@ -290,10 +290,11 @@ export function skuGrid({
         supplyLink: r.supply_link || '',
         variantSupplyLink: r.variant_supply_link || '',
         supplierName: r.supplier_name || '',
-        // The photo you saved for this variant, else the one Etsy has for it,
-        // else -- most listings never bother pinning per-variant photos --
-        // the listing's own cover shot, same fallback the Pictures panel uses.
-        variantImageUrl: r.variant_image_url || r.variation_image_url || r.first_image_url || '',
+        // The photo you saved for this variant, else the one Etsy itself has
+        // for it - never the listing's own cover shot. Falling back to the
+        // cover shot here would make every variant look photographed on its
+        // own when most are not; blank is the honest answer for those.
+        variantImageUrl: r.variant_image_url || r.variation_image_url || '',
         savedVariantImageUrl: r.variant_image_url || '',
         supplyCost: cost,
         supplyCurrency: r.supply_currency || null,

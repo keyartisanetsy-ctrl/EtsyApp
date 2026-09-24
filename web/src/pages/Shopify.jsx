@@ -270,7 +270,8 @@ function ProductsPanel() {
         <table className="data">
           <thead>
             <tr>
-              <th className="col-tight">Image</th>
+              <th className="col-tight">First</th>
+              <th className="col-tight" title="This exact variant's own photo - blank when Shopify has none for it">Variant</th>
               <th>SKU</th>
               <th>Product</th>
               <th className="small dim">Variation</th>
@@ -294,7 +295,8 @@ function ProductsPanel() {
               const isDirty = edits[r.variantId] || supplyEdits[r.sku];
               return (
                 <tr key={r.variantId} style={isDirty ? { boxShadow: 'inset 3px 0 0 var(--brand)' } : undefined}>
-                  <td><Thumb src={r.imageUrl} alt="" /></td>
+                  <td><Thumb src={r.firstImageUrl} alt="" /></td>
+                  <td><Thumb src={r.variantImageUrl} alt="" fallback="–" /></td>
                   <td><input className="input sm mono" style={{ width: 120 }} value={sku ?? ''} placeholder="— none —"
                               onChange={(e) => stage(r.variantId, 'sku', e.target.value)} /></td>
                   <td className="cell-title" title={r.productTitle}>

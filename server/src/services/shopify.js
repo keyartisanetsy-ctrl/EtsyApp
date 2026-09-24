@@ -45,7 +45,13 @@ export function listProducts({ search = '', status = '', missingSku = false, lim
       variantId: r.variant_id, productId: r.product_id, productTitle: r.product_title, handle: r.handle,
       productStatus: r.product_status, vendor: r.vendor, productType: r.product_type,
       variantTitle: r.title, sku: r.sku || '', price: r.price_amount, compareAtPrice: r.compare_at_amount,
-      cost: r.cost_amount, inventoryQuantity: r.inventory_quantity, imageUrl: r.image_url || r.first_image_url,
+      cost: r.cost_amount, inventoryQuantity: r.inventory_quantity,
+      // The product's own cover shot, and this variant's own photo when
+      // Shopify has one for it - never one standing in for the other, so a
+      // plain variant with no photo of its own shows blank, not a copy of
+      // the product's picture.
+      firstImageUrl: r.first_image_url || null,
+      variantImageUrl: r.image_url || null,
       supplyLink: r.supply_link || '', supplierName: r.supplier_name || '', supplyCurrency: r.supply_currency || 'CNY',
       notes: r.supply_notes || '',
       margin: r.cost_amount != null && r.price_amount != null ? Math.round((r.price_amount - r.cost_amount) * 100) / 100 : null,

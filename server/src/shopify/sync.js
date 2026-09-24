@@ -70,7 +70,10 @@ export async function syncProducts() {
           id: v.id, productId: p.id, inventoryItemId: v.inventoryItem?.id ?? null,
           title: v.title, sku: v.sku ?? '', price: num(v.price), compareAt: num(v.compareAtPrice),
           currency: null, cost: num(v.inventoryItem?.unitCost?.amount),
-          quantity: v.inventoryQuantity ?? null, image: firstImageOf(v.media) ?? p.featuredImage?.url ?? null,
+          // Only this variant's own media - never the product's featured
+          // image standing in for it, which would make every plain variant
+          // look like it has a photo of its own when it does not.
+          quantity: v.inventoryQuantity ?? null, image: firstImageOf(v.media),
           position: v.position ?? null, raw: json(v),
         });
         variants += 1;
