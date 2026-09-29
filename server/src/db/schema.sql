@@ -964,6 +964,12 @@ CREATE TABLE IF NOT EXISTS shopify_fulfillments (
   tracking_url            TEXT,
   shipping_cost           REAL,
   shipping_cost_currency  TEXT,
+  -- What the goods in this order cost you, typed in right next to the
+  -- shipping cost - the real, invoiced figure, when you know it. Same idea as
+  -- Etsy's tracking.supply_cost; falls back to a per-SKU estimate
+  -- (shopify_variants.cost_amount) when this is not set yet.
+  supply_cost             REAL,
+  supply_cost_currency    TEXT,
   pushed_at               TEXT,
   -- Same two supplier-side fields as Etsy's order_flags: the supplier's own
   -- order reference, and the inbound supplier-to-warehouse tracking number.

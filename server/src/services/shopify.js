@@ -9,9 +9,11 @@ import { syncProducts, syncOrders } from '../shopify/sync.js';
 import { requireShopifyShopId } from '../shopify/shop.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
+import { convert } from './fx.js';
 
 const log = createLogger('shopify-svc');
 export { syncProducts, syncOrders };
+const round2 = (n) => (n === null || n === undefined ? null : Math.round((n + Number.EPSILON) * 100) / 100);
 
 // ------------------------------------------------------------- products
 
@@ -204,7 +206,7 @@ export function listOrders({ search = '', canceled = null, limit = 100, offset =
     SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
            f.supplier_order_ref, f.supply_tracking_number,
            COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at, f.notes,
-           f.manual_cost, f.manual_cost_note,
+           f.manual_cost, f.manual_cost_note, f.supply_cost, f.supply_cost_currency,
            al.airtable_pushed_at,
            (SELECT COUNT(*) FROM shopify_order_line_items x WHERE x.order_id = o.order_id) AS item_count
     ${base}
@@ -214,10 +216,11 @@ export function listOrders({ search = '', canceled = null, limit = 100, offset =
   const total = db.prepare(`SELECT COUNT(*) AS c ${base}`).get(...params).c;
   const supplyPreview = loadSupplyPreview(db, shopId, rows.map((r) => r.order_id));
   const txnSummary = loadTransactionSummary(db, rows.map((r) => r.order_id));
+  const orderCosts = loadOrderCosts(db, rows.map((r) => r.order_id));
 
   return {
     total, limit, offset,
-    rows: rows.map((r) => shapeOrder(r, supplyPreview.get(r.order_id), txnSummary.get(r.order_id))),
+    rows: rows.map((r) => shapeOrder(r, supplyPreview.get(r.order_id), txnSummary.get(r.order_id), orderCosts.get(r.order_id))),
   };
 }
 
@@ -244,6 +247,70 @@ function loadTransactionSummary(db, orderIds) {
     s.count += 1;
   }
   return map;
+}
+
+/**
+ * What this order actually cost to fulfil - same idea as Etsy's
+ * loadOrderCosts(). Shipping and a REAL (invoiced) supply cost are typed in
+ * next to the order in the list, in shopify_fulfillments. With no real supply
+ * cost typed in yet, this falls back to Shopify's own per-variant
+ * inventoryItem.unitCost ("cost per item"), clearly marked as an estimate.
+ */
+function loadOrderCosts(db, orderIds) {
+  const map = new Map();
+  if (!orderIds.length) return map;
+  const holes = orderIds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT order_id, shipping_cost, shipping_cost_currency, supply_cost, supply_cost_currency
+    FROM shopify_fulfillments WHERE order_id IN (${holes})`).all(...orderIds);
+  for (const r of rows) {
+    map.set(r.order_id, {
+      shipping: r.shipping_cost, shippingCcy: r.shipping_cost_currency,
+      supply: r.supply_cost, supplyCcy: r.supply_cost_currency, supplyIsEstimate: false,
+    });
+  }
+
+  const needEstimate = orderIds.filter((id) => map.get(id)?.supply == null);
+  if (needEstimate.length) {
+    const estHoles = needEstimate.map(() => '?').join(',');
+    const items = db.prepare(`
+      SELECT x.order_id, x.quantity, v.cost_amount, v.currency
+      FROM shopify_order_line_items x
+      LEFT JOIN shopify_variants v ON v.variant_id = x.variant_id
+      WHERE x.order_id IN (${estHoles}) AND v.cost_amount IS NOT NULL`).all(...needEstimate);
+    for (const it of items) {
+      const e = map.get(it.order_id) ?? { shipping: null, shippingCcy: null, supply: null, supplyCcy: null, supplyIsEstimate: false };
+      e.supply = (e.supply ?? 0) + (it.cost_amount || 0) * (it.quantity || 1);
+      e.supplyCcy = e.supplyCcy || it.currency;
+      e.supplyIsEstimate = true;
+      map.set(it.order_id, e);
+    }
+  }
+  return map;
+}
+
+/**
+ * Shipping + supply cost, converted into the order's own currency, plus the
+ * profit left once they and any manual cost come off Shopify's own
+ * transactions net. Null fields (rather than a wrong number) whenever a
+ * currency has no FX rate to convert with.
+ */
+function orderCostBreakdown(r, txn, costs) {
+  if (!costs) return { shipping: null, supply: null, profit: null };
+  const shipping = costs.shipping != null ? convert(costs.shipping, costs.shippingCcy, r.currency, r.created_at_shopify) : null;
+  const supply = costs.supply != null ? convert(costs.supply, costs.supplyCcy, r.currency, r.created_at_shopify) : null;
+  const shippingFailed = costs.shipping != null && shipping == null;
+  const supplyFailed = costs.supply != null && supply == null;
+
+  let profit = null;
+  if (txn && !shippingFailed && !supplyFailed) {
+    profit = { value: round2(txn.netAmount - (shipping || 0) - (supply || 0) - (r.manual_cost || 0)), currency: txn.currency };
+  }
+  return {
+    shipping: shipping != null ? { value: round2(shipping), currency: r.currency } : null,
+    supply: supply != null ? { value: round2(supply), currency: r.currency, isEstimate: !!costs.supplyIsEstimate } : null,
+    profit,
+  };
 }
 
 /**
@@ -286,7 +353,7 @@ function looksLikeShopAds(sourceName, attributionSource) {
   return /\bshop[\s_-]*(campaigns?|ads?)\b/i.test(`${sourceName || ''} ${attributionSource || ''}`);
 }
 
-function shapeOrder(r, preview, txn) {
+function shapeOrder(r, preview, txn, costs) {
   const linkItem = preview?.linkItem ?? preview?.firstItem ?? null;
   const photoItem = preview?.photoItem ?? preview?.firstItem ?? null;
   return {
@@ -333,8 +400,14 @@ function shapeOrder(r, preview, txn) {
     netAfterManualCost: (txn && r.manual_cost != null)
       ? { value: txn.netAmount - r.manual_cost, currency: txn.currency }
       : null,
+    // The full picture: what shipping and the goods themselves actually cost
+    // (real figures typed in below when there are any, else a clearly-flagged
+    // per-variant estimate from Shopify's own inventory cost), and what is
+    // left of the transactions net once those and the manual cost above come off.
+    costBreakdown: orderCostBreakdown(r, txn, costs),
     itemCount: r.item_count, trackingNumber: r.tracking_number || null, trackingCompany: r.tracking_company || null,
     shippingCost: r.shipping_cost ?? null, shippingCostCurrency: r.shipping_cost_currency ?? null,
+    supplyCost: r.supply_cost ?? null, supplyCostCurrency: r.supply_cost_currency ?? null,
     pushedAt: r.pushed_at || null,
     supplierOrderRef: r.supplier_order_ref || '',
     supplyTrackingNumber: r.supply_tracking_number || '',
@@ -369,7 +442,7 @@ export function getOrder(orderId) {
     SELECT o.*, f.tracking_number, f.tracking_company, f.tracking_url, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
            f.supplier_order_ref, f.supply_tracking_number,
            COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at, f.notes,
-           f.manual_cost, f.manual_cost_note,
+           f.manual_cost, f.manual_cost_note, f.supply_cost, f.supply_cost_currency,
            al.airtable_pushed_at
     FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
     LEFT JOIN (SELECT receipt_id, MAX(last_pushed_at) AS airtable_pushed_at
@@ -407,7 +480,8 @@ export function getOrder(orderId) {
     fees: parse(t.fees_raw, []),
   }));
 
-  return { ...shapeOrder(o, null, txnSummary), trackingUrl: o.tracking_url || null, items, transactions };
+  const costs = loadOrderCosts(db, [orderId]).get(orderId);
+  return { ...shapeOrder(o, null, txnSummary, costs), trackingUrl: o.tracking_url || null, items, transactions };
 }
 
 /** What this parcel cost to send, typed in next to the tracking number - mirrors tracking.setShippingCost. */
@@ -421,6 +495,21 @@ export function setShippingCost(orderId, { cost, currency } = {}) {
     INSERT INTO shopify_fulfillments (order_id, shipping_cost, shipping_cost_currency)
     VALUES (?,?,?)
     ON CONFLICT(order_id) DO UPDATE SET shipping_cost=excluded.shipping_cost, shipping_cost_currency=excluded.shipping_cost_currency`)
+    .run(orderId, amount, amount === null ? null : (currency || 'CNY').toUpperCase());
+  return getOrder(orderId);
+}
+
+/** What the goods in this order actually cost, typed in next to the shipping cost - mirrors tracking.setSupplyCost. */
+export function setSupplyCost(orderId, { cost, currency } = {}) {
+  const shopId = requireShopifyShopId();
+  const owns = getDb().prepare('SELECT 1 FROM shopify_orders WHERE order_id = ? AND shop_id = ?').get(orderId, shopId);
+  if (!owns) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
+  const amount = cost === null || cost === undefined || cost === '' ? null : Number(cost);
+  if (amount !== null && !Number.isFinite(amount)) throw badRequest(`"${cost}" is not a number.`);
+  getDb().prepare(`
+    INSERT INTO shopify_fulfillments (order_id, supply_cost, supply_cost_currency)
+    VALUES (?,?,?)
+    ON CONFLICT(order_id) DO UPDATE SET supply_cost=excluded.supply_cost, supply_cost_currency=excluded.supply_cost_currency`)
     .run(orderId, amount, amount === null ? null : (currency || 'CNY').toUpperCase());
   return getOrder(orderId);
 }

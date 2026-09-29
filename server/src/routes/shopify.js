@@ -147,6 +147,11 @@ router.post('/orders/:id/shipping-cost', asyncRoute(async (req, res) => {
   res.json(shopify.setShippingCost(req.params.id, { cost: req.body?.cost, currency: req.body?.currency }));
 }));
 
+/** What the goods in this order actually cost - the real, invoiced figure, typed in next to shipping cost. */
+router.post('/orders/:id/supply-cost', asyncRoute(async (req, res) => {
+  res.json(shopify.setSupplyCost(req.params.id, { cost: req.body?.cost, currency: req.body?.currency }));
+}));
+
 /** A hand-typed cost for this order - e.g. its share of Shop Campaigns spend. */
 router.post('/orders/:id/manual-cost', asyncRoute(async (req, res) => {
   res.json(shopify.setManualCost(req.params.id, { amount: req.body?.amount, note: req.body?.note }));

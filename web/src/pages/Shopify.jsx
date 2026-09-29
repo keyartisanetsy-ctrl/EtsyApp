@@ -447,7 +447,7 @@ function OrdersPanel() {
                           onChange={() => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.orderId)))} />
               </th>
               <th>Order</th><th>Buyer</th><th>Financial</th><th>Fulfillment</th>
-              <th className="num">Total</th><th className="right">Shipping cost</th><th>Tracking</th><th>Airtable</th>
+              <th className="num">Total</th><th className="right">Shipping cost</th><th className="right">Supply cost</th><th>Tracking</th><th>Airtable</th>
               <th title="Supplier link, order number and inbound tracking number">Supply</th>
               <th title="The item's own listing/variant photo">Photo</th>
               <th title="Photo taken at the warehouse, next to the item's own listing photo">Warehouse</th>
@@ -507,10 +507,17 @@ function OrdersPanel() {
                           manual: −{fmtMoney(o.manualCost.value, o.manualCost.currency)}
                         </div>
                       )}
+                      {o.costBreakdown?.profit && (
+                        <div className="small" style={{ fontWeight: 600 }}
+                             title="Net minus shipping cost, supply cost and manual cost">
+                          profit: {fmtMoney(o.costBreakdown.profit.value, o.costBreakdown.profit.currency)}
+                        </div>
+                      )}
                     </>
                   )}
                 </td>
                 <td className="right"><ShippingCostCell row={o} onSaved={reload} /></td>
+                <td className="right"><SupplyCostCell row={o} onSaved={reload} /></td>
                 <td className="small mono">
                   {o.trackingNumber || (
                     <button className="btn xs" onClick={() => setQuickTrackId(o.orderId)}
@@ -712,6 +719,39 @@ function ShippingCostCell({ row, onSaved }) {
   );
 }
 
+/** What the goods in this order actually cost, typed in right next to shipping cost - same idea as ShippingCostCell. */
+function SupplyCostCell({ row, onSaved }) {
+  const showError = useErrorToast();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(row.supplyCost ?? '');
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.post(`/shopify/orders/${encodeURIComponent(row.orderId)}/supply-cost`, { cost: value === '' ? null : Number(value), currency: row.supplyCostCurrency || undefined });
+      setEditing(false); onSaved?.();
+    } catch (err) { showError(err, 'Could not save'); } finally { setBusy(false); }
+  };
+
+  if (!editing) {
+    return (
+      <button className="btn xs ghost" onClick={() => { setValue(row.supplyCost ?? ''); setEditing(true); }}
+              title={row.supplyCost == null ? 'No real figure typed in yet - the profit line above is using an estimate, if one is available' : ''}>
+        {row.supplyCost == null ? <span className="muted">add</span> : <>{row.supplyCost} <span className="muted">{row.supplyCostCurrency || ''}</span></>}
+      </button>
+    );
+  }
+  return (
+    <span className="flex gap4">
+      <DecimalInput className="input sm" style={{ width: 78 }} autoFocus value={value} onChange={setValue}
+                     onKeyDown={(e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false); }} />
+      <button className="btn xs primary" onClick={save} disabled={busy}>✓</button>
+      <button className="btn xs ghost" onClick={() => setEditing(false)}>✕</button>
+    </span>
+  );
+}
+
 function OrderDetail({ orderId, onClose, onChanged }) {
   const toast = useToast();
   const showError = useErrorToast();
@@ -837,6 +877,11 @@ function OrderDetail({ orderId, onClose, onChanged }) {
                   {data.netAfterManualCost && (
                     <div className="small dim">net after manual cost: <strong>{fmtMoney(data.netAfterManualCost.value, data.netAfterManualCost.currency)}</strong></div>
                   )}
+                  {data.costBreakdown?.profit && (
+                    <div className="small">
+                      profit (after shipping + supply cost): <strong>{fmtMoney(data.costBreakdown.profit.value, data.costBreakdown.profit.currency)}</strong>
+                    </div>
+                  )}
                 </>
               )}
             </dd>
@@ -941,6 +986,30 @@ function OrderDetail({ orderId, onClose, onChanged }) {
             </table>
           ) : (
             <div className="small dim mb16">No transactions synced yet - press "Sync from Shopify" above.</div>
+          )}
+
+          <div className="section-title">Cost of goods &amp; shipping</div>
+          <dl className="kv mb8">
+            <dt>Shipping cost</dt>
+            <dd><ShippingCostCell row={data} onSaved={() => { reload(); onChanged(); }} /></dd>
+            <dt>Supply cost</dt>
+            <dd>
+              <SupplyCostCell row={data} onSaved={() => { reload(); onChanged(); }} />
+              {data.costBreakdown?.supply?.isEstimate && (
+                <span className="small dim" style={{ marginLeft: 6 }}>
+                  (estimated from Shopify's own per-item cost - no real figure typed in yet)
+                </span>
+              )}
+            </dd>
+          </dl>
+          {data.costBreakdown?.profit && (
+            <div className="small dim mb16">
+              {fmtMoney(data.realNet?.value ?? data.total, data.currency)} net
+              {data.costBreakdown.shipping && <> − {fmtMoney(data.costBreakdown.shipping.value, data.costBreakdown.shipping.currency)} shipping</>}
+              {data.costBreakdown.supply && <> − {fmtMoney(data.costBreakdown.supply.value, data.costBreakdown.supply.currency)} supply</>}
+              {data.manualCost && <> − {fmtMoney(data.manualCost.value, data.manualCost.currency)} manual</>}
+              {' '}= <strong>{fmtMoney(data.costBreakdown.profit.value, data.costBreakdown.profit.currency)} profit</strong>
+            </div>
           )}
 
           <div className="section-title">Manual cost</div>

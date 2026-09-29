@@ -259,6 +259,11 @@ export function migrateSchema(db) {
   addColumn(db, 'order_flags', 'manual_cost_note', "TEXT DEFAULT ''");
   addColumn(db, 'shopify_fulfillments', 'manual_cost', 'REAL');
   addColumn(db, 'shopify_fulfillments', 'manual_cost_note', "TEXT DEFAULT ''");
+
+  // The real, invoiced cost of the goods in a Shopify order, typed in next to
+  // its shipping cost - Shopify's own equivalent of Etsy's tracking.supply_cost.
+  addColumn(db, 'shopify_fulfillments', 'supply_cost', 'REAL');
+  addColumn(db, 'shopify_fulfillments', 'supply_cost_currency', 'TEXT');
 }
 
 /** Runs AFTER schema.sql, once etsy_accounts is guaranteed to exist. */

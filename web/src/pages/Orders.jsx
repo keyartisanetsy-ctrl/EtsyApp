@@ -363,6 +363,12 @@ export default function Orders() {
                         manual: −{fmtMoney(o.manualCost.value, o.manualCost.currency)}
                       </div>
                     )}
+                    {o.costBreakdown?.profit && (
+                      <div className="small" style={{ fontWeight: 600 }}
+                           title="Ledger net minus shipping cost, supply cost and manual cost">
+                        profit: {fmtMoney(o.costBreakdown.profit.value, o.costBreakdown.profit.currency)}
+                      </div>
+                    )}
                   </td>
                   <td>
                     {o.trackingCode ? (
@@ -921,6 +927,37 @@ function OrderDetail({ id, onClose, onChanged }) {
               ) : (
                 <div className="small dim mb16">
                   No ledger data synced yet for this order. Press <strong>Sync ledger</strong> on the Orders page.
+                </div>
+              )}
+
+              <div className="section-title">Cost of goods &amp; shipping</div>
+              {order.shipments.length > 0 ? (
+                <div className="small mb8">
+                  {order.shipments.map((s) => (
+                    <div key={s.trackingCode} className="mb4">
+                      <span className="mono dim">{s.trackingCode}</span>:{' '}
+                      shipping {s.shippingCost != null ? `${s.shippingCost} ${s.shippingCostCurrency || ''}` : <span className="muted">not typed in yet</span>}
+                      {' · '}
+                      supply {s.supplyCost != null ? `${s.supplyCost} ${s.supplyCostCurrency || ''}` : <span className="muted">not typed in yet</span>}
+                    </div>
+                  ))}
+                  <div className="hint">Typed in on the Tracking page, next to this order's tracking number.</div>
+                </div>
+              ) : (
+                <div className="small dim mb8">No tracking added yet - add one to type in shipping/supply cost.</div>
+              )}
+              {order.costBreakdown?.supply?.isEstimate && (
+                <div className="small dim mb8">
+                  No real supply cost typed in yet - the figures below use a per-SKU estimate instead.
+                </div>
+              )}
+              {order.costBreakdown?.profit && (
+                <div className="small dim mb16">
+                  {fmtMoney(order.ledgerNet?.value, order.ledgerNet?.currency)} ledger net
+                  {order.costBreakdown.shipping && <> − {fmtMoney(order.costBreakdown.shipping.value, order.costBreakdown.shipping.currency)} shipping</>}
+                  {order.costBreakdown.supply && <> − {fmtMoney(order.costBreakdown.supply.value, order.costBreakdown.supply.currency)} supply</>}
+                  {order.manualCost && <> − {fmtMoney(order.manualCost.value, order.manualCost.currency)} manual</>}
+                  {' '}= <strong>{fmtMoney(order.costBreakdown.profit.value, order.costBreakdown.profit.currency)} profit</strong>
                 </div>
               )}
 

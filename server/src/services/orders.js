@@ -12,9 +12,11 @@ import { statusesFor } from './orderstatus.js';
 import { feeFor } from './offsiteads.js';
 import { reportingCurrency } from './reporting.js';
 import { resolveForTransaction } from './productimages.js';
+import { convert } from './fx.js';
 
 const asMoney = (amount, divisor, currency) =>
   amount == null ? null : { value: amount / (divisor || 100), currency };
+const round2 = (n) => (n === null || n === undefined ? null : Math.round((n + Number.EPSILON) * 100) / 100);
 
 /**
  * "Ships in 2-5 business days" - the promise made on the listing.
@@ -125,13 +127,14 @@ export function listOrders({
   const total = db.prepare(`SELECT COUNT(*) AS c ${base}`).get(...params).c;
   const supplyPreview = loadSupplyPreview(db, activeShopId(), rows.map((r) => r.receipt_id));
   const ledgerSummaries = loadLedgerSummaries(db, activeShopId(), rows.map((r) => r.receipt_id));
+  const orderCosts = loadOrderCosts(db, activeShopId(), rows.map((r) => r.receipt_id));
 
   return {
     total, limit, offset,
     // The currency the shop reports in, so the list can put a converted figure
     // under a lira total without every row asking the server what it is.
     reportingCurrency: reportingCurrency(),
-    rows: rows.map((r) => orderSummary(r, supplyPreview.get(r.receipt_id), ledgerSummaries.get(r.receipt_id))),
+    rows: rows.map((r) => orderSummary(r, supplyPreview.get(r.receipt_id), ledgerSummaries.get(r.receipt_id), orderCosts.get(r.receipt_id))),
   };
 }
 
@@ -169,7 +172,7 @@ function loadSupplyPreview(db, shopId, receiptIds) {
   return map;
 }
 
-function orderSummary(r, preview, ledger) {
+function orderSummary(r, preview, ledger, costs) {
   const linkItem = preview?.linkItem ?? preview?.firstItem ?? null;
   const photoItem = preview?.photoItem ?? preview?.firstItem ?? null;
   return {
@@ -220,6 +223,11 @@ function orderSummary(r, preview, ledger) {
     netAfterManualCost: (ledger && r.manual_cost != null)
       ? { value: ledger.netAmount - r.manual_cost, currency: ledger.currency }
       : null,
+    // The full picture: what shipping and the goods themselves actually cost
+    // (real figures typed in on the Tracking page when there are any, else a
+    // clearly-flagged per-SKU estimate), and what is left of the ledger net
+    // once those and the manual cost above all come off.
+    costBreakdown: orderCostBreakdown(r, ledger, costs),
     isGift: !!r.is_gift,
     messageFromBuyer: r.message_from_buyer || '',
     createdTs: r.created_ts,
@@ -318,13 +326,16 @@ export function getOrder(receiptId) {
 
   const shipments = db.prepare(`
     SELECT s.*, t.status, t.status_detail, t.last_event_at, t.last_event_text, t.days_since_move,
-           t.is_stale, t.alert_reason, t.event_count
+           t.is_stale, t.alert_reason, t.event_count,
+           t.shipping_cost, t.shipping_cost_currency, t.supply_cost, t.supply_cost_currency
     FROM shipments s LEFT JOIN tracking t ON t.tracking_code = s.tracking_code AND t.shop_id IS s.shop_id
     WHERE s.receipt_id = ? ORDER BY s.id DESC`).all(receiptId);
 
   const ledger = ledgerForReceipt(receiptId);
+  const costs = loadOrderCosts(db, activeShopId(), [receiptId]).get(receiptId);
   return {
-    ...orderSummary({ ...r, item_count: items.length }, null, ledger ? { netAmount: ledger.netAmount, currency: ledger.currency, lineCount: ledger.lines.length } : null),
+    ...orderSummary({ ...r, item_count: items.length }, null,
+      ledger ? { netAmount: ledger.netAmount, currency: ledger.currency, lineCount: ledger.lines.length } : null, costs),
     ledgerLines: ledger?.lines ?? [],
     address: {
       name: r.name,
@@ -407,6 +418,12 @@ export function getOrder(receiptId) {
       isStale: !!s.is_stale,
       alertReason: s.alert_reason,
       eventCount: s.event_count,
+      // What this parcel cost to send, and what the goods in it cost - typed
+      // in on the Tracking page, next to this same tracking number.
+      shippingCost: s.shipping_cost ?? null,
+      shippingCostCurrency: s.shipping_cost_currency ?? null,
+      supplyCost: s.supply_cost ?? null,
+      supplyCostCurrency: s.supply_cost_currency ?? null,
     })),
     raw: parse(r.raw, null),
   };
@@ -602,6 +619,73 @@ function loadLedgerSummaries(db, shopId, receiptIds) {
     entry.lineCount += 1;
   }
   return map;
+}
+
+/**
+ * What this order actually cost to fulfil: shipping and the goods themselves.
+ * Shipping and a REAL (invoiced) supply cost come from the shipment(s) this
+ * order's tracking numbers carry - typed in on the Tracking page, next to the
+ * tracking number, the same tracking table it already writes to. With no real
+ * figure typed in yet, this falls back to the per-SKU estimate (sku_meta.supply_cost),
+ * clearly marked so an estimate is never shown as if it were the real figure.
+ */
+function loadOrderCosts(db, shopId, receiptIds) {
+  const map = new Map();
+  if (!receiptIds.length) return map;
+  const holes = receiptIds.map(() => '?').join(',');
+
+  const shipRows = db.prepare(`
+    SELECT s.receipt_id, t.shipping_cost, t.shipping_cost_currency, t.supply_cost, t.supply_cost_currency
+    FROM shipments s JOIN tracking t ON t.tracking_code = s.tracking_code AND t.shop_id IS s.shop_id
+    WHERE s.receipt_id IN (${holes})`).all(...receiptIds);
+  for (const r of shipRows) {
+    const e = map.get(r.receipt_id) ?? { shipping: null, shippingCcy: null, supply: null, supplyCcy: null, supplyIsEstimate: false };
+    if (r.shipping_cost != null) { e.shipping = (e.shipping ?? 0) + r.shipping_cost; e.shippingCcy = r.shipping_cost_currency || e.shippingCcy; }
+    if (r.supply_cost != null) { e.supply = (e.supply ?? 0) + r.supply_cost; e.supplyCcy = r.supply_cost_currency || e.supplyCcy; }
+    map.set(r.receipt_id, e);
+  }
+
+  const needEstimate = receiptIds.filter((id) => map.get(id)?.supply == null);
+  if (needEstimate.length) {
+    const estHoles = needEstimate.map(() => '?').join(',');
+    const items = db.prepare(`
+      SELECT x.receipt_id, x.quantity, m.supply_cost, m.supply_currency
+      FROM receipt_transactions x
+      LEFT JOIN sku_meta m ON m.sku = x.sku AND m.shop_id IS ? AND x.sku <> ''
+      WHERE x.receipt_id IN (${estHoles}) AND m.supply_cost IS NOT NULL`).all(shopId, ...needEstimate);
+    for (const it of items) {
+      const e = map.get(it.receipt_id) ?? { shipping: null, shippingCcy: null, supply: null, supplyCcy: null, supplyIsEstimate: false };
+      e.supply = (e.supply ?? 0) + (it.supply_cost || 0) * (it.quantity || 1);
+      e.supplyCcy = e.supplyCcy || it.supply_currency;
+      e.supplyIsEstimate = true;
+      map.set(it.receipt_id, e);
+    }
+  }
+  return map;
+}
+
+/**
+ * Shipping + supply cost, converted into the order's own currency, plus the
+ * profit left once they and any manual cost come off the ledger net. Null
+ * fields (rather than a wrong number) whenever a currency has no FX rate to
+ * convert with - same rule reporting.js and analytics.js already follow.
+ */
+function orderCostBreakdown(r, ledger, costs) {
+  if (!costs) return { shipping: null, supply: null, profit: null };
+  const shipping = costs.shipping != null ? convert(costs.shipping, costs.shippingCcy, r.grandtotal_currency, r.created_ts) : null;
+  const supply = costs.supply != null ? convert(costs.supply, costs.supplyCcy, r.grandtotal_currency, r.created_ts) : null;
+  const shippingFailed = costs.shipping != null && shipping == null;
+  const supplyFailed = costs.supply != null && supply == null;
+
+  let profit = null;
+  if (ledger && !shippingFailed && !supplyFailed) {
+    profit = { value: round2(ledger.netAmount - (shipping || 0) - (supply || 0) - (r.manual_cost || 0)), currency: ledger.currency };
+  }
+  return {
+    shipping: shipping != null ? { value: round2(shipping), currency: r.grandtotal_currency } : null,
+    supply: supply != null ? { value: round2(supply), currency: r.grandtotal_currency, isEstimate: !!costs.supplyIsEstimate } : null,
+    profit,
+  };
 }
 
 /**
