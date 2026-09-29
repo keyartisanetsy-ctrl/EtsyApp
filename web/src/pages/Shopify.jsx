@@ -466,6 +466,12 @@ function OrdersPanel() {
                       {o.isLocallyCanceled ? 'Canceled (you)' : 'Canceled'}
                     </span>
                   )}
+                  {o.isShopAdsAttributed && (
+                    <span className="badge violet" style={{ marginLeft: 6 }}
+                      title="Attributed to Shop Campaigns - see the Shop Campaigns panel above for the actual ad spend, Shopify does not split it per order">
+                      Shop ads
+                    </span>
+                  )}
                 </td>
                 <td className="small">
                   {o.customerName || '—'}
@@ -489,6 +495,11 @@ function OrdersPanel() {
                         <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}
                              title="Part of this order's payment has been refunded">
                           (−{fmtMoney(o.refundedAmount.value, o.refundedAmount.currency)} refunded)
+                        </div>
+                      )}
+                      {o.realNet && (
+                        <div className="small dim" title={o.paymentFees ? `−${fmtMoney(o.paymentFees.value, o.paymentFees.currency)} Shopify Payments fee` : 'No processing fee reported (not a Shopify Payments charge)'}>
+                          net: {fmtMoney(o.realNet.value, o.realNet.currency)}
                         </div>
                       )}
                     </>
@@ -798,9 +809,23 @@ function OrderDetail({ orderId, onClose, onChanged }) {
                       (−{fmtMoney(data.refundedAmount.value, data.refundedAmount.currency)} refunded)
                     </div>
                   )}
+                  {data.realNet && (
+                    <div className="small dim">net after fees: {fmtMoney(data.realNet.value, data.realNet.currency)}</div>
+                  )}
                 </>
               )}
             </dd>
+            {data.isShopAdsAttributed && (
+              <>
+                <dt>Attribution</dt>
+                <dd>
+                  <span className="badge violet">Shop ads</span>{' '}
+                  <span className="small dim">
+                    Shopify does not report a per-order ad cost - see Shop Campaigns for the actual spend.
+                  </span>
+                </dd>
+              </>
+            )}
             {data.discountCodes?.length > 0 && (
               <>
                 <dt>Discount</dt>
@@ -871,6 +896,26 @@ function OrderDetail({ orderId, onClose, onChanged }) {
               ))}
             </tbody>
           </table>
+
+          <div className="section-title">Transactions (Shopify's own numbers)</div>
+          {data.transactions?.length > 0 ? (
+            <table className="data mb16">
+              <thead><tr><th>Kind</th><th>Status</th><th className="num">Amount</th><th className="num">Fee</th><th className="num">Net</th></tr></thead>
+              <tbody>
+                {data.transactions.map((t) => (
+                  <tr key={t.transactionId}>
+                    <td className="small">{t.kind}</td>
+                    <td><span className={`badge ${t.status === 'SUCCESS' ? 'green' : 'muted'}`}>{t.status}</span></td>
+                    <td className="num">{fmtMoney(t.amount, t.currency)}</td>
+                    <td className="num">{t.feeAmount != null ? fmtMoney(t.feeAmount, t.feeCurrency) : <span className="muted">—</span>}</td>
+                    <td className="num">{fmtMoney((t.amount ?? 0) - (t.feeAmount ?? 0), t.currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="small dim mb16">No transactions synced yet - press "Sync from Shopify" above.</div>
+          )}
 
           <div className="section-title">Supplier</div>
           <dl className="kv mb16">

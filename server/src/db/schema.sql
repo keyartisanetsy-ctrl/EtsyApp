@@ -311,6 +311,31 @@ CREATE TABLE IF NOT EXISTS order_flags (
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Etsy's own payment-account ledger: every real money movement on the shop -
+-- the sale credit, and every fee/tax/ad-bill debit Etsy actually took, in
+-- Etsy's own words. This is the only source for the true per-order deduction
+-- (transaction fee, processing fee, Offsite Ads fee, VAT on any of those) and
+-- for shop-level items no order ever touches (an Etsy Ads bill, a listing's
+-- auto-renew fee). reference_id/reference_type tie a line back to the
+-- receipt/listing/etc. it belongs to when it has one; entries with no match
+-- are shop-level rather than per-order.
+CREATE TABLE IF NOT EXISTS etsy_ledger_entries (
+  entry_id        INTEGER PRIMARY KEY,
+  shop_id         INTEGER,
+  ledger_id       INTEGER,
+  amount          INTEGER,        -- signed, in the ledger's own currency unit (see `currency`)
+  currency        TEXT,
+  description     TEXT,           -- Etsy's own coarse kind: payment, refund, bill payment, etc.
+  ledger_type     TEXT,           -- Etsy's own finer label where given (fee/tax/marketing/vat line)
+  reference_type  TEXT,
+  reference_id    TEXT,
+  parent_entry_id INTEGER,        -- links e.g. a VAT-on-fee line back to the fee it taxed
+  create_date     INTEGER,        -- epoch seconds
+  synced_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_etsy_ledger_shop ON etsy_ledger_entries(shop_id, create_date);
+CREATE INDEX IF NOT EXISTS idx_etsy_ledger_ref ON etsy_ledger_entries(reference_type, reference_id);
+
 -- ---------------------------------------------------------------- tracking
 CREATE TABLE IF NOT EXISTS shipments (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -899,6 +924,27 @@ CREATE TABLE IF NOT EXISTS shopify_order_line_items (
   FOREIGN KEY (order_id) REFERENCES shopify_orders(order_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_shopify_li_order ON shopify_order_line_items(order_id);
+
+-- Shopify's own per-order money movements - a charge or refund, and (for
+-- Shopify Payments orders) the real processing fee Shopify took on it. This
+-- is what actually lands after Shopify's own cut, the same idea as Etsy's
+-- ledger entries above.
+CREATE TABLE IF NOT EXISTS shopify_order_transactions (
+  transaction_id  TEXT PRIMARY KEY,   -- gid://shopify/OrderTransaction/123
+  order_id        TEXT NOT NULL,
+  kind            TEXT,               -- SALE | REFUND | CAPTURE | AUTHORIZATION | ...
+  status          TEXT,
+  amount          REAL,
+  currency        TEXT,
+  -- Shopify Payments fees only; null on any other gateway (PayPal etc.),
+  -- which does not report a fee back to the Admin API at all.
+  fee_amount      REAL,
+  fee_currency    TEXT,
+  fees_raw        TEXT,               -- the TransactionFee[] as given, for a line-by-line breakdown
+  created_at_shopify TEXT,
+  FOREIGN KEY (order_id) REFERENCES shopify_orders(order_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_shopify_txn_order ON shopify_order_transactions(order_id);
 
 -- What you paid to ship a Shopify order, and the tracking you added. Kept
 -- separate from Etsy's `tracking` table (shaped around polling YunTrack)

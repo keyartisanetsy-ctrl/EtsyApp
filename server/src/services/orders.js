@@ -123,13 +123,14 @@ export function listOrders({
 
   const total = db.prepare(`SELECT COUNT(*) AS c ${base}`).get(...params).c;
   const supplyPreview = loadSupplyPreview(db, activeShopId(), rows.map((r) => r.receipt_id));
+  const ledgerSummaries = loadLedgerSummaries(db, activeShopId(), rows.map((r) => r.receipt_id));
 
   return {
     total, limit, offset,
     // The currency the shop reports in, so the list can put a converted figure
     // under a lira total without every row asking the server what it is.
     reportingCurrency: reportingCurrency(),
-    rows: rows.map((r) => orderSummary(r, supplyPreview.get(r.receipt_id))),
+    rows: rows.map((r) => orderSummary(r, supplyPreview.get(r.receipt_id), ledgerSummaries.get(r.receipt_id))),
   };
 }
 
@@ -167,7 +168,7 @@ function loadSupplyPreview(db, shopId, receiptIds) {
   return map;
 }
 
-function orderSummary(r, preview) {
+function orderSummary(r, preview, ledger) {
   const linkItem = preview?.linkItem ?? preview?.firstItem ?? null;
   const photoItem = preview?.photoItem ?? preview?.firstItem ?? null;
   return {
@@ -203,6 +204,11 @@ function orderSummary(r, preview) {
       : r.refunded_amount
         ? { value: Math.max(0, (r.grandtotal_amount - r.refunded_amount) / (r.grandtotal_divisor || 100)), currency: r.grandtotal_currency }
         : asMoney(r.grandtotal_amount, r.grandtotal_divisor, r.grandtotal_currency),
+    // What Etsy's own ledger says actually landed after every fee, tax
+    // pass-through and ad charge it booked against this order - null until
+    // "Sync ledger" has run at least once for this order's date range.
+    ledgerNet: ledger ? { value: ledger.netAmount, currency: ledger.currency } : null,
+    ledgerLineCount: ledger?.lineCount ?? 0,
     isGift: !!r.is_gift,
     messageFromBuyer: r.message_from_buyer || '',
     createdTs: r.created_ts,
@@ -304,8 +310,10 @@ export function getOrder(receiptId) {
     FROM shipments s LEFT JOIN tracking t ON t.tracking_code = s.tracking_code AND t.shop_id IS s.shop_id
     WHERE s.receipt_id = ? ORDER BY s.id DESC`).all(receiptId);
 
+  const ledger = ledgerForReceipt(receiptId);
   return {
-    ...orderSummary({ ...r, item_count: items.length }),
+    ...orderSummary({ ...r, item_count: items.length }, null, ledger ? { netAmount: ledger.netAmount, currency: ledger.currency, lineCount: ledger.lines.length } : null),
+    ledgerLines: ledger?.lines ?? [],
     address: {
       name: r.name,
       firstLine: r.first_line,
@@ -493,6 +501,113 @@ export function orderCounters() {
                      AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.receipt_id = r.receipt_id)`),
     alerts: one(`SELECT COUNT(*) AS c FROM tracking WHERE shop_id IS ?
                  AND (is_stale = 1 OR status IN ('exception','not_found','returned')) AND alert_ack = 0`),
+  };
+}
+
+// ------------------------------------------------------------------- ledger
+
+/**
+ * What Etsy's own ledger says this order actually nets, and the individual
+ * fee/tax/ad lines that make it up - in Etsy's own words, not re-derived.
+ * Matched by reference_id against either the receipt itself or one of its
+ * transactions, since a per-item fee (Etsy's "6.5% of item total" lines)
+ * references the transaction/listing it was charged against rather than the
+ * receipt as a whole.
+ *
+ * Returns null when nothing has synced yet for this order - "Sync ledger"
+ * needs pressing at least once, or this order is older than the sync window.
+ */
+export function ledgerForReceipt(receiptId) {
+  const db = getDb();
+  const shopId = activeShopId();
+  const txnIds = db.prepare('SELECT transaction_id FROM receipt_transactions WHERE receipt_id = ?')
+    .all(receiptId).map((r) => String(r.transaction_id));
+  const refs = [String(receiptId), ...txnIds];
+  const holes = refs.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT entry_id, amount, currency, description, ledger_type, reference_type, reference_id, create_date
+    FROM etsy_ledger_entries WHERE shop_id IS ? AND reference_id IN (${holes})
+    ORDER BY create_date, entry_id`).all(shopId, ...refs);
+  if (!rows.length) return null;
+
+  const currency = rows[0].currency;
+  return {
+    // The actual money left once every fee, tax pass-through and ad charge
+    // synced for this order is accounted for - summing every line nets to
+    // exactly what landed, with no need to know which lines mean what.
+    netAmount: rows.reduce((sum, r) => sum + (r.amount || 0), 0) / 100,
+    currency,
+    lines: rows.map((r) => ({
+      entryId: r.entry_id,
+      amount: (r.amount || 0) / 100,
+      currency: r.currency,
+      description: r.description,
+      ledgerType: r.ledger_type,
+      createdTs: r.create_date,
+    })),
+  };
+}
+
+/** Same thing, batched for the list - one query instead of one per row. */
+function loadLedgerSummaries(db, shopId, receiptIds) {
+  const map = new Map();
+  if (!receiptIds.length) return map;
+  const txnRows = db.prepare(`
+    SELECT receipt_id, transaction_id FROM receipt_transactions WHERE receipt_id IN (${receiptIds.map(() => '?').join(',')})`)
+    .all(...receiptIds);
+  const refToReceipt = new Map(receiptIds.map((id) => [String(id), id]));
+  for (const t of txnRows) refToReceipt.set(String(t.transaction_id), t.receipt_id);
+  if (!refToReceipt.size) return map;
+
+  const refs = [...refToReceipt.keys()];
+  const rows = db.prepare(`
+    SELECT amount, currency, reference_id FROM etsy_ledger_entries
+    WHERE shop_id IS ? AND reference_id IN (${refs.map(() => '?').join(',')})`).all(shopId, ...refs);
+
+  for (const r of rows) {
+    const receiptId = refToReceipt.get(r.reference_id);
+    if (receiptId == null) continue;
+    if (!map.has(receiptId)) map.set(receiptId, { netAmount: 0, currency: r.currency, lineCount: 0 });
+    const entry = map.get(receiptId);
+    entry.netAmount += (r.amount || 0) / 100;
+    entry.lineCount += 1;
+  }
+  return map;
+}
+
+/**
+ * Shop-level ledger items no single order owns: a standalone Etsy Ads bill,
+ * a listing's auto-renew fee, and the like. Grouped by Etsy's own
+ * description/ledger_type so nothing here is re-categorised or guessed.
+ */
+export function shopLedgerSummary({ sinceDays = 30 } = {}) {
+  const db = getDb();
+  const shopId = activeShopId();
+  const since = Math.floor(Date.now() / 1000) - sinceDays * 86_400;
+  const receiptIds = db.prepare('SELECT receipt_id FROM receipts WHERE shop_id IS ?').all(shopId).map((r) => String(r.receipt_id));
+  const txnIds = db.prepare(`
+    SELECT transaction_id FROM receipt_transactions x JOIN receipts r ON r.receipt_id = x.receipt_id
+    WHERE r.shop_id IS ?`).all(shopId).map((r) => String(r.transaction_id));
+  const orderRefs = new Set([...receiptIds, ...txnIds]);
+
+  const rows = db.prepare(`
+    SELECT amount, currency, description, ledger_type, reference_id, create_date
+    FROM etsy_ledger_entries WHERE shop_id IS ? AND create_date >= ?`).all(shopId, since);
+
+  const shopLevel = rows.filter((r) => !orderRefs.has(r.reference_id));
+  const groups = new Map();
+  for (const r of shopLevel) {
+    const label = r.ledger_type || r.description || 'Other';
+    if (!groups.has(label)) groups.set(label, { label, total: 0, count: 0, currency: r.currency });
+    const g = groups.get(label);
+    g.total += (r.amount || 0) / 100;
+    g.count += 1;
+  }
+  return {
+    sinceDays,
+    total: shopLevel.reduce((sum, r) => sum + (r.amount || 0), 0) / 100,
+    currency: rows[0]?.currency ?? null,
+    groups: [...groups.values()].sort((a, b) => a.total - b.total),
   };
 }
 

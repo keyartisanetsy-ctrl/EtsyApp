@@ -212,11 +212,37 @@ export function listOrders({ search = '', canceled = null, limit = 100, offset =
 
   const total = db.prepare(`SELECT COUNT(*) AS c ${base}`).get(...params).c;
   const supplyPreview = loadSupplyPreview(db, shopId, rows.map((r) => r.order_id));
+  const txnSummary = loadTransactionSummary(db, rows.map((r) => r.order_id));
 
   return {
     total, limit, offset,
-    rows: rows.map((r) => shapeOrder(r, supplyPreview.get(r.order_id))),
+    rows: rows.map((r) => shapeOrder(r, supplyPreview.get(r.order_id), txnSummary.get(r.order_id))),
   };
+}
+
+/**
+ * What Shopify's own transactions say actually landed on this order - the
+ * charge(s) minus refund(s), minus whatever Shopify Payments fee it reported
+ * (null/no fee at all on any other gateway, which is the honest answer
+ * rather than a guessed one). Batched for the list the same way the supply
+ * preview above is.
+ */
+function loadTransactionSummary(db, orderIds) {
+  const map = new Map();
+  if (!orderIds.length) return map;
+  const holes = orderIds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT order_id, kind, amount, currency, fee_amount
+    FROM shopify_order_transactions WHERE order_id IN (${holes})`).all(...orderIds);
+  for (const t of rows) {
+    if (!map.has(t.order_id)) map.set(t.order_id, { netAmount: 0, feeAmount: 0, hasFees: false, currency: t.currency, count: 0 });
+    const s = map.get(t.order_id);
+    const sign = t.kind === 'REFUND' ? -1 : (t.kind === 'SALE' || t.kind === 'CAPTURE') ? 1 : 0;
+    s.netAmount += sign * (t.amount || 0);
+    if (t.fee_amount != null) { s.netAmount -= t.fee_amount; s.feeAmount += t.fee_amount; s.hasFees = true; }
+    s.count += 1;
+  }
+  return map;
 }
 
 /**
@@ -247,7 +273,19 @@ function loadSupplyPreview(db, shopId, orderIds) {
   return map;
 }
 
-function shapeOrder(r, preview) {
+/**
+ * A best-effort read of whether this sale is attributed to Shopify's own
+ * Shop app / Shop Campaigns, from the same source/attribution fields the
+ * order sync already pulls. Shopify does not split ad spend down to one
+ * dollar figure per order - the actual cost lives at the campaign level in
+ * Shop Campaigns (Shopify.jsx's ShopCampaignsPanel) - so this only flags
+ * *which* orders to credit to it, never a per-order cost.
+ */
+function looksLikeShopAds(sourceName, attributionSource) {
+  return /\bshop[\s_-]*(campaigns?|ads?)\b/i.test(`${sourceName || ''} ${attributionSource || ''}`);
+}
+
+function shapeOrder(r, preview, txn) {
   const linkItem = preview?.linkItem ?? preview?.firstItem ?? null;
   const photoItem = preview?.photoItem ?? preview?.firstItem ?? null;
   return {
@@ -276,6 +314,14 @@ function shapeOrder(r, preview) {
         ? { value: Math.max(0, (r.total_amount ?? 0) - r.refunded_amount), currency: r.currency }
         : { value: r.total_amount, currency: r.currency },
     notes: r.notes || '',
+    // What Shopify's own transactions say actually landed, after whatever
+    // Shopify Payments fee it reported - null until orders have been synced
+    // since transactions were added, or on a non-Shopify-Payments gateway
+    // that reports no fee at all.
+    realNet: txn ? { value: txn.netAmount, currency: txn.currency } : null,
+    paymentFees: txn?.hasFees ? { value: txn.feeAmount, currency: txn.currency } : null,
+    // See looksLikeShopAds() - attribution only, never an exact ad cost.
+    isShopAdsAttributed: looksLikeShopAds(r.source_name, r.attribution_source),
     itemCount: r.item_count, trackingNumber: r.tracking_number || null, trackingCompany: r.tracking_company || null,
     shippingCost: r.shipping_cost ?? null, shippingCostCurrency: r.shipping_cost_currency ?? null,
     pushedAt: r.pushed_at || null,
@@ -334,7 +380,22 @@ export function getOrder(orderId) {
     warehousePhotoId: i.warehouse_photo_id || null,
     warehousePhotoUrl: i.warehouse_photo_id ? `/api/ai/attachments/${i.warehouse_photo_id}` : null,
   }));
-  return { ...shapeOrder(o), trackingUrl: o.tracking_url || null, items };
+
+  const txnRows = db.prepare(`
+    SELECT transaction_id, kind, status, amount, currency, fee_amount, fee_currency, fees_raw, created_at_shopify
+    FROM shopify_order_transactions WHERE order_id = ? ORDER BY created_at_shopify`).all(orderId);
+  const txnSummary = loadTransactionSummary(db, [orderId]).get(orderId);
+  const transactions = txnRows.map((t) => ({
+    transactionId: t.transaction_id, kind: t.kind, status: t.status,
+    amount: t.amount, currency: t.currency,
+    feeAmount: t.fee_amount, feeCurrency: t.fee_currency,
+    // Etsy's ledger equivalent shows each fee named and rated ("6.5% of
+    // item total"); Shopify's TransactionFee carries the same shape -
+    // type/rate/rateName/flatFeeName - kept verbatim rather than re-labelled.
+    fees: parse(t.fees_raw, []),
+  }));
+
+  return { ...shapeOrder(o, null, txnSummary), trackingUrl: o.tracking_url || null, items, transactions };
 }
 
 /** What this parcel cost to send, typed in next to the tracking number - mirrors tracking.setShippingCost. */

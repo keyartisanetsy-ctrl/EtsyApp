@@ -530,6 +530,55 @@ export async function syncReceipts({ full = false, sinceDays = null, onProgress 
   return summary;
 }
 
+// ------------------------------------------------------------------- ledger
+
+/**
+ * Etsy's own payment-account ledger - every real credit and debit the shop's
+ * balance actually saw: the sale, the transaction fee, the processing fee,
+ * an Offsite Ads fee, VAT on any of those, a standalone Etsy Ads bill, a
+ * listing's auto-renew fee. This is the only source for what an order truly
+ * nets after Etsy's cut, and for shop-level items (Ads bills, listing fees)
+ * that never touch a specific order at all.
+ *
+ * min_created/max_created are required by Etsy's endpoint, so the first sync
+ * needs an explicit window; after that the shop's own last-synced entry
+ * decides where to resume, the same watermark idea as syncReceipts.
+ */
+export async function syncLedgerEntries({ sinceDays = 90 } = {}) {
+  const shopId = requireShopId();
+  const db = getDb();
+
+  const last = db.prepare('SELECT MAX(create_date) AS t FROM etsy_ledger_entries WHERE shop_id IS ?').get(shopId)?.t;
+  const minCreated = last ? Math.max(0, last - 86_400) : Math.floor(Date.now() / 1000) - sinceDays * 86_400;
+  const maxCreated = Math.floor(Date.now() / 1000);
+
+  const upsert = db.prepare(`
+    INSERT INTO etsy_ledger_entries (entry_id, shop_id, ledger_id, amount, currency, description,
+      ledger_type, reference_type, reference_id, parent_entry_id, create_date, synced_at)
+    VALUES (@entryId,@shopId,@ledgerId,@amount,@currency,@description,@ledgerType,@referenceType,
+      @referenceId,@parentEntryId,@createDate,datetime('now'))
+    ON CONFLICT(entry_id) DO UPDATE SET amount=excluded.amount, currency=excluded.currency,
+      description=excluded.description, ledger_type=excluded.ledger_type,
+      reference_type=excluded.reference_type, reference_id=excluded.reference_id,
+      parent_entry_id=excluded.parent_entry_id, synced_at=excluded.synced_at`);
+
+  const entries = await callAll('getShopPaymentAccountLedgerEntries',
+    { shop_id: shopId, min_created: minCreated, max_created: maxCreated });
+
+  for (const e of entries) {
+    upsert.run({
+      entryId: e.entry_id, shopId, ledgerId: e.ledger_id ?? null, amount: e.amount ?? null,
+      currency: e.currency ?? null, description: e.description ?? null, ledgerType: e.ledger_type ?? null,
+      referenceType: e.reference_type ?? null, referenceId: e.reference_id != null ? String(e.reference_id) : null,
+      parentEntryId: e.parent_entry_id ?? null, createDate: e.create_date ?? e.created_timestamp ?? null,
+    });
+  }
+
+  log.info(`ledger entries synced: ${entries.length}`);
+  audit('sync.ledger', { entity: 'ledger', detail: { count: entries.length } });
+  return { entries: entries.length };
+}
+
 /**
  * Optional: after a sync, send the orders straight on to Airtable so the sheet
  * fills itself. Off by default. A failure here is reported but never fails the

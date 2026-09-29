@@ -173,6 +173,16 @@ export default function Orders() {
     } catch (err) { showError(err, 'Sync failed'); }
   };
 
+  const [syncingLedger, setSyncingLedger] = useState(false);
+  const syncLedger = async () => {
+    setSyncingLedger(true);
+    try {
+      const r = await api.post('/orders/sync-ledger', {});
+      toast({ kind: 'ok', title: 'Ledger synced', body: `${r.entries} entries` });
+      refreshAll();
+    } catch (err) { showError(err, 'Ledger sync failed'); } finally { setSyncingLedger(false); }
+  };
+
   const exportXlsx = async () => {
     try {
       const r = await api.post('/exports/orders', { search: debounced, done: done || undefined, shipped: shipped || undefined, alertsOnly });
@@ -205,6 +215,11 @@ export default function Orders() {
           </button>
           <button className="btn sm" onClick={exportXlsx}>⤓ Excel</button>
           <button className="btn sm" onClick={syncOrders}>↻ Sync</button>
+          <button className="btn sm" onClick={syncLedger} disabled={syncingLedger}
+            title="Pull Etsy's own ledger: the real per-order net, Etsy Ads bills and listing fees">
+            {syncingLedger ? <Spinner /> : '🧾'} Sync ledger
+          </button>
+          <FeesAndAdsPanel />
           <button className="btn sm" onClick={() => setTemplatesOpen(true)}>✉ Message templates</button>
           <button className="btn sm primary" onClick={() => setTrackingOpen(true)}>➤ Bulk tracking</button>
         </>
@@ -336,6 +351,11 @@ export default function Orders() {
                       <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}
                            title={o.offsiteAdsFee.explanation}>
                         −{o.offsiteAdsFee.fee} ads{o.offsiteAdsFee.capped ? ' (cap)' : ''}
+                      </div>
+                    )}
+                    {o.ledgerNet && (
+                      <div className="small dim" title={`${o.ledgerLineCount} ledger line(s) synced for this order - open it for the breakdown`}>
+                        net: {fmtMoney(o.ledgerNet.value, o.ledgerNet.currency)}
                       </div>
                     )}
                   </td>
@@ -477,6 +497,65 @@ function OffsiteAdsPanel() {
           </tbody>
         </table>
         <p className="small muted mt8">Enter 12 or 15 (0.12 / 0.15 are understood too).</p>
+      </Modal>
+    </>
+  );
+}
+
+/**
+ * Shop-level items from Etsy's own ledger that no single order owns - a
+ * standalone Etsy Ads bill, a listing's auto-renew fee. Per-order fees
+ * (transaction fee, processing fee, Offsite Ads fee) show on the order
+ * itself instead, since that is what they actually belong to.
+ */
+function FeesAndAdsPanel() {
+  const [open, setOpen] = useState(false);
+  const [sinceDays, setSinceDays] = useState(30);
+  const { data } = useAsync(() => (open ? api.get('/orders/ledger-summary', { sinceDays }) : null), [open, sinceDays], { immediate: open });
+
+  return (
+    <>
+      <button className="btn sm" onClick={() => setOpen(true)}
+        title="Etsy Ads bills and listing fees that don't belong to any one order - press Sync ledger first">
+        📣 Fees &amp; Ads
+      </button>
+      <Modal open={open} onClose={() => setOpen(false)} title="Shop-level fees &amp; ads">
+        <p className="small muted">
+          Etsy Ads bills, listing renewal fees, and anything else Etsy's ledger charges the shop rather than one
+          order. Per-order fees (transaction fee, processing fee, an Offsite Ads fee) show on that order itself -
+          open it and look under Ledger. Press <strong>Sync ledger</strong> first if this looks empty or stale.
+        </p>
+        <div className="field">
+          <label>Period</label>
+          <select className="select sm" value={sinceDays} onChange={(e) => setSinceDays(Number(e.target.value))}>
+            <option value={7}>Last 7 days</option>
+            <option value={30}>Last 30 days</option>
+            <option value={90}>Last 90 days</option>
+          </select>
+        </div>
+        {data && (
+          <>
+            <Banner kind="info">
+              Total: {fmtMoney(data.total, data.currency)} over the last {data.sinceDays} days.
+            </Banner>
+            {data.groups.length === 0 ? (
+              <Empty icon="📣" title="Nothing here yet">Sync the ledger, or widen the period.</Empty>
+            ) : (
+              <table className="data">
+                <thead><tr><th>Type (Etsy's own label)</th><th className="num">Count</th><th className="num">Total</th></tr></thead>
+                <tbody>
+                  {data.groups.map((g) => (
+                    <tr key={g.label}>
+                      <td>{g.label}</td>
+                      <td className="num">{g.count}</td>
+                      <td className="num">{fmtMoney(g.total, g.currency)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </>
+        )}
       </Modal>
     </>
   );
@@ -794,6 +873,39 @@ function OrderDetail({ id, onClose, onChanged }) {
                 </dd>
                 <OrderTotalsInUsd totals={order.totals} />
               </dl>
+
+              <div className="section-title">Ledger (Etsy's own numbers)</div>
+              {order.ledgerLines?.length > 0 ? (
+                <>
+                  <table className="data mb8">
+                    <thead><tr><th>Etsy's label</th><th className="num">Amount</th></tr></thead>
+                    <tbody>
+                      {order.ledgerLines.map((l) => (
+                        <tr key={l.entryId}>
+                          <td>{l.ledgerType || l.description}</td>
+                          <td className="num" style={{ color: l.amount < 0 ? 'var(--warn, #e0a33e)' : undefined }}>
+                            {fmtMoney(l.amount, order.ledgerNet?.currency)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr>
+                        <td><strong>Net</strong></td>
+                        <td className="num"><strong>{fmtMoney(order.ledgerNet?.value, order.ledgerNet?.currency)}</strong></td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                  <div className="hint">
+                    Every line Etsy actually booked against this order - the sale, its transaction/processing fee,
+                    an Offsite Ads fee when it applies, tax pass-through - straight from Etsy's ledger, not re-derived.
+                  </div>
+                </>
+              ) : (
+                <div className="small dim mb16">
+                  No ledger data synced yet for this order. Press <strong>Sync ledger</strong> on the Orders page.
+                </div>
+              )}
 
               {(order.messages.fromBuyer || order.messages.giftMessage) && (
                 <>

@@ -117,6 +117,14 @@ query Orders($cursor: String) {
       customerJourneySummary {
         firstVisit { source landingPage referrerUrl }
       }
+      transactions(first: 10) {
+        id kind status
+        amountSet { shopMoney { amount currencyCode } }
+        fees {
+          type flatFeeName rateName rate
+          amount { amount currencyCode }
+        }
+      }
       lineItems(first: 100) {
         nodes {
           id title variantTitle sku quantity
@@ -162,6 +170,11 @@ export async function syncOrders({ pages = 5 } = {}) {
     INSERT INTO shopify_order_line_items (line_item_id, order_id, product_id, variant_id, sku, title,
       variant_title, quantity, price_amount, currency, image_url)
     VALUES (@id,@orderId,@productId,@variantId,@sku,@title,@variantTitle,@quantity,@price,@currency,@image)`);
+  const clearTxns = db.prepare('DELETE FROM shopify_order_transactions WHERE order_id = ?');
+  const insertTxn = db.prepare(`
+    INSERT INTO shopify_order_transactions (transaction_id, order_id, kind, status, amount, currency,
+      fee_amount, fee_currency, fees_raw, created_at_shopify)
+    VALUES (@id,@orderId,@kind,@status,@amount,@currency,@feeAmount,@feeCurrency,@feesRaw,@createdAt)`);
 
   let cursor = null;
   let orders = 0;
@@ -200,6 +213,21 @@ export async function syncOrders({ pages = 5 } = {}) {
           sku: li.sku ?? '', title: li.title, variantTitle: li.variantTitle ?? '', quantity: li.quantity ?? 0,
           price: num(li.originalUnitPriceSet?.shopMoney?.amount),
           currency: li.originalUnitPriceSet?.shopMoney?.currencyCode ?? null, image: li.image?.url ?? null,
+        });
+      }
+      clearTxns.run(o.id);
+      for (const t of o.transactions ?? []) {
+        // `fees` is only ever populated for Shopify Payments transactions -
+        // any other gateway (PayPal, manual, etc.) reports no fee at all,
+        // which is the honest answer rather than a guessed one.
+        const feeTotal = (t.fees ?? []).reduce((sum, f) => sum + (num(f.amount?.amount) ?? 0), 0);
+        insertTxn.run({
+          id: t.id, orderId: o.id, kind: t.kind ?? null, status: t.status ?? null,
+          amount: num(t.amountSet?.shopMoney?.amount), currency: t.amountSet?.shopMoney?.currencyCode ?? null,
+          feeAmount: t.fees?.length ? feeTotal : null,
+          feeCurrency: t.fees?.[0]?.amount?.currencyCode ?? null,
+          feesRaw: t.fees?.length ? json(t.fees) : null,
+          createdAt: o.createdAt,
         });
       }
       orders += 1;

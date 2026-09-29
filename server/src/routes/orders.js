@@ -78,6 +78,15 @@ router.post('/sync', asyncRoute(async (req, res) => {
   res.json(await sync.syncReceipts({ full: bool(req.body?.full), sinceDays: int(req.body?.sinceDays) }));
 }));
 
+/** Etsy's own ledger: real per-order net, and shop-level items like Etsy Ads bills / listing fees. */
+router.post('/sync-ledger', asyncRoute(async (req, res) => {
+  res.json(await sync.syncLedgerEntries({ sinceDays: int(req.body?.sinceDays, 90) }));
+}));
+
+router.get('/ledger-summary', asyncRoute(async (req, res) => {
+  res.json(orders.shopLedgerSummary({ sinceDays: int(req.query.sinceDays, 30) }));
+}));
+
 /** The orders whose addresses look wrong and have not been dealt with. */
 router.get('/address-checks', asyncRoute(async (req, res) => {
   res.json({ flagged: addresses.flagged({ limit: int(req.query.limit, 100) }) });
