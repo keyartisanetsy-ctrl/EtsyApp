@@ -58,20 +58,31 @@ about to ship a parcel.
 The FIRST image is a photo taken at the warehouse of the item about to be packed. The SECOND
 image is the shop's own listing photo of the product that was ordered. Decide whether the
 warehouse photo is plausibly the same product - not a pixel-identical match, since lighting,
-angle, background and packaging differ, but the same item, colour and style.
+angle, background and packaging differ, but the same item.
+
+Look past the general category of product and check the actual details, the same way a careful
+seller would before sealing the box:
+- Shape and silhouette - the overall form and outline, not just "it's a similar-looking thing".
+- Proportions and size - relative dimensions, thickness, length, how parts relate to each other.
+- Material and texture - fabric vs. leather vs. plastic vs. metal, matte vs. glossy, etc.
+- Colour and pattern - exact shade, any print, stripes, gradient, or trim, not just "both blue".
+- Small features - a clasp, buckle, seam, stitching pattern, logo, engraving, printed text, or
+  any personalization the buyer chose - these often distinguish two otherwise similar items.
+- Quantity and set contents - the right number of pieces, and the right pieces, if it is a set.
 
 Be careful:
 - A product shown from a different angle, in different lighting, or already boxed is still a
-  match if it is the same item.
-- Flag a mismatch only when you can point to a real difference - a different colour, shape,
-  pattern, size, or an entirely different product.
-- If the warehouse photo is unclear, too dark, or does not show the product clearly enough to
-  judge, say you are unsure rather than guessing.
+  match if all of the above genuinely line up.
+- Flag a mismatch when you can point to a real difference in any of the details above - do not
+  wave it through just because it is broadly "the same kind of product".
+- If the warehouse photo is unclear, too dark, or does not show enough of the product to judge
+  the details above, say you are unsure rather than guessing.
 
 Reply with JSON only:
 {"verdict":"match"|"mismatch"|"unsure",
  "confidence":0.0-1.0,
- "summary":"one short line the seller can read at a glance"}`;
+ "summary":"one short line the seller can read at a glance - name the specific detail checked
+   or, on a mismatch, the specific detail that differs (shape, colour, size, a missing feature, etc.)"}`;
 
 /**
  * Compare one item's warehouse photo against its own listing photo.

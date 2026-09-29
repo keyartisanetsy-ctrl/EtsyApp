@@ -236,6 +236,13 @@ export function migrateSchema(db) {
       SELECT r.shop_id FROM receipts r WHERE r.receipt_id = shipments.receipt_id
     ) WHERE shop_id IS NULL`);
   }
+
+  // A seller-side "cancel" the shop applies here - Etsy's API has no endpoint
+  // to cancel a receipt (updateShopReceipt only takes was_shipped/was_paid),
+  // so this is local only: it hides the order from the working queue without
+  // claiming anything happened on Etsy.
+  addColumn(db, 'order_flags', 'is_canceled', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'order_flags', 'canceled_at', 'TEXT');
 }
 
 /** Runs AFTER schema.sql, once etsy_accounts is guaranteed to exist. */

@@ -48,6 +48,15 @@ export function statusesFor(row = {}) {
     add('canceled', 'Canceled', 'muted', 'Etsy reports this order as cancelled.');
   }
 
+  // Distinct from the one above: this is a cancel you applied in this app,
+  // which Etsy has no API for a seller to do itself - so it never reaches
+  // Etsy, and both chips can be true at once for different reasons.
+  if (row.locally_canceled) {
+    add('locally_canceled', 'Canceled (you)', 'bad',
+      row.canceled_at ? `You canceled this order here on ${row.canceled_at}. Etsy is not affected.`
+        : 'You canceled this order here. Etsy is not affected.');
+  }
+
   // Etsy's own receipt status is the one signal this app never invented -
   // trust it over "nothing happened locally yet" so an order Etsy calls
   // done does not sit tagged "New" forever just because it was fulfilled
@@ -81,7 +90,7 @@ export function statusesFor(row = {}) {
       `Tracking ${row.tracking_code} is on the order${row.carrier_name ? ` with ${row.carrier_name}` : ''}.`);
   }
   if (delivered) {
-    add('delivered', 'Delivered', 'ok',
+    add('delivered', 'Arrived', 'ok',
       'The parcel arrived. Good moment to ask the buyer for a review.');
   }
 

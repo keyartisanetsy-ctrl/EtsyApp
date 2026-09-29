@@ -16,7 +16,7 @@ export const STATUS_LABELS = {
   in_transit: 'On its way',
   out_for_delivery: 'Out for delivery',
   pickup_waiting: 'Waiting for pickup',
-  delivered: 'Delivered',
+  delivered: 'Arrived',
   exception: 'Exception',
   returned: 'Returned',
   expired: 'Expired',

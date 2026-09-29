@@ -24,6 +24,7 @@ export default function Orders() {
   const [seen, setSeen] = useState(params.get('seen') ?? '');
   const [hasTracking, setHasTracking] = useState(params.get('hasTracking') ?? '');
   const [alertsOnly, setAlertsOnly] = useState(params.get('alertsOnly') === 'true');
+  const [showCanceled, setShowCanceled] = useState(false);
   const [sort, setSort] = useState('created');
   const [dir, setDir] = useState('desc');
   const [offset, setOffset] = useState(0);
@@ -32,6 +33,7 @@ export default function Orders() {
   const [sendingToAirtable, setSendingToAirtable] = useState(null);
   const [detailId, setDetailId] = useState(null);
   const [trackingOpen, setTrackingOpen] = useState(false);
+  const [quickTrackId, setQuickTrackId] = useState(null);
   const [busy, setBusy] = useState(false);
   const [fetchingMissing, setFetchingMissing] = useState(false);
   const [airtableMessagePreview, setAirtableMessagePreview] = useState(null);
@@ -42,8 +44,12 @@ export default function Orders() {
 
   const query = useMemo(() => ({
     search: debounced, done, shipped, seen, hasTracking,
+    // Left off, the server already hides canceled orders (Etsy's own, and
+    // ones canceled here) by default. Ticking "Show canceled" asks for only
+    // those instead, so a mistaken cancel can still be found and undone.
+    canceled: showCanceled ? true : undefined,
     alertsOnly: alertsOnly || undefined, sort, dir, limit: LIMIT, offset,
-  }), [debounced, done, shipped, seen, hasTracking, alertsOnly, sort, dir, offset]);
+  }), [debounced, done, shipped, seen, hasTracking, showCanceled, alertsOnly, sort, dir, offset]);
 
   const { data, loading, error, reload } = useAsync(() => api.get('/orders', query), [query]);
   const { data: counters, reload: reloadCounters } = useAsync(() => api.get('/orders/counters'), []);
@@ -135,6 +141,30 @@ export default function Orders() {
     } catch (err) { showError(err, 'Could not update'); }
   };
 
+  /**
+   * Cancel here means here only - Etsy has no API for a seller to cancel a
+   * paid receipt, so this just drops the order out of the working queue.
+   * Always confirmed first, and always reversible from "Show canceled".
+   */
+  const cancelOrder = async (order) => {
+    if (!confirm(`Cancel order #${order.receiptId} (${order.name || 'no name'})?\n\n`
+      + 'This only hides it in this app - nothing changes on Etsy, and the buyer is not notified. '
+      + 'You can find it again with "Show canceled" and restore it.')) return;
+    try {
+      await api.post('/orders/flags', { receiptIds: [order.receiptId], canceled: true });
+      toast({ kind: 'ok', title: `Order #${order.receiptId} canceled here` });
+      refreshAll();
+    } catch (err) { showError(err, 'Could not cancel that'); }
+  };
+
+  const restoreOrder = async (order) => {
+    try {
+      await api.post('/orders/flags', { receiptIds: [order.receiptId], canceled: false });
+      toast({ kind: 'ok', title: `Order #${order.receiptId} restored` });
+      refreshAll();
+    } catch (err) { showError(err, 'Could not restore that'); }
+  };
+
   const syncOrders = async () => {
     try {
       const r = await api.post('/orders/sync', {});
@@ -188,6 +218,9 @@ export default function Orders() {
           <Filter label="Seen" value={seen} onChange={setSeen} />
           <Filter label="Tracking" value={hasTracking} onChange={setHasTracking} />
           <Checkbox checked={alertsOnly} onChange={(v) => { setAlertsOnly(v); setOffset(0); }} label="Alerts only" />
+          <span title="Canceled orders (Etsy's own, or ones you canceled here) are hidden by default - tick this to find and restore one">
+            <Checkbox checked={showCanceled} onChange={(v) => { setShowCanceled(v); setOffset(0); }} label="Show canceled" />
+          </span>
           <div className="spacer" />
           <OffsiteAdsPanel />
           {counters?.newOrders > 0 && (
@@ -260,7 +293,14 @@ export default function Orders() {
                     <div className="small muted">{fmtDate(o.createdTs)}</div>
                   </td>
                   <td>
-                    <div>{o.name || '—'}{o.isFlagged && <span className="badge amber" style={{ marginLeft: 6 }}>⚑</span>}</div>
+                    <div>
+                      {o.name || '—'}
+                      {o.isFlagged && <span className="badge amber" style={{ marginLeft: 6 }}>⚑</span>}
+                      {o.notes && (
+                        <button className="btn xs ghost" style={{ marginLeft: 6 }} title={o.notes}
+                          onClick={() => setDetailId(o.receiptId)}>📝</button>
+                      )}
+                    </div>
                     <div className="small muted">{o.addressLine || [o.city, o.country].filter(Boolean).join(', ')}</div>
                     {o.email && <div className="small muted">{o.email}</div>}
                   </td>
@@ -288,7 +328,10 @@ export default function Orders() {
                         <a className="mono small" href={o.trackingUrl} target="_blank" rel="noreferrer">{o.trackingCode}</a>
                         <CopyButton text={o.trackingCode} label="⧉" className="btn xs ghost" />
                       </div>
-                    ) : <span className="badge grey">none</span>}
+                    ) : (
+                      <button className="btn xs" onClick={() => setQuickTrackId(o.receiptId)}
+                        title="Add a tracking number to this order without opening it">+ Add</button>
+                    )}
                   </td>
                   <td>
                     <div className="pill-row">
@@ -303,7 +346,18 @@ export default function Orders() {
                   <td><SupplyCell order={o} channel="etsy" onChanged={refreshAll} /></td>
                   <td><ProductImageCell order={o} /></td>
                   <td><WarehouseCell order={o} channel="etsy" onChanged={refreshAll} /></td>
-                  <td><button className="btn xs" onClick={() => setDetailId(o.receiptId)}>Open</button></td>
+                  <td>
+                    <div className="flex gap4">
+                      <button className="btn xs" onClick={() => setDetailId(o.receiptId)}>Open</button>
+                      {o.isLocallyCanceled ? (
+                        <button className="btn xs ghost" title="Bring this order back into the working queue"
+                          onClick={() => restoreOrder(o)}>Restore</button>
+                      ) : (
+                        <button className="btn xs danger" title="Hide this order here - nothing changes on Etsy"
+                          onClick={() => cancelOrder(o)}>Cancel</button>
+                      )}
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -312,6 +366,11 @@ export default function Orders() {
 
       <OrderDetail id={detailId} onClose={() => setDetailId(null)} onChanged={refreshAll} />
       <BulkTrackingModal open={trackingOpen} onClose={() => setTrackingOpen(false)} onDone={refreshAll} />
+      {quickTrackId && (
+        <Modal open onClose={() => setQuickTrackId(null)} title={`Add tracking — Order #${quickTrackId}`}>
+          <AddTrackingForm receiptId={quickTrackId} onAdded={() => { setQuickTrackId(null); refreshAll(); }} />
+        </Modal>
+      )}
       {sendingToAirtable && (
         <SendToAirtable
           receiptIds={sendingToAirtable}

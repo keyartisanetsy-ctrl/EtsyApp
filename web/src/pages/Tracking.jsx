@@ -176,7 +176,7 @@ export default function Tracking() {
             <Stat label="Alerts" value={summary.alerts} kind={summary.alerts ? 'alert' : 'good'}
                   note={`${summary.staleDays}+ days idle, or an exception`} />
             <Stat label="On its way" value={summary.byStatus.in_transit ?? 0} />
-            <Stat label="Delivered" value={summary.byStatus.delivered ?? 0} kind="good" />
+            <Stat label="Arrived" value={summary.byStatus.delivered ?? 0} kind="good" />
             <Stat label="Pre-shipped" value={summary.byStatus.pre_shipped ?? 0} note="No carrier scan yet" />
           </div>
         )}

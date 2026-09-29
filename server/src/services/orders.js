@@ -66,7 +66,15 @@ export function listOrders({
   flag('COALESCE(f.is_seen,0)', seen);
   flag('r.was_shipped', shipped);
   flag('r.was_paid', paid);
-  flag('r.was_canceled', canceled);
+  // Canceled here means either side: Etsy's own was_canceled, or a cancel you
+  // applied yourself in the app (order_flags.is_canceled - Etsy has no cancel
+  // endpoint, so that one never reaches Etsy). Left unset, canceled orders of
+  // either kind are hidden by default, so a working queue does not fill up
+  // with orders nobody is going to fulfill; pass canceled=false explicitly to
+  // get the same result, or canceled=true to see only the canceled ones.
+  const canceledExpr = '(COALESCE(r.was_canceled,0) = 1 OR COALESCE(f.is_canceled,0) = 1)';
+  if (canceled === true || canceled === 'true') where.push(canceledExpr);
+  else where.push(`NOT ${canceledExpr}`);
 
   if (hasTracking !== null && hasTracking !== undefined && hasTracking !== '') {
     where.push(hasTracking ? 's.tracking_code IS NOT NULL' : 's.tracking_code IS NULL');
@@ -105,6 +113,7 @@ export function listOrders({
            f.supplier_order_ref, f.supply_tracking_number, f.notes,
            COALESCE(f.problem_state,'none') AS problem_state, f.problem_note,
            COALESCE(f.offsite_ads,0) AS offsite_ads,
+           COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at,
            al.airtable_pushed_at,
            s.tracking_code, s.carrier_name, s.pushed_to_etsy,
            t.status AS tracking_status, t.days_since_move, t.is_stale, t.alert_reason,
@@ -174,6 +183,11 @@ function orderSummary(r, preview) {
     isShipped: !!r.was_shipped,
     isDelivered: !!r.was_delivered,
     isCanceled: !!r.was_canceled,
+    // Etsy's own cancel is above and is always true to what Etsy reports.
+    // This one is ours: set by the "Cancel" button in this app, and the only
+    // kind Etsy has no API to let a seller trigger.
+    isLocallyCanceled: !!r.locally_canceled,
+    canceledAt: r.canceled_at ?? null,
     isGift: !!r.is_gift,
     messageFromBuyer: r.message_from_buyer || '',
     createdTs: r.created_ts,
@@ -250,6 +264,7 @@ export function getOrder(receiptId) {
            f.supplier_order_ref, f.supply_tracking_number, f.notes, 0 AS item_count,
            COALESCE(f.problem_state,'none') AS problem_state, f.problem_note,
            COALESCE(f.offsite_ads,0) AS offsite_ads,
+           COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at,
            al.airtable_pushed_at,
            s.tracking_code, s.carrier_name, t.status AS tracking_status, t.days_since_move
     FROM receipts r
@@ -366,6 +381,7 @@ export function getOrder(receiptId) {
 
 const flagColumns = {
   done: 'is_done', seen: 'is_seen', flagged: 'is_flagged', supplierOrdered: 'supplier_ordered',
+  canceled: 'is_canceled',
 };
 
 /** Toggle any tick on one or many orders. "Done" also stamps the time. */
@@ -383,6 +399,7 @@ export function setFlags(receiptIds, patch = {}) {
         db.prepare(`UPDATE order_flags SET ${column} = ?, updated_at = datetime('now') WHERE receipt_id = ?`).run(value, id);
         if (key === 'done') db.prepare(`UPDATE order_flags SET done_at = ${value ? "datetime('now')" : 'NULL'} WHERE receipt_id = ?`).run(id);
         if (key === 'seen') db.prepare(`UPDATE order_flags SET seen_at = ${value ? "datetime('now')" : 'NULL'} WHERE receipt_id = ?`).run(id);
+        if (key === 'canceled') db.prepare(`UPDATE order_flags SET canceled_at = ${value ? "datetime('now')" : 'NULL'} WHERE receipt_id = ?`).run(id);
       }
       if (patch.notes !== undefined) db.prepare('UPDATE order_flags SET notes = ? WHERE receipt_id = ?').run(String(patch.notes), id);
       if (patch.supplierOrderRef !== undefined) db.prepare('UPDATE order_flags SET supplier_order_ref = ? WHERE receipt_id = ?').run(String(patch.supplierOrderRef), id);
@@ -442,16 +459,22 @@ export function orderCounters() {
   const db = getDb();
   const shop = activeShopId();
   const one = (sql) => db.prepare(sql).get(shop).c;
+  // Neither kind of cancellation - Etsy's own, or the local one this app's
+  // Cancel button sets - belongs in a "still to do" count, since neither is
+  // going to be fulfilled.
+  const notCanceled = 'COALESCE(r.was_canceled,0) = 0 AND COALESCE(f.is_canceled,0) = 0';
   return {
     total: one('SELECT COUNT(*) AS c FROM receipts WHERE shop_id IS ?'),
     newOrders: one(`SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
-                    WHERE r.shop_id IS ? AND COALESCE(f.is_seen,0) = 0`),
+                    WHERE r.shop_id IS ? AND COALESCE(f.is_seen,0) = 0 AND ${notCanceled}`),
     notDone: one(`SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
-                  WHERE r.shop_id IS ? AND COALESCE(f.is_done,0) = 0 AND COALESCE(r.was_canceled,0) = 0`),
+                  WHERE r.shop_id IS ? AND COALESCE(f.is_done,0) = 0 AND ${notCanceled}`),
     done: one(`SELECT COUNT(*) AS c FROM order_flags f JOIN receipts r ON r.receipt_id = f.receipt_id
                WHERE r.shop_id IS ? AND f.is_done = 1`),
-    unshipped: one('SELECT COUNT(*) AS c FROM receipts WHERE shop_id IS ? AND COALESCE(was_shipped,0) = 0 AND COALESCE(was_canceled,0) = 0'),
-    noTracking: one(`SELECT COUNT(*) AS c FROM receipts r WHERE r.shop_id IS ? AND COALESCE(r.was_canceled,0) = 0
+    unshipped: one(`SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
+                    WHERE r.shop_id IS ? AND COALESCE(r.was_shipped,0) = 0 AND ${notCanceled}`),
+    noTracking: one(`SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
+                     WHERE r.shop_id IS ? AND ${notCanceled}
                      AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.receipt_id = r.receipt_id)`),
     alerts: one(`SELECT COUNT(*) AS c FROM tracking WHERE shop_id IS ?
                  AND (is_stale = 1 OR status IN ('exception','not_found','returned')) AND alert_ack = 0`),

@@ -302,6 +302,12 @@ CREATE TABLE IF NOT EXISTS order_flags (
   -- Etsy does not tell us which orders came from an offsite ad, so this is a
   -- button you press. The fee is then worked out from the shop's rate.
   offsite_ads   INTEGER NOT NULL DEFAULT 0,
+  -- A seller-side "cancel" applied here, not on Etsy - Etsy's API has no
+  -- endpoint to cancel a receipt, so this only hides the order from the
+  -- working queue. r.was_canceled (Etsy's own field) is separate and always
+  -- true-to-Etsy; this one is ours to set and unset freely.
+  is_canceled   INTEGER NOT NULL DEFAULT 0,
+  canceled_at   TEXT,
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
