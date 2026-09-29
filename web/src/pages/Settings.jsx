@@ -643,22 +643,54 @@ function ModelPicker({ draft, setDraft }) {
         <div className="hint">Used for listing copy, message replies and the mapping suggestions.</div>
       </div>
 
-      {usable.map((p) => (
-        <div className="field" key={p.provider}>
-          <label>{p.provider} version</label>
-          <select
-            className="select"
-            value={valueOf(`ai.${p.provider}.model`, p.current ?? '')}
-            onChange={(e) => set(`ai.${p.provider}.model`, e.target.value)}
-          >
-            {p.models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-          </select>
-          <div className="hint">
-            {p.models.find((m) => m.id === valueOf(`ai.${p.provider}.model`, p.current))?.note
-              ?? 'Any model id this provider accepts can also be typed into the field below.'}
+      {usable.map((p) => {
+        const selectedId = valueOf(`ai.${p.provider}.model`, p.current ?? '');
+        const selectedModel = p.models.find((m) => m.id === selectedId);
+        const effortLevels = selectedModel?.effortLevels ?? [];
+        return (
+          <div className="field" key={p.provider}>
+            <label>
+              {p.provider} version
+              {p.provider !== 'manus' && (
+                <span className={`badge ${p.live ? 'green' : 'grey'}`} style={{ marginLeft: 6 }}
+                  title={p.live ? "Fetched live from this provider's own model list just now"
+                    : 'Could not reach the provider - showing the built-in list, which may lag behind what is actually available'}>
+                  {p.live ? 'live list' : 'built-in list'}
+                </span>
+              )}
+            </label>
+            <select
+              className="select"
+              value={selectedId}
+              onChange={(e) => set(`ai.${p.provider}.model`, e.target.value)}
+            >
+              {p.models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </select>
+            <div className="hint">
+              {selectedModel?.note ?? 'Any model id this provider accepts can also be typed into the field below.'}
+            </div>
+
+            {effortLevels.length > 0 && (
+              <div className="mt8">
+                <label>Reasoning effort / intelligence scale</label>
+                <select
+                  className="select"
+                  value={valueOf(`ai.${p.provider}.effort`, p.currentEffort ?? '')}
+                  onChange={(e) => set(`ai.${p.provider}.effort`, e.target.value)}
+                >
+                  <option value="">Default for this model</option>
+                  {effortLevels.map((lvl) => <option key={lvl} value={lvl}>{lvl}</option>)}
+                </select>
+                <div className="hint">
+                  How hard this exact model thinks before answering. Higher levels are slower and cost more,
+                  but reason more thoroughly - worth it for a judgement call, wasted on a bulk title rewrite.
+                  Levels shown are only the ones {selectedModel.label} itself accepts.
+                </div>
+              </div>
+            )}
           </div>
-        </div>
-      ))}
+        );
+      })}
 
       <div className="section-title">Address checking</div>
       <div className="hint mb8">

@@ -38,7 +38,7 @@ router.delete('/prompts/:id', asyncRoute(async (req, res) => res.json(ai.deleteP
 
 /** Which providers are set up, and which model versions each one offers. */
 router.get('/models', asyncRoute(async (req, res) => {
-  res.json({ providers: ai.modelOptions() });
+  res.json({ providers: await ai.modelOptions() });
 }));
 
 // ------------------------------------------------------------- attachments

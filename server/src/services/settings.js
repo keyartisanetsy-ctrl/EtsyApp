@@ -32,8 +32,29 @@ export const SETTING_DEFS = {
   'ai.manus.agent_profile':{ env: config.ai.manus.agentProfile, def: 'manus-1.6', label: 'Manus agent profile' },
   'ai.anthropic.api_key':  { env: config.ai.anthropic.apiKey, def: '', secret: true, label: 'Anthropic API key' },
   'ai.anthropic.model':    { env: config.ai.anthropic.model, def: 'claude-sonnet-5', label: 'Anthropic model' },
+  // Only applied when the chosen Anthropic model actually supports it -
+  // see modelMeta()/anthropicComplete() in services/ai/providers.js.
+  'ai.anthropic.effort':   { env: '', def: '', label: 'Anthropic reasoning effort', options: [
+    { value: '', label: "Default for the model" },
+    { value: 'low', label: 'Low' },
+    { value: 'medium', label: 'Medium' },
+    { value: 'high', label: 'High' },
+    { value: 'xhigh', label: 'Extra high' },
+    { value: 'max', label: 'Max (slowest, most thorough)' },
+  ] },
   'ai.openai.api_key':     { env: config.ai.openai.apiKey, def: '', secret: true, label: 'OpenAI API key' },
   'ai.openai.model':       { env: config.ai.openai.model, def: 'gpt-4o', label: 'OpenAI model' },
+  // Same idea, only applied when the chosen OpenAI model takes it.
+  'ai.openai.effort':      { env: '', def: '', label: 'OpenAI reasoning effort', options: [
+    { value: '', label: 'Default for the model' },
+    { value: 'none', label: 'None' },
+    { value: 'minimal', label: 'Minimal' },
+    { value: 'low', label: 'Low' },
+    { value: 'medium', label: 'Medium' },
+    { value: 'high', label: 'High' },
+    { value: 'xhigh', label: 'Extra high' },
+    { value: 'max', label: 'Max (slowest, most thorough)' },
+  ] },
   'ai.openai.image_model': { env: config.ai.openai.imageModel, def: 'gpt-image-1', label: 'OpenAI image model' },
   'integrations.product_studio.key': { env: '', def: '', secret: true, label: 'Product Studio pairing key' },
   'ai.address.provider':   { env: '', def: '', label: 'AI provider for address checks (blank = the default one)' },

@@ -127,7 +127,7 @@ function loadImages(attachmentIds = []) {
 
 /** Core: resolve the prompt, run the provider, record the run. */
 export async function run({
-  kind, provider, model = null, promptId = null, promptOverride = null, userInput = '',
+  kind, provider, model = null, effort = null, promptId = null, promptOverride = null, userInput = '',
   attachmentIds = [], context = null, maxTokens = 4096,
 }) {
   const images = loadImages(attachmentIds);
@@ -152,7 +152,7 @@ export async function run({
   const runId = startRun({ kind, provider: chosen, promptId: usedPromptId, input: prompt, attachments: attachmentIds });
 
   try {
-    const result = await complete({ provider: chosen, model, prompt, system, images, maxTokens });
+    const result = await complete({ provider: chosen, model, effort, prompt, system, images, maxTokens });
     finishRun(runId, { output: result.text, model: result.model, externalId: result.externalId, externalUrl: result.externalUrl, durationMs: result.durationMs });
     bumpUsage(usedPromptId);
     log.info(`${kind} via ${result.provider} in ${result.durationMs}ms`);
