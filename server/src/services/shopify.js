@@ -177,27 +177,40 @@ export function saveVariantMeta(sku, meta = {}) {
 
 // --------------------------------------------------------------- orders
 
-export function listOrders({ search = '', limit = 100, offset = 0 } = {}) {
+export function listOrders({ search = '', canceled = null, limit = 100, offset = 0 } = {}) {
   const shopId = requireShopifyShopId();
   const db = getDb();
   const where = ['o.shop_id = ?'];
   const params = [shopId];
   if (search) { where.push('(o.name LIKE ? OR o.customer_name LIKE ? OR o.email LIKE ?)'); params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
+  // Same idea as the Etsy orders list: canceled here means either side -
+  // Shopify's own cancelled_at, or a cancel applied in this app
+  // (shopify_fulfillments.is_canceled). This app deliberately never calls
+  // Shopify's real cancel API, even though it could, so both are equally
+  // "local only". Hidden by default; canceled=true shows only those.
+  const canceledExpr = "(o.cancelled_at IS NOT NULL OR COALESCE(f.is_canceled,0) = 1)";
+  if (canceled === true || canceled === 'true') where.push(canceledExpr);
+  else where.push(`NOT ${canceledExpr}`);
   const clause = `WHERE ${where.join(' AND ')}`;
 
-  const rows = db.prepare(`
-    SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
-           f.supplier_order_ref, f.supply_tracking_number, al.airtable_pushed_at,
-           (SELECT COUNT(*) FROM shopify_order_line_items x WHERE x.order_id = o.order_id) AS item_count
+  const base = `
     FROM shopify_orders o
     LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
     LEFT JOIN (SELECT receipt_id, MAX(last_pushed_at) AS airtable_pushed_at
                FROM airtable_links GROUP BY receipt_id) al ON al.receipt_id = o.order_id
-    ${clause}
+    ${clause}`;
+
+  const rows = db.prepare(`
+    SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
+           f.supplier_order_ref, f.supply_tracking_number,
+           COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at, f.notes,
+           al.airtable_pushed_at,
+           (SELECT COUNT(*) FROM shopify_order_line_items x WHERE x.order_id = o.order_id) AS item_count
+    ${base}
     ORDER BY o.created_at_shopify DESC
     LIMIT ? OFFSET ?`).all(...params, limit, offset);
 
-  const total = db.prepare(`SELECT COUNT(*) AS c FROM shopify_orders o ${clause}`).get(...params).c;
+  const total = db.prepare(`SELECT COUNT(*) AS c ${base}`).get(...params).c;
   const supplyPreview = loadSupplyPreview(db, shopId, rows.map((r) => r.order_id));
 
   return {
@@ -241,10 +254,28 @@ function shapeOrder(r, preview) {
     orderId: r.order_id, name: r.name, email: r.email, phone: r.phone,
     financialStatus: r.financial_status, fulfillmentStatus: r.fulfillment_status, currency: r.currency,
     subtotal: r.subtotal_amount, tax: r.total_tax_amount, shipping: r.total_shipping_amount,
-    discounts: r.total_discounts_amount, total: r.total_amount, customerName: r.customer_name,
+    discounts: r.total_discounts_amount,
+    // The order's real value, untouched - Excel/Airtable/Analytics read this
+    // one. `displayTotal`/`refundedAmount` below are for the list and detail
+    // screens only, same split as the Etsy side.
+    total: r.total_amount,
+    customerName: r.customer_name,
     shipName: r.ship_name, shipAddress1: r.ship_address1, shipAddress2: r.ship_address2, shipCity: r.ship_city,
     shipProvince: r.ship_province, shipZip: r.ship_zip, shipCountry: r.ship_country, shipPhone: r.ship_phone,
     note: r.note, tags: parse(r.tags, []), createdAt: r.created_at_shopify, cancelledAt: r.cancelled_at,
+    isCanceled: !!r.cancelled_at,
+    // Ours, not Shopify's - set by the "Cancel" button in this app. Shopify's
+    // API could really cancel the order, but this app deliberately never
+    // calls it, so this flag is the only kind of cancel that ever happens.
+    isLocallyCanceled: !!r.locally_canceled,
+    canceledAt: r.canceled_at ?? null,
+    refundedAmount: r.refunded_amount ? { value: r.refunded_amount, currency: r.currency } : null,
+    displayTotal: (r.cancelled_at || r.locally_canceled)
+      ? { value: 0, currency: r.currency }
+      : r.refunded_amount
+        ? { value: Math.max(0, (r.total_amount ?? 0) - r.refunded_amount), currency: r.currency }
+        : { value: r.total_amount, currency: r.currency },
+    notes: r.notes || '',
     itemCount: r.item_count, trackingNumber: r.tracking_number || null, trackingCompany: r.tracking_company || null,
     shippingCost: r.shipping_cost ?? null, shippingCostCurrency: r.shipping_cost_currency ?? null,
     pushedAt: r.pushed_at || null,
@@ -279,7 +310,9 @@ export function getOrder(orderId) {
   const db = getDb();
   const o = db.prepare(`
     SELECT o.*, f.tracking_number, f.tracking_company, f.tracking_url, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
-           f.supplier_order_ref, f.supply_tracking_number, al.airtable_pushed_at
+           f.supplier_order_ref, f.supply_tracking_number,
+           COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at, f.notes,
+           al.airtable_pushed_at
     FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
     LEFT JOIN (SELECT receipt_id, MAX(last_pushed_at) AS airtable_pushed_at
                FROM airtable_links GROUP BY receipt_id) al ON al.receipt_id = o.order_id
@@ -332,6 +365,28 @@ export function setSupplierInfo(orderId, { supplierOrderRef, supplyTrackingNumbe
       supplier_order_ref = COALESCE(excluded.supplier_order_ref, shopify_fulfillments.supplier_order_ref),
       supply_tracking_number = COALESCE(excluded.supply_tracking_number, shopify_fulfillments.supply_tracking_number)`)
     .run(orderId, supplierOrderRef ?? null, supplyTrackingNumber ?? null);
+  return getOrder(orderId);
+}
+
+/**
+ * Cancel/restore an order (local only - see listOrders' comment on why this
+ * never calls Shopify's real cancel API), and this order's private notes.
+ * Same shape and same table as setSupplierInfo above.
+ */
+export function setFlags(orderId, { canceled, notes } = {}) {
+  const shopId = requireShopifyShopId();
+  const owns = getDb().prepare('SELECT 1 FROM shopify_orders WHERE order_id = ? AND shop_id = ?').get(orderId, shopId);
+  if (!owns) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
+  const db = getDb();
+  db.prepare('INSERT OR IGNORE INTO shopify_fulfillments (order_id) VALUES (?)').run(orderId);
+  if (canceled !== undefined) {
+    db.prepare(`UPDATE shopify_fulfillments SET is_canceled = ?, canceled_at = ${canceled ? "datetime('now')" : 'NULL'} WHERE order_id = ?`)
+      .run(canceled ? 1 : 0, orderId);
+  }
+  if (notes !== undefined) {
+    db.prepare('UPDATE shopify_fulfillments SET notes = ? WHERE order_id = ?').run(String(notes), orderId);
+  }
+  audit('shopify.order_flags', { entity: 'shopify_order', entityId: orderId, detail: { canceled, notes } });
   return getOrder(orderId);
 }
 

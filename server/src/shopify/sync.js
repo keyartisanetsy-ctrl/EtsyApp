@@ -110,6 +110,7 @@ query Orders($cursor: String) {
       currentTotalPriceSet { shopMoney { amount } }
       totalShippingPriceSet { shopMoney { amount } }
       totalDiscountsSet { shopMoney { amount } }
+      totalRefundedSet { shopMoney { amount } }
       discountCodes
       sourceName
       risk { assessments { riskLevel } }
@@ -136,17 +137,18 @@ export async function syncOrders({ pages = 5 } = {}) {
   const upsertOrder = db.prepare(`
     INSERT INTO shopify_orders (order_id, shop_id, name, email, phone, financial_status, fulfillment_status,
       currency, subtotal_amount, total_tax_amount, total_shipping_amount, total_discounts_amount, total_amount,
-      customer_name, ship_name, ship_address1, ship_address2, ship_city, ship_province, ship_zip, ship_country,
-      ship_phone, note, tags, created_at_shopify, cancelled_at, discount_codes, risk_level, source_name,
-      attribution_source, attribution_landing_page, raw, synced_at)
+      refunded_amount, customer_name, ship_name, ship_address1, ship_address2, ship_city, ship_province, ship_zip,
+      ship_country, ship_phone, note, tags, created_at_shopify, cancelled_at, discount_codes, risk_level,
+      source_name, attribution_source, attribution_landing_page, raw, synced_at)
     VALUES (@id,@shopId,@name,@email,@phone,@financialStatus,@fulfillmentStatus,@currency,@subtotal,@tax,@shipping,
-      @discounts,@total,@customerName,@shipName,@shipAddress1,@shipAddress2,@shipCity,@shipProvince,@shipZip,
+      @discounts,@total,@refunded,@customerName,@shipName,@shipAddress1,@shipAddress2,@shipCity,@shipProvince,@shipZip,
       @shipCountry,@shipPhone,@note,@tags,@createdAt,@cancelledAt,@discountCodes,@riskLevel,@sourceName,
       @attributionSource,@attributionLandingPage,@raw,datetime('now'))
     ON CONFLICT(order_id) DO UPDATE SET shop_id=excluded.shop_id, financial_status=excluded.financial_status,
       fulfillment_status=excluded.fulfillment_status, subtotal_amount=excluded.subtotal_amount,
       total_tax_amount=excluded.total_tax_amount, total_shipping_amount=excluded.total_shipping_amount,
       total_discounts_amount=excluded.total_discounts_amount, total_amount=excluded.total_amount,
+      refunded_amount=excluded.refunded_amount,
       email=excluded.email, phone=excluded.phone, customer_name=excluded.customer_name,
       ship_name=excluded.ship_name, ship_address1=excluded.ship_address1, ship_address2=excluded.ship_address2,
       ship_city=excluded.ship_city, ship_province=excluded.ship_province, ship_zip=excluded.ship_zip,
@@ -178,6 +180,7 @@ export async function syncOrders({ pages = 5 } = {}) {
         shipping: num(o.totalShippingPriceSet?.shopMoney?.amount),
         discounts: num(o.totalDiscountsSet?.shopMoney?.amount),
         total: num(o.currentTotalPriceSet?.shopMoney?.amount),
+        refunded: num(o.totalRefundedSet?.shopMoney?.amount),
         customerName: o.customer?.displayName ?? addr.name ?? null,
         shipName: addr.name ?? null, shipAddress1: addr.address1 ?? null, shipAddress2: addr.address2 ?? null,
         shipCity: addr.city ?? null, shipProvince: addr.provinceCode ?? null, shipZip: addr.zip ?? null,

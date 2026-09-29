@@ -380,15 +380,42 @@ function OrdersPanel() {
   const [search, setSearch] = useState('');
   const [syncing, setSyncing] = useState(false);
   const [detail, setDetail] = useState(null);
+  const [quickTrackId, setQuickTrackId] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [sendingToAirtable, setSendingToAirtable] = useState(null);
-  const { data, loading, reload } = useAsync(() => api.get('/shopify/orders', { search }), [search]);
+  const [showCanceled, setShowCanceled] = useState(false);
+  const { data, loading, reload } = useAsync(
+    () => api.get('/shopify/orders', { search, canceled: showCanceled ? true : undefined }), [search, showCanceled]);
   const rows = data?.rows ?? [];
 
   const sync = async () => {
     setSyncing(true);
     try { const r = await api.post('/shopify/sync/orders', {}); toast({ kind: 'ok', title: `Synced ${r.orders} order(s)` }); reload(); }
     catch (err) { showError(err, 'Sync failed'); } finally { setSyncing(false); }
+  };
+
+  /**
+   * Cancel here means here only. Shopify's API could really cancel (and
+   * refund/restock) the order, but this app deliberately never calls that -
+   * it just hides the order from this list, same as the Etsy side.
+   */
+  const cancelOrder = async (order) => {
+    if (!confirm(`Cancel order ${order.name} (${order.customerName || 'no name'})?\n\n`
+      + 'This only hides it in this app - nothing changes on Shopify, and the customer is not notified. '
+      + 'You can find it again with "Show canceled" and restore it.')) return;
+    try {
+      await api.post(`/shopify/orders/${encodeURIComponent(order.orderId)}/flags`, { canceled: true });
+      toast({ kind: 'ok', title: `Order ${order.name} canceled here` });
+      reload();
+    } catch (err) { showError(err, 'Could not cancel that'); }
+  };
+
+  const restoreOrder = async (order) => {
+    try {
+      await api.post(`/shopify/orders/${encodeURIComponent(order.orderId)}/flags`, { canceled: false });
+      toast({ kind: 'ok', title: `Order ${order.name} restored` });
+      reload();
+    } catch (err) { showError(err, 'Could not restore that'); }
   };
 
   const toggle = (id) => setSelected((s) => { const next = new Set(s); next.has(id) ? next.delete(id) : next.add(id); return next; });
@@ -398,6 +425,9 @@ function OrdersPanel() {
     <section className="card">
       <div className="flex wrap mb16">
         <input className="input search" placeholder="Search order, buyer or email…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <span title="Canceled orders (Shopify's own, or ones you canceled here) are hidden by default - tick this to find and restore one">
+          <Checkbox checked={showCanceled} onChange={setShowCanceled} label="Show canceled" />
+        </span>
         <div className="spacer" />
         {selected.size > 0 && (
           <button className="btn sm primary" onClick={() => setSendingToAirtable([...selected])}>⇉ Send {selected.size} to Airtable</button>
@@ -428,13 +458,49 @@ function OrdersPanel() {
             {rows.map((o) => (
               <tr key={o.orderId}>
                 <td><Checkbox checked={selected.has(o.orderId)} onChange={() => toggle(o.orderId)} /></td>
-                <td className="mono small">{o.name}</td>
-                <td className="small">{o.customerName || '—'}</td>
+                <td className="mono small">
+                  {o.name}
+                  {(o.isCanceled || o.isLocallyCanceled) && (
+                    <span className="badge red" style={{ marginLeft: 6 }}
+                      title={o.isLocallyCanceled ? 'Canceled here - Shopify is not affected' : 'Shopify reports this order as cancelled'}>
+                      {o.isLocallyCanceled ? 'Canceled (you)' : 'Canceled'}
+                    </span>
+                  )}
+                </td>
+                <td className="small">
+                  {o.customerName || '—'}
+                  {o.notes && (
+                    <button className="btn xs ghost" style={{ marginLeft: 6 }} title={o.notes}
+                      onClick={() => setDetail(o.orderId)}>📝</button>
+                  )}
+                </td>
                 <td><span className="badge muted">{o.financialStatus}</span></td>
                 <td><span className={`badge ${o.fulfillmentStatus === 'FULFILLED' ? 'green' : 'muted'}`}>{o.fulfillmentStatus || 'UNFULFILLED'}</span></td>
-                <td className="num">{fmtMoney(o.total, o.currency)}</td>
+                <td className="num">
+                  {(o.isCanceled || o.isLocallyCanceled) ? (
+                    <>
+                      {fmtMoney(0, o.currency)}
+                      <div className="small muted" style={{ textDecoration: 'line-through' }}>{fmtMoney(o.total, o.currency)}</div>
+                    </>
+                  ) : (
+                    <>
+                      {fmtMoney(o.displayTotal?.value ?? o.total, o.currency)}
+                      {o.refundedAmount && (
+                        <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}
+                             title="Part of this order's payment has been refunded">
+                          (−{fmtMoney(o.refundedAmount.value, o.refundedAmount.currency)} refunded)
+                        </div>
+                      )}
+                    </>
+                  )}
+                </td>
                 <td className="right"><ShippingCostCell row={o} onSaved={reload} /></td>
-                <td className="small mono">{o.trackingNumber || '—'}</td>
+                <td className="small mono">
+                  {o.trackingNumber || (
+                    <button className="btn xs" onClick={() => setQuickTrackId(o.orderId)}
+                      title="Add tracking and fulfill this order on Shopify without opening it">+ Add</button>
+                  )}
+                </td>
                 <td>
                   {o.airtablePushedAt
                     ? <span className="badge green" title={`Sent ${fmtDateTime(Date.parse(o.airtablePushedAt) / 1000)}`}>✓</span>
@@ -443,7 +509,18 @@ function OrdersPanel() {
                 <td><SupplyCell order={o} channel="shopify" onChanged={reload} /></td>
                 <td><ProductImageCell order={o} /></td>
                 <td><WarehouseCell order={o} channel="shopify" onChanged={reload} /></td>
-                <td><button className="btn xs" onClick={() => setDetail(o.orderId)}>Open</button></td>
+                <td>
+                  <div className="flex gap4">
+                    <button className="btn xs" onClick={() => setDetail(o.orderId)}>Open</button>
+                    {o.isLocallyCanceled ? (
+                      <button className="btn xs ghost" title="Bring this order back into the working queue"
+                        onClick={() => restoreOrder(o)}>Restore</button>
+                    ) : (
+                      <button className="btn xs danger" title="Hide this order here - nothing changes on Shopify"
+                        onClick={() => cancelOrder(o)}>Cancel</button>
+                    )}
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -451,6 +528,11 @@ function OrdersPanel() {
       )}
 
       <OrderDetail orderId={detail} onClose={() => setDetail(null)} onChanged={reload} />
+      {quickTrackId && (
+        <Modal open onClose={() => setQuickTrackId(null)} title="Add tracking">
+          <QuickFulfillForm orderId={quickTrackId} onDone={() => { setQuickTrackId(null); reload(); }} />
+        </Modal>
+      )}
 
       {sendingToAirtable && (
         <SendToAirtable
@@ -624,10 +706,12 @@ function OrderDetail({ orderId, onClose, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [supplierRef, setSupplierRef] = useState('');
   const [supplyTrack, setSupplyTrack] = useState('');
+  const [notes, setNotes] = useState('');
 
   React.useEffect(() => {
     setSupplierRef(data?.supplierOrderRef ?? '');
     setSupplyTrack(data?.supplyTrackingNumber ?? '');
+    setNotes(data?.notes ?? '');
   }, [data?.orderId]);
 
   if (!orderId) return null;
@@ -651,8 +735,43 @@ function OrderDetail({ orderId, onClose, onChanged }) {
     } catch (err) { showError(err); }
   };
 
+  const saveNotes = async () => {
+    try {
+      await api.post(`${orderPath}/flags`, { notes });
+      toast({ kind: 'ok', title: 'Notes saved' });
+      reload(); onChanged();
+    } catch (err) { showError(err); }
+  };
+
+  /** Local only - see the list's Cancel button for why this never calls Shopify's real cancel API. */
+  const cancelOrder = async () => {
+    if (!confirm(`Cancel order ${data.name} (${data.customerName || 'no name'})?\n\n`
+      + 'This only hides it in this app - nothing changes on Shopify, and the customer is not notified. '
+      + 'You can find it again with "Show canceled" on the list and restore it.')) return;
+    try {
+      await api.post(`${orderPath}/flags`, { canceled: true });
+      toast({ kind: 'ok', title: `Order ${data.name} canceled here` });
+      reload(); onChanged();
+    } catch (err) { showError(err, 'Could not cancel that'); }
+  };
+
+  const restoreOrder = async () => {
+    try {
+      await api.post(`${orderPath}/flags`, { canceled: false });
+      toast({ kind: 'ok', title: `Order ${data.name} restored` });
+      reload(); onChanged();
+    } catch (err) { showError(err, 'Could not restore that'); }
+  };
+
   return (
-    <Drawer open onClose={onClose} title={data?.name ?? orderId}>
+    <Drawer open onClose={onClose} title={data?.name ?? orderId}
+      footer={data && (
+        data.isLocallyCanceled ? (
+          <button className="btn ghost" onClick={restoreOrder}>Restore this order</button>
+        ) : (
+          <button className="btn danger" onClick={cancelOrder}>Cancel this order</button>
+        )
+      )}>
       {loading || !data ? <Spinner /> : (
         <>
           <dl className="kv mb16">
@@ -664,7 +783,24 @@ function OrderDetail({ orderId, onClose, onChanged }) {
             <dt>Ship to</dt><dd>{[data.shipName, data.shipAddress1, data.shipCity, data.shipCountry].filter(Boolean).join(', ') || '—'}</dd>
             <dt>Financial</dt><dd>{data.financialStatus}</dd>
             <dt>Fulfillment</dt><dd>{data.fulfillmentStatus || 'UNFULFILLED'}</dd>
-            <dt>Total</dt><dd>{fmtMoney(data.total, data.currency)}</dd>
+            <dt>Total</dt>
+            <dd>
+              {(data.isCanceled || data.isLocallyCanceled) ? (
+                <>
+                  {fmtMoney(0, data.currency)}
+                  <div className="small muted" style={{ textDecoration: 'line-through' }}>{fmtMoney(data.total, data.currency)}</div>
+                </>
+              ) : (
+                <>
+                  {fmtMoney(data.displayTotal?.value ?? data.total, data.currency)}
+                  {data.refundedAmount && (
+                    <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}>
+                      (−{fmtMoney(data.refundedAmount.value, data.refundedAmount.currency)} refunded)
+                    </div>
+                  )}
+                </>
+              )}
+            </dd>
             {data.discountCodes?.length > 0 && (
               <>
                 <dt>Discount</dt>
@@ -762,8 +898,42 @@ function OrderDetail({ orderId, onClose, onChanged }) {
               <button className="btn sm primary" disabled={busy || !tracking.trim()} onClick={fulfill}>{busy ? <Spinner /> : 'Fulfill on Shopify'}</button>
             </div>
           )}
+
+          <div className="section-title">Internal notes</div>
+          <textarea className="textarea" value={notes} onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Private notes for this order…" />
+          <button className="btn sm mt8" onClick={saveNotes}>Save notes</button>
         </>
       )}
     </Drawer>
+  );
+}
+
+/** The list's quick "+ Add" tracking action - the same fields and fulfill call as the drawer's own inline form. */
+function QuickFulfillForm({ orderId, onDone }) {
+  const toast = useToast();
+  const showError = useErrorToast();
+  const [tracking, setTracking] = useState('');
+  const [company, setCompany] = useState('');
+  const [notify, setNotify] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const fulfill = async () => {
+    setBusy(true);
+    try {
+      await api.post(`/shopify/orders/${encodeURIComponent(orderId)}/fulfill`,
+        { trackingNumber: tracking, trackingCompany: company || undefined, notifyCustomer: notify });
+      toast({ kind: 'ok', title: 'Fulfillment pushed to Shopify' });
+      onDone();
+    } catch (err) { showError(err, 'Could not fulfill'); } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="flex mb8" style={{ flexWrap: 'wrap' }}>
+      <input className="input sm" placeholder="Tracking number" autoFocus value={tracking} onChange={(e) => setTracking(e.target.value)} />
+      <input className="input sm" placeholder="Carrier (optional)" value={company} onChange={(e) => setCompany(e.target.value)} />
+      <Checkbox checked={notify} onChange={setNotify} label="Notify customer" />
+      <button className="btn sm primary" disabled={busy || !tracking.trim()} onClick={fulfill}>{busy ? <Spinner /> : 'Fulfill on Shopify'}</button>
+    </div>
   );
 }

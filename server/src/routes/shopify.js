@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import multer from 'multer';
 import config from '../config.js';
-import { asyncRoute, bool, int, required } from '../lib/http.js';
+import { asyncRoute, bool, int, tri, required } from '../lib/http.js';
 import * as client from '../shopify/client.js';
 import * as oauth from '../shopify/oauth.js';
 import * as shopify from '../services/shopify.js';
@@ -130,10 +130,18 @@ router.put('/variants/meta/:sku', asyncRoute(async (req, res) => {
 // ---------------------------------------------------------------- orders
 
 router.get('/orders', asyncRoute(async (req, res) => {
-  res.json(shopify.listOrders({ search: req.query.search ?? '', limit: int(req.query.limit, 100), offset: int(req.query.offset, 0) }));
+  res.json(shopify.listOrders({
+    search: req.query.search ?? '', canceled: tri(req.query.canceled),
+    limit: int(req.query.limit, 100), offset: int(req.query.offset, 0),
+  }));
 }));
 
 router.get('/orders/:id', asyncRoute(async (req, res) => res.json(shopify.getOrder(req.params.id))));
+
+/** Cancel/restore an order (local only) and this order's private notes. */
+router.post('/orders/:id/flags', asyncRoute(async (req, res) => {
+  res.json(shopify.setFlags(req.params.id, req.body ?? {}));
+}));
 
 router.post('/orders/:id/shipping-cost', asyncRoute(async (req, res) => {
   res.json(shopify.setShippingCost(req.params.id, { cost: req.body?.cost, currency: req.body?.currency }));

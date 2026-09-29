@@ -243,6 +243,14 @@ export function migrateSchema(db) {
   // claiming anything happened on Etsy.
   addColumn(db, 'order_flags', 'is_canceled', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'order_flags', 'canceled_at', 'TEXT');
+
+  // Shopify's own refund total, and the same local-only cancel/notes idea as
+  // above - Shopify's API COULD cancel an order for real, but this app never
+  // calls it, by deliberate choice, so it stays local here too.
+  addColumn(db, 'shopify_orders', 'refunded_amount', 'REAL');
+  addColumn(db, 'shopify_fulfillments', 'is_canceled', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'shopify_fulfillments', 'canceled_at', 'TEXT');
+  addColumn(db, 'shopify_fulfillments', 'notes', "TEXT DEFAULT ''");
 }
 
 /** Runs AFTER schema.sql, once etsy_accounts is guaranteed to exist. */

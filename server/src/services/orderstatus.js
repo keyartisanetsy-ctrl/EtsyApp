@@ -57,6 +57,13 @@ export function statusesFor(row = {}) {
         : 'You canceled this order here. Etsy is not affected.');
   }
 
+  // A refund on an order that is NOT cancelled - the cancelled chips above
+  // already say "this order is void"; this one is for an order that still
+  // stands but had money handed back on it (a partial adjustment, usually).
+  if (row.refunded_amount && !row.was_canceled && !row.locally_canceled) {
+    add('refunded', 'Refund', 'warn', 'Part or all of this order has been refunded - see the amount on the Total column.');
+  }
+
   // Etsy's own receipt status is the one signal this app never invented -
   // trust it over "nothing happened locally yet" so an order Etsy calls
   // done does not sit tagged "New" forever just because it was fulfilled

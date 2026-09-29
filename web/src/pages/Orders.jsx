@@ -313,8 +313,25 @@ export default function Orders() {
                     <InCurrency amount={o.subtotal?.value} from={o.subtotal?.currency} to={reportCurrency} />
                   </td>
                   <td className="num">
-                    {fmtMoney(o.total?.value, o.total?.currency)}
-                    <InCurrency amount={o.total?.value} from={o.total?.currency} to={reportCurrency} />
+                    {(o.isCanceled || o.isLocallyCanceled) ? (
+                      <>
+                        {fmtMoney(0, o.total?.currency)}
+                        <div className="small muted" style={{ textDecoration: 'line-through' }}>
+                          {fmtMoney(o.total?.value, o.total?.currency)}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        {fmtMoney(o.displayTotal?.value ?? o.total?.value, o.total?.currency)}
+                        <InCurrency amount={o.displayTotal?.value ?? o.total?.value} from={o.total?.currency} to={reportCurrency} />
+                        {o.refundedAmount && (
+                          <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}
+                               title="Part of this order's payment has been refunded">
+                            (−{fmtMoney(o.refundedAmount.value, o.refundedAmount.currency)} refunded)
+                          </div>
+                        )}
+                      </>
+                    )}
                     {o.offsiteAdsFee && (
                       <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}
                            title={o.offsiteAdsFee.explanation}>
@@ -759,7 +776,22 @@ function OrderDetail({ id, onClose, onChanged }) {
                 <dt>Shipping</dt><dd>{fmtMoney(order.totals.shipping?.value, order.totals.shipping?.currency)}</dd>
                 <dt>Tax</dt><dd>{fmtMoney(order.totals.tax?.value, order.totals.tax?.currency)}</dd>
                 <dt>Discount</dt><dd>{fmtMoney(order.totals.discount?.value, order.totals.discount?.currency)}</dd>
-                <dt><strong>Grand total</strong></dt><dd><strong>{fmtMoney(order.totals.grand?.value, order.totals.grand?.currency)}</strong></dd>
+                <dt><strong>Grand total</strong></dt>
+                <dd>
+                  <strong>
+                    {fmtMoney((order.isCanceled || order.isLocallyCanceled) ? 0 : (order.displayTotal?.value ?? order.totals.grand?.value), order.totals.grand?.currency)}
+                  </strong>
+                  {(order.isCanceled || order.isLocallyCanceled) && (
+                    <div className="small muted" style={{ textDecoration: 'line-through' }}>
+                      {fmtMoney(order.totals.grand?.value, order.totals.grand?.currency)}
+                    </div>
+                  )}
+                  {!order.isCanceled && !order.isLocallyCanceled && order.refundedAmount && (
+                    <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}>
+                      (−{fmtMoney(order.refundedAmount.value, order.refundedAmount.currency)} refunded)
+                    </div>
+                  )}
+                </dd>
                 <OrderTotalsInUsd totals={order.totals} />
               </dl>
 

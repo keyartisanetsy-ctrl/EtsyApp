@@ -860,6 +860,9 @@ CREATE TABLE IF NOT EXISTS shopify_orders (
   tags                    TEXT,
   created_at_shopify      TEXT,
   cancelled_at            TEXT,
+  -- What Shopify has actually refunded on this order (Order.totalRefundedSet),
+  -- in the shop's own currency - same idea as Etsy's receipts.refunded_amount.
+  refunded_amount         REAL,
   -- Discount code(s) actually applied, alongside the amount already in
   -- total_discounts_amount.
   discount_codes          TEXT,
@@ -913,6 +916,14 @@ CREATE TABLE IF NOT EXISTS shopify_fulfillments (
   -- order reference, and the inbound supplier-to-warehouse tracking number.
   supplier_order_ref      TEXT DEFAULT '',
   supply_tracking_number  TEXT DEFAULT '',
+  -- A seller-side "cancel" applied here, same idea and same limits as Etsy's
+  -- order_flags.is_canceled: Shopify's API can cancel an order for real, but
+  -- this deliberately does not - it only hides the order in this app.
+  is_canceled             INTEGER NOT NULL DEFAULT 0,
+  canceled_at             TEXT,
+  -- Private notes for this order, never sent to Shopify - same as Etsy's
+  -- order_flags.notes.
+  notes                   TEXT DEFAULT '',
   FOREIGN KEY (order_id) REFERENCES shopify_orders(order_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_draft_media_listing ON draft_media(listing_id, kind, rank);

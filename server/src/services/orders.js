@@ -178,6 +178,10 @@ function orderSummary(r, preview) {
     city: r.city,
     status: r.status,
     itemCount: r.item_count,
+    // The order's real value, untouched - Excel, Airtable and Analytics all
+    // read this one, so a cancel or refund never quietly changes what they
+    // report. `displayTotal`/`refundedAmount` below are for the list and
+    // detail screens only, to show what a cancel or refund actually leaves.
     total: asMoney(r.grandtotal_amount, r.grandtotal_divisor, r.grandtotal_currency),
     isPaid: !!r.was_paid,
     isShipped: !!r.was_shipped,
@@ -188,6 +192,17 @@ function orderSummary(r, preview) {
     // kind Etsy has no API to let a seller trigger.
     isLocallyCanceled: !!r.locally_canceled,
     canceledAt: r.canceled_at ?? null,
+    // What Etsy actually refunded on this order (already synced onto the
+    // receipt), and what is left once a cancel or a refund is accounted for -
+    // a cancelled order shows as 0 outright; a merely-refunded one shows the
+    // remainder, with the refunded amount called out separately.
+    refundedAmount: r.refunded_amount
+      ? asMoney(r.refunded_amount, r.grandtotal_divisor, r.grandtotal_currency) : null,
+    displayTotal: (r.was_canceled || r.locally_canceled)
+      ? { value: 0, currency: r.grandtotal_currency }
+      : r.refunded_amount
+        ? { value: Math.max(0, (r.grandtotal_amount - r.refunded_amount) / (r.grandtotal_divisor || 100)), currency: r.grandtotal_currency }
+        : asMoney(r.grandtotal_amount, r.grandtotal_divisor, r.grandtotal_currency),
     isGift: !!r.is_gift,
     messageFromBuyer: r.message_from_buyer || '',
     createdTs: r.created_ts,
