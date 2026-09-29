@@ -107,6 +107,11 @@ router.post('/:id/flags', asyncRoute(async (req, res) => {
   res.json(orders.setFlags([Number(req.params.id)], req.body ?? {}));
 }));
 
+/** A hand-typed cost for this order - e.g. Etsy Ads/Offsite Ads spend the ledger doesn't tie to it. */
+router.post('/:id/manual-cost', asyncRoute(async (req, res) => {
+  res.json(orders.setManualCost(Number(req.params.id), { amount: req.body?.amount, note: req.body?.note }));
+}));
+
 /** Raise / clear / resolve a problem on one or many orders. */
 router.post('/problem', asyncRoute(async (req, res) => {
   const { receiptIds = [], state = 'warning', note = '' } = req.body ?? {};

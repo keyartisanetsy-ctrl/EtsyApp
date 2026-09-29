@@ -358,6 +358,11 @@ export default function Orders() {
                         net: {fmtMoney(o.ledgerNet.value, o.ledgerNet.currency)}
                       </div>
                     )}
+                    {o.manualCost && (
+                      <div className="small dim" title={o.manualCost.note || 'Typed in manually - open the order to edit'}>
+                        manual: −{fmtMoney(o.manualCost.value, o.manualCost.currency)}
+                      </div>
+                    )}
                   </td>
                   <td>
                     {o.trackingCode ? (
@@ -750,6 +755,8 @@ function OrderDetail({ id, onClose, onChanged }) {
   const [notes, setNotes] = useState('');
   const [supplierRef, setSupplierRef] = useState('');
   const [supplyTrack, setSupplyTrack] = useState('');
+  const [manualCost, setManualCost] = useState('');
+  const [manualCostNote, setManualCostNote] = useState('');
   const toast = useToast();
   const showError = useErrorToast();
 
@@ -757,6 +764,8 @@ function OrderDetail({ id, onClose, onChanged }) {
     setNotes(order?.notes ?? '');
     setSupplierRef(order?.supplierOrderRef ?? '');
     setSupplyTrack(order?.supplyTrackingNumber ?? '');
+    setManualCost(order?.manualCost?.value != null ? String(order.manualCost.value) : '');
+    setManualCostNote(order?.manualCost?.note ?? '');
     setTab('summary');
   }, [order?.receiptId]);
   React.useEffect(() => { if (id) api.post('/orders/seen', { receiptIds: [id] }).then(onChanged).catch(() => {}); }, [id]);
@@ -779,6 +788,14 @@ function OrderDetail({ id, onClose, onChanged }) {
   const setFlag = async (patch) => {
     try { await api.post(`/orders/${id}/flags`, patch); reload(); onChanged(); }
     catch (err) { showError(err); }
+  };
+
+  const saveManualCost = async () => {
+    try {
+      await api.post(`/orders/${id}/manual-cost`, { amount: manualCost === '' ? null : Number(manualCost), note: manualCostNote });
+      toast({ kind: 'ok', title: 'Manual cost saved' });
+      reload(); onChanged();
+    } catch (err) { showError(err); }
   };
 
   return (
@@ -904,6 +921,28 @@ function OrderDetail({ id, onClose, onChanged }) {
               ) : (
                 <div className="small dim mb16">
                   No ledger data synced yet for this order. Press <strong>Sync ledger</strong> on the Orders page.
+                </div>
+              )}
+
+              <div className="section-title">Manual cost</div>
+              <div className="hint mb8">
+                Anything Etsy's ledger doesn't tie to this order by itself - Etsy Ads spend, packaging, or any other
+                extra cost. Type it in and it's subtracted from the ledger net above.
+              </div>
+              <div className="row gap8 mb8">
+                <input
+                  className="input" type="number" step="0.01" style={{ maxWidth: 140 }}
+                  placeholder="0.00" value={manualCost} onChange={(e) => setManualCost(e.target.value)}
+                />
+                <input
+                  className="input" style={{ flex: 1 }} placeholder="What is this for? (optional)"
+                  value={manualCostNote} onChange={(e) => setManualCostNote(e.target.value)}
+                />
+                <button className="btn sm" onClick={saveManualCost}>Save</button>
+              </div>
+              {order.netAfterManualCost && (
+                <div className="small dim mb16">
+                  Net after manual cost: <strong>{fmtMoney(order.netAfterManualCost.value, order.netAfterManualCost.currency)}</strong>
                 </div>
               )}
 

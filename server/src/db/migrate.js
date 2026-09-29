@@ -251,6 +251,14 @@ export function migrateSchema(db) {
   addColumn(db, 'shopify_fulfillments', 'is_canceled', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'shopify_fulfillments', 'canceled_at', 'TEXT');
   addColumn(db, 'shopify_fulfillments', 'notes', "TEXT DEFAULT ''");
+
+  // A hand-typed cost per order - Etsy Ads/Offsite Ads spend and Shopify Shop
+  // Campaigns spend are never reported per order by either API, so this is
+  // where the seller writes in their own figure.
+  addColumn(db, 'order_flags', 'manual_cost', 'REAL');
+  addColumn(db, 'order_flags', 'manual_cost_note', "TEXT DEFAULT ''");
+  addColumn(db, 'shopify_fulfillments', 'manual_cost', 'REAL');
+  addColumn(db, 'shopify_fulfillments', 'manual_cost_note', "TEXT DEFAULT ''");
 }
 
 /** Runs AFTER schema.sql, once etsy_accounts is guaranteed to exist. */

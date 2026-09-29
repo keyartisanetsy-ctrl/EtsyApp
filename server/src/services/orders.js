@@ -114,6 +114,7 @@ export function listOrders({
            COALESCE(f.problem_state,'none') AS problem_state, f.problem_note,
            COALESCE(f.offsite_ads,0) AS offsite_ads,
            COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at,
+           f.manual_cost, f.manual_cost_note,
            al.airtable_pushed_at,
            s.tracking_code, s.carrier_name, s.pushed_to_etsy,
            t.status AS tracking_status, t.days_since_move, t.is_stale, t.alert_reason,
@@ -209,6 +210,16 @@ function orderSummary(r, preview, ledger) {
     // "Sync ledger" has run at least once for this order's date range.
     ledgerNet: ledger ? { value: ledger.netAmount, currency: ledger.currency } : null,
     ledgerLineCount: ledger?.lineCount ?? 0,
+    // A cost typed in by hand - Etsy Ads/Offsite Ads spend the ledger never
+    // ties to one order. Kept apart from ledgerNet (which is Etsy's own
+    // numbers, untouched); `netAfterManualCost` is the two combined, shown
+    // only once there is a ledger net to combine it with.
+    manualCost: r.manual_cost != null
+      ? { value: r.manual_cost, currency: r.grandtotal_currency, note: r.manual_cost_note || '' }
+      : null,
+    netAfterManualCost: (ledger && r.manual_cost != null)
+      ? { value: ledger.netAmount - r.manual_cost, currency: ledger.currency }
+      : null,
     isGift: !!r.is_gift,
     messageFromBuyer: r.message_from_buyer || '',
     createdTs: r.created_ts,
@@ -286,6 +297,7 @@ export function getOrder(receiptId) {
            COALESCE(f.problem_state,'none') AS problem_state, f.problem_note,
            COALESCE(f.offsite_ads,0) AS offsite_ads,
            COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at,
+           f.manual_cost, f.manual_cost_note,
            al.airtable_pushed_at,
            s.tracking_code, s.carrier_name, t.status AS tracking_status, t.days_since_move
     FROM receipts r
@@ -435,6 +447,23 @@ export function setFlags(receiptIds, patch = {}) {
 }
 
 export const markSeen = (receiptIds) => setFlags(receiptIds, { seen: true });
+
+/**
+ * The hand-typed cost field: Etsy Ads/Offsite Ads spend, or anything else the
+ * ledger sync does not tie to this specific order. `amount: null` clears it.
+ */
+export function setManualCost(receiptId, { amount, note } = {}) {
+  const db = getDb();
+  const owns = db.prepare('SELECT 1 FROM receipts WHERE receipt_id = ? AND shop_id IS ?').get(receiptId, activeShopId());
+  if (!owns) throw notFound(`Order ${receiptId} is not in the active shop's local mirror.`);
+  const value = amount === null || amount === undefined || amount === '' ? null : Number(amount);
+  if (value !== null && !Number.isFinite(value)) throw badRequest(`"${amount}" is not a number.`);
+  db.prepare('INSERT OR IGNORE INTO order_flags (receipt_id) VALUES (?)').run(receiptId);
+  db.prepare(`UPDATE order_flags SET manual_cost = ?, manual_cost_note = ?, updated_at = datetime('now') WHERE receipt_id = ?`)
+    .run(value, note !== undefined ? String(note ?? '') : '', receiptId);
+  audit('orders.manual_cost', { entity: 'receipt', entityId: receiptId, detail: { amount: value, note } });
+  return getOrder(receiptId);
+}
 
 /**
  * Attach (or remove, with attachmentId = null) a warehouse photo to one line

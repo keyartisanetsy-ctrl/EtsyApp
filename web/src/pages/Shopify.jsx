@@ -502,6 +502,11 @@ function OrdersPanel() {
                           net: {fmtMoney(o.realNet.value, o.realNet.currency)}
                         </div>
                       )}
+                      {o.manualCost && (
+                        <div className="small dim" title={o.manualCost.note || 'Typed in manually - open the order to edit'}>
+                          manual: −{fmtMoney(o.manualCost.value, o.manualCost.currency)}
+                        </div>
+                      )}
                     </>
                   )}
                 </td>
@@ -718,11 +723,15 @@ function OrderDetail({ orderId, onClose, onChanged }) {
   const [supplierRef, setSupplierRef] = useState('');
   const [supplyTrack, setSupplyTrack] = useState('');
   const [notes, setNotes] = useState('');
+  const [manualCost, setManualCost] = useState('');
+  const [manualCostNote, setManualCostNote] = useState('');
 
   React.useEffect(() => {
     setSupplierRef(data?.supplierOrderRef ?? '');
     setSupplyTrack(data?.supplyTrackingNumber ?? '');
     setNotes(data?.notes ?? '');
+    setManualCost(data?.manualCost?.value != null ? String(data.manualCost.value) : '');
+    setManualCostNote(data?.manualCost?.note ?? '');
   }, [data?.orderId]);
 
   if (!orderId) return null;
@@ -750,6 +759,14 @@ function OrderDetail({ orderId, onClose, onChanged }) {
     try {
       await api.post(`${orderPath}/flags`, { notes });
       toast({ kind: 'ok', title: 'Notes saved' });
+      reload(); onChanged();
+    } catch (err) { showError(err); }
+  };
+
+  const saveManualCost = async () => {
+    try {
+      await api.post(`${orderPath}/manual-cost`, { amount: manualCost === '' ? null : Number(manualCost), note: manualCostNote });
+      toast({ kind: 'ok', title: 'Manual cost saved' });
       reload(); onChanged();
     } catch (err) { showError(err); }
   };
@@ -812,6 +829,14 @@ function OrderDetail({ orderId, onClose, onChanged }) {
                   {data.realNet && (
                     <div className="small dim">net after fees: {fmtMoney(data.realNet.value, data.realNet.currency)}</div>
                   )}
+                  {data.manualCost && (
+                    <div className="small dim" title={data.manualCost.note || ''}>
+                      manual cost: −{fmtMoney(data.manualCost.value, data.manualCost.currency)}
+                    </div>
+                  )}
+                  {data.netAfterManualCost && (
+                    <div className="small dim">net after manual cost: <strong>{fmtMoney(data.netAfterManualCost.value, data.netAfterManualCost.currency)}</strong></div>
+                  )}
                 </>
               )}
             </dd>
@@ -821,7 +846,8 @@ function OrderDetail({ orderId, onClose, onChanged }) {
                 <dd>
                   <span className="badge violet">Shop ads</span>{' '}
                   <span className="small dim">
-                    Shopify does not report a per-order ad cost - see Shop Campaigns for the actual spend.
+                    Shopify does not report a per-order ad cost - see Shop Campaigns for the actual spend,
+                    or type this order's share into "Manual cost" below.
                   </span>
                 </dd>
               </>
@@ -916,6 +942,23 @@ function OrderDetail({ orderId, onClose, onChanged }) {
           ) : (
             <div className="small dim mb16">No transactions synced yet - press "Sync from Shopify" above.</div>
           )}
+
+          <div className="section-title">Manual cost</div>
+          <div className="hint mb8">
+            Anything Shopify's transactions don't tie to this order by itself - this order's share of Shop Campaigns
+            spend, packaging, or any other extra cost. Type it in and it's subtracted from the net above.
+          </div>
+          <div className="row gap8 mb8">
+            <input
+              className="input" type="number" step="0.01" style={{ maxWidth: 140 }}
+              placeholder="0.00" value={manualCost} onChange={(e) => setManualCost(e.target.value)}
+            />
+            <input
+              className="input" style={{ flex: 1 }} placeholder="What is this for? (optional)"
+              value={manualCostNote} onChange={(e) => setManualCostNote(e.target.value)}
+            />
+            <button className="btn sm" onClick={saveManualCost}>Save</button>
+          </div>
 
           <div className="section-title">Supplier</div>
           <dl className="kv mb16">

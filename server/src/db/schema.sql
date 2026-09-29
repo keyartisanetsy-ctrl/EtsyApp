@@ -308,6 +308,13 @@ CREATE TABLE IF NOT EXISTS order_flags (
   -- true-to-Etsy; this one is ours to set and unset freely.
   is_canceled   INTEGER NOT NULL DEFAULT 0,
   canceled_at   TEXT,
+  -- A cost you type in by hand: Etsy Ads/Offsite Ads spend the ledger does not
+  -- tie to one order, packaging, or anything else the API never reports per
+  -- order. Kept apart from the ledger sync above so a re-sync never touches
+  -- what you entered, and from `notes` so it can be summed and shown as its
+  -- own line next to the ledger net.
+  manual_cost      REAL,
+  manual_cost_note TEXT DEFAULT '',
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -970,6 +977,12 @@ CREATE TABLE IF NOT EXISTS shopify_fulfillments (
   -- Private notes for this order, never sent to Shopify - same as Etsy's
   -- order_flags.notes.
   notes                   TEXT DEFAULT '',
+  -- A cost you type in by hand - same idea as Etsy's order_flags.manual_cost.
+  -- The obvious case is a Shop Campaigns order (see isShopAdsAttributed in
+  -- services/shopify.js): Shopify never reports what share of that ad spend
+  -- this particular order cost, so this is where you write it in yourself.
+  manual_cost             REAL,
+  manual_cost_note        TEXT DEFAULT '',
   FOREIGN KEY (order_id) REFERENCES shopify_orders(order_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_draft_media_listing ON draft_media(listing_id, kind, rank);

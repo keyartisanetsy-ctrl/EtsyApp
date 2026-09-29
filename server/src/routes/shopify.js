@@ -147,6 +147,11 @@ router.post('/orders/:id/shipping-cost', asyncRoute(async (req, res) => {
   res.json(shopify.setShippingCost(req.params.id, { cost: req.body?.cost, currency: req.body?.currency }));
 }));
 
+/** A hand-typed cost for this order - e.g. its share of Shop Campaigns spend. */
+router.post('/orders/:id/manual-cost', asyncRoute(async (req, res) => {
+  res.json(shopify.setManualCost(req.params.id, { amount: req.body?.amount, note: req.body?.note }));
+}));
+
 /** Add tracking and mark the order fulfilled on Shopify. */
 router.post('/orders/:id/fulfill', asyncRoute(async (req, res) => {
   required(req.body ?? {}, ['trackingNumber']);

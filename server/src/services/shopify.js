@@ -204,6 +204,7 @@ export function listOrders({ search = '', canceled = null, limit = 100, offset =
     SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
            f.supplier_order_ref, f.supply_tracking_number,
            COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at, f.notes,
+           f.manual_cost, f.manual_cost_note,
            al.airtable_pushed_at,
            (SELECT COUNT(*) FROM shopify_order_line_items x WHERE x.order_id = o.order_id) AS item_count
     ${base}
@@ -322,6 +323,16 @@ function shapeOrder(r, preview, txn) {
     paymentFees: txn?.hasFees ? { value: txn.feeAmount, currency: txn.currency } : null,
     // See looksLikeShopAds() - attribution only, never an exact ad cost.
     isShopAdsAttributed: looksLikeShopAds(r.source_name, r.attribution_source),
+    // The hand-typed cost field this flag exists for: what you actually spent
+    // on this order's share of Shop Campaigns (or anything else Shopify does
+    // not report per order). Kept apart from realNet, which is Shopify's own
+    // numbers untouched; `netAfterManualCost` is the two combined.
+    manualCost: r.manual_cost != null
+      ? { value: r.manual_cost, currency: r.currency, note: r.manual_cost_note || '' }
+      : null,
+    netAfterManualCost: (txn && r.manual_cost != null)
+      ? { value: txn.netAmount - r.manual_cost, currency: txn.currency }
+      : null,
     itemCount: r.item_count, trackingNumber: r.tracking_number || null, trackingCompany: r.tracking_company || null,
     shippingCost: r.shipping_cost ?? null, shippingCostCurrency: r.shipping_cost_currency ?? null,
     pushedAt: r.pushed_at || null,
@@ -358,6 +369,7 @@ export function getOrder(orderId) {
     SELECT o.*, f.tracking_number, f.tracking_company, f.tracking_url, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
            f.supplier_order_ref, f.supply_tracking_number,
            COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at, f.notes,
+           f.manual_cost, f.manual_cost_note,
            al.airtable_pushed_at
     FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
     LEFT JOIN (SELECT receipt_id, MAX(last_pushed_at) AS airtable_pushed_at
@@ -448,6 +460,25 @@ export function setFlags(orderId, { canceled, notes } = {}) {
     db.prepare('UPDATE shopify_fulfillments SET notes = ? WHERE order_id = ?').run(String(notes), orderId);
   }
   audit('shopify.order_flags', { entity: 'shopify_order', entityId: orderId, detail: { canceled, notes } });
+  return getOrder(orderId);
+}
+
+/**
+ * The hand-typed cost field: this order's share of Shop Campaigns spend, or
+ * anything else Shopify's transactions never report per order. `amount: null`
+ * clears it. Same shape as Etsy's orders.setManualCost.
+ */
+export function setManualCost(orderId, { amount, note } = {}) {
+  const shopId = requireShopifyShopId();
+  const owns = getDb().prepare('SELECT 1 FROM shopify_orders WHERE order_id = ? AND shop_id = ?').get(orderId, shopId);
+  if (!owns) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
+  const value = amount === null || amount === undefined || amount === '' ? null : Number(amount);
+  if (value !== null && !Number.isFinite(value)) throw badRequest(`"${amount}" is not a number.`);
+  const db = getDb();
+  db.prepare('INSERT OR IGNORE INTO shopify_fulfillments (order_id) VALUES (?)').run(orderId);
+  db.prepare('UPDATE shopify_fulfillments SET manual_cost = ?, manual_cost_note = ? WHERE order_id = ?')
+    .run(value, note !== undefined ? String(note ?? '') : '', orderId);
+  audit('shopify.manual_cost', { entity: 'shopify_order', entityId: orderId, detail: { amount: value, note } });
   return getOrder(orderId);
 }
 
