@@ -781,6 +781,177 @@ function orderLedgerRows(lines) {
   return out;
 }
 
+/**
+ * Everything money-related about this order, in one place: the total (with
+ * cancel/refund treatment), Etsy's own ledger (fees, tax, VAT nested under
+ * what it taxed), what it actually cost to ship and source the goods, the
+ * manual-cost catch-all, and the profit that's left once all of it is
+ * accounted for. Lives on the left of the drawer, visible under every tab,
+ * so none of this is scattered across separate sections a click apart.
+ */
+function EtsyFinancePanel({ order, manualCost, setManualCost, manualCostNote, setManualCostNote, saveManualCost }) {
+  const isCanceled = order.isCanceled || order.isLocallyCanceled;
+  const currency = order.totals.grand?.currency;
+  const marginPct = (order.costBreakdown?.profit && order.totals.grand?.value)
+    ? Math.round((order.costBreakdown.profit.value / order.totals.grand.value) * 1000) / 10
+    : null;
+
+  return (
+    <div className="finance-panel">
+      <div className="card-head"><h3>Finance</h3></div>
+
+      <div className="section-title">Total</div>
+      <dl className="kv mb12">
+        {order.totals.beforeDiscount && (
+          <>
+            <dt>Before discount</dt>
+            <dd className="dim" style={{ textDecoration: 'line-through' }}>
+              {fmtMoney(order.totals.beforeDiscount.value, order.totals.beforeDiscount.currency)}
+            </dd>
+          </>
+        )}
+        <dt>Subtotal</dt><dd className="money-subtotal">{fmtMoney(order.totals.subtotal?.value, order.totals.subtotal?.currency)}</dd>
+        <dt>Shipping</dt><dd>{fmtMoney(order.totals.shipping?.value, order.totals.shipping?.currency)}</dd>
+        <dt>Tax</dt><dd>{fmtMoney(order.totals.tax?.value, order.totals.tax?.currency)}</dd>
+        <dt>Discount</dt><dd>{fmtMoney(order.totals.discount?.value, order.totals.discount?.currency)}</dd>
+        <dt><strong>Grand total</strong></dt>
+        <dd>
+          <strong>{fmtMoney(isCanceled ? 0 : (order.displayTotal?.value ?? order.totals.grand?.value), currency)}</strong>
+          {isCanceled && (
+            <div className="small muted" style={{ textDecoration: 'line-through' }}>
+              {fmtMoney(order.totals.grand?.value, currency)}
+            </div>
+          )}
+          {!isCanceled && order.refundedAmount && (
+            <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}>
+              (−{fmtMoney(order.refundedAmount.value, order.refundedAmount.currency)} refunded)
+            </div>
+          )}
+        </dd>
+        <OrderTotalsInUsd totals={order.totals} />
+      </dl>
+      {order.offsiteAds && order.offsiteAdsFee && (
+        <div className="small dim mb12" title={order.offsiteAdsFee.explanation}>
+          Offsite Ads fee: −{order.offsiteAdsFee.fee}{order.offsiteAdsFee.capped ? ' (capped)' : ''}
+        </div>
+      )}
+
+      <div className="section-title">Ledger (Etsy's own numbers)</div>
+      {order.ledgerLines?.length > 0 ? (
+        <>
+          <table className="data mb8">
+            <thead><tr><th>Etsy's label</th><th className="num">Amount</th></tr></thead>
+            <tbody>
+              {orderLedgerRows(order.ledgerLines).map((l) => (
+                <tr key={l.entryId}>
+                  <td style={l.depth ? { paddingLeft: 16 + l.depth * 16 } : undefined}>
+                    {l.depth > 0 && <span className="dim">↳ </span>}
+                    {l.label}
+                    {l.referenceId && String(l.referenceId) !== String(order.receiptId) && (
+                      <span className="small dim"> · {l.referenceType || 'ref'} {l.referenceId}</span>
+                    )}
+                  </td>
+                  <td className="num" style={{ color: l.amount < 0 ? 'var(--warn, #e0a33e)' : undefined }}>
+                    {fmtMoney(l.amount, order.ledgerNet?.currency)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td><strong>Net</strong></td>
+                <td className="num"><strong>{fmtMoney(order.ledgerNet?.value, order.ledgerNet?.currency)}</strong></td>
+              </tr>
+            </tfoot>
+          </table>
+          <div className="hint mb12">
+            Every line Etsy actually booked against this order - the sale, its transaction/processing fee, an
+            Offsite Ads fee when it applies, tax and VAT pass-through - straight from Etsy's ledger, synced
+            automatically. Nothing here is re-derived.
+          </div>
+        </>
+      ) : (
+        <div className="small dim mb12">
+          No ledger data synced yet for this order. It syncs on its own every 30 minutes, or press
+          <strong> Sync ledger now</strong> on the Orders page.
+        </div>
+      )}
+
+      <div className="section-title">Cost of goods &amp; shipping</div>
+      {order.shipments.length > 0 ? (
+        <div className="small mb8">
+          {order.shipments.map((s) => (
+            <div key={s.trackingCode} className="mb4">
+              <span className="mono dim">{s.trackingCode}</span>:{' '}
+              shipping {s.shippingCost != null ? `${s.shippingCost} ${s.shippingCostCurrency || ''}` : <span className="muted">not typed in yet</span>}
+              {' · '}
+              supply {s.supplyCost != null ? `${s.supplyCost} ${s.supplyCostCurrency || ''}` : <span className="muted">not typed in yet</span>}
+            </div>
+          ))}
+          <div className="hint">Typed in on the Tracking page, next to this order's tracking number.</div>
+        </div>
+      ) : (
+        <div className="small dim mb8">No tracking added yet - add one to type in shipping/supply cost.</div>
+      )}
+      {order.costBreakdown?.supply?.isEstimate && (
+        <div className="small dim mb12">
+          No real supply cost typed in yet - the profit below uses a per-SKU estimate instead.
+        </div>
+      )}
+
+      <div className="section-title">Manual cost</div>
+      <div className="hint mb8">
+        Etsy Ads spend, packaging, or anything else the ledger doesn't tie to this order. Subtracted from the
+        ledger net below.
+      </div>
+      <div className="flex wrap mb12">
+        <input
+          className="input" type="number" step="0.01" style={{ maxWidth: 100 }}
+          placeholder="0.00" value={manualCost} onChange={(e) => setManualCost(e.target.value)}
+        />
+        <input
+          className="input" style={{ flex: 1, minWidth: 100 }} placeholder="What is this for? (optional)"
+          value={manualCostNote} onChange={(e) => setManualCostNote(e.target.value)}
+        />
+        <button className="btn sm" onClick={saveManualCost}>Save</button>
+      </div>
+
+      {order.costBreakdown?.profit && (
+        <>
+          <div className="section-title">Profit</div>
+          <dl className="kv">
+            <dt>Ledger net</dt>
+            <dd>{fmtMoney(order.ledgerNet?.value, order.ledgerNet?.currency)}</dd>
+            {order.costBreakdown.shipping && (
+              <>
+                <dt>− Shipping</dt>
+                <dd>{fmtMoney(order.costBreakdown.shipping.value, order.costBreakdown.shipping.currency)}</dd>
+              </>
+            )}
+            {order.costBreakdown.supply && (
+              <>
+                <dt>− Supply{order.costBreakdown.supply.isEstimate ? ' (est.)' : ''}</dt>
+                <dd>{fmtMoney(order.costBreakdown.supply.value, order.costBreakdown.supply.currency)}</dd>
+              </>
+            )}
+            {order.manualCost && (
+              <>
+                <dt>− Manual</dt>
+                <dd>{fmtMoney(order.manualCost.value, order.manualCost.currency)}</dd>
+              </>
+            )}
+            <dt><strong>Profit</strong></dt>
+            <dd>
+              <strong>{fmtMoney(order.costBreakdown.profit.value, order.costBreakdown.profit.currency)}</strong>
+              {marginPct !== null && <span className="small dim"> ({marginPct}% margin)</span>}
+            </dd>
+          </dl>
+        </>
+      )}
+    </div>
+  );
+}
+
 function OrderDetail({ id, onClose, onChanged }) {
   const [tab, setTab] = useState('summary');
   const { data: order, loading, reload } = useAsync(() => (id ? api.get(`/orders/${id}`) : null), [id], { immediate: !!id });
@@ -846,7 +1017,12 @@ function OrderDetail({ id, onClose, onChanged }) {
       )}
     >
       {loading || !order ? <Spinner /> : (
-        <>
+        <div className="drawer-2col">
+          <EtsyFinancePanel
+            order={order} manualCost={manualCost} setManualCost={setManualCost}
+            manualCostNote={manualCostNote} setManualCostNote={setManualCostNote} saveManualCost={saveManualCost}
+          />
+          <div>
           <Tabs
             active={tab} onChange={setTab}
             tabs={[
@@ -889,132 +1065,6 @@ function OrderDetail({ id, onClose, onChanged }) {
               <div className="copy-block mb16">{copy?.address || order.address.formatted || '—'}</div>
 
               <AddressCheck receiptId={id} onChanged={onChanged} />
-
-              <div className="section-title">Totals</div>
-              <dl className="kv mb16">
-                {order.totals.beforeDiscount && (
-                  <>
-                    <dt>Total before discount</dt>
-                    <dd className="dim" style={{ textDecoration: 'line-through' }}>
-                      {fmtMoney(order.totals.beforeDiscount.value, order.totals.beforeDiscount.currency)}
-                    </dd>
-                  </>
-                )}
-                <dt>Subtotal</dt>
-                <dd className="money-subtotal">{fmtMoney(order.totals.subtotal?.value, order.totals.subtotal?.currency)}</dd>
-                <dt>Shipping</dt><dd>{fmtMoney(order.totals.shipping?.value, order.totals.shipping?.currency)}</dd>
-                <dt>Tax</dt><dd>{fmtMoney(order.totals.tax?.value, order.totals.tax?.currency)}</dd>
-                <dt>Discount</dt><dd>{fmtMoney(order.totals.discount?.value, order.totals.discount?.currency)}</dd>
-                <dt><strong>Grand total</strong></dt>
-                <dd>
-                  <strong>
-                    {fmtMoney((order.isCanceled || order.isLocallyCanceled) ? 0 : (order.displayTotal?.value ?? order.totals.grand?.value), order.totals.grand?.currency)}
-                  </strong>
-                  {(order.isCanceled || order.isLocallyCanceled) && (
-                    <div className="small muted" style={{ textDecoration: 'line-through' }}>
-                      {fmtMoney(order.totals.grand?.value, order.totals.grand?.currency)}
-                    </div>
-                  )}
-                  {!order.isCanceled && !order.isLocallyCanceled && order.refundedAmount && (
-                    <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}>
-                      (−{fmtMoney(order.refundedAmount.value, order.refundedAmount.currency)} refunded)
-                    </div>
-                  )}
-                </dd>
-                <OrderTotalsInUsd totals={order.totals} />
-              </dl>
-
-              <div className="section-title">Ledger (Etsy's own numbers)</div>
-              {order.ledgerLines?.length > 0 ? (
-                <>
-                  <table className="data mb8">
-                    <thead><tr><th>Etsy's label</th><th className="num">Amount</th></tr></thead>
-                    <tbody>
-                      {orderLedgerRows(order.ledgerLines).map((l) => (
-                        <tr key={l.entryId}>
-                          <td style={l.depth ? { paddingLeft: 16 + l.depth * 16 } : undefined}>
-                            {l.depth > 0 && <span className="dim">↳ </span>}
-                            {l.label}
-                            {l.referenceId && String(l.referenceId) !== String(order.receiptId) && (
-                              <span className="small dim"> · {l.referenceType || 'ref'} {l.referenceId}</span>
-                            )}
-                          </td>
-                          <td className="num" style={{ color: l.amount < 0 ? 'var(--warn, #e0a33e)' : undefined }}>
-                            {fmtMoney(l.amount, order.ledgerNet?.currency)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                    <tfoot>
-                      <tr>
-                        <td><strong>Net</strong></td>
-                        <td className="num"><strong>{fmtMoney(order.ledgerNet?.value, order.ledgerNet?.currency)}</strong></td>
-                      </tr>
-                    </tfoot>
-                  </table>
-                  <div className="hint">
-                    Every line Etsy actually booked against this order - the sale, its transaction/processing fee,
-                    an Offsite Ads fee when it applies, tax pass-through - straight from Etsy's ledger, not re-derived.
-                  </div>
-                </>
-              ) : (
-                <div className="small dim mb16">
-                  No ledger data synced yet for this order. Press <strong>Sync ledger</strong> on the Orders page.
-                </div>
-              )}
-
-              <div className="section-title">Cost of goods &amp; shipping</div>
-              {order.shipments.length > 0 ? (
-                <div className="small mb8">
-                  {order.shipments.map((s) => (
-                    <div key={s.trackingCode} className="mb4">
-                      <span className="mono dim">{s.trackingCode}</span>:{' '}
-                      shipping {s.shippingCost != null ? `${s.shippingCost} ${s.shippingCostCurrency || ''}` : <span className="muted">not typed in yet</span>}
-                      {' · '}
-                      supply {s.supplyCost != null ? `${s.supplyCost} ${s.supplyCostCurrency || ''}` : <span className="muted">not typed in yet</span>}
-                    </div>
-                  ))}
-                  <div className="hint">Typed in on the Tracking page, next to this order's tracking number.</div>
-                </div>
-              ) : (
-                <div className="small dim mb8">No tracking added yet - add one to type in shipping/supply cost.</div>
-              )}
-              {order.costBreakdown?.supply?.isEstimate && (
-                <div className="small dim mb8">
-                  No real supply cost typed in yet - the figures below use a per-SKU estimate instead.
-                </div>
-              )}
-              {order.costBreakdown?.profit && (
-                <div className="small dim mb16">
-                  {fmtMoney(order.ledgerNet?.value, order.ledgerNet?.currency)} ledger net
-                  {order.costBreakdown.shipping && <> − {fmtMoney(order.costBreakdown.shipping.value, order.costBreakdown.shipping.currency)} shipping</>}
-                  {order.costBreakdown.supply && <> − {fmtMoney(order.costBreakdown.supply.value, order.costBreakdown.supply.currency)} supply</>}
-                  {order.manualCost && <> − {fmtMoney(order.manualCost.value, order.manualCost.currency)} manual</>}
-                  {' '}= <strong>{fmtMoney(order.costBreakdown.profit.value, order.costBreakdown.profit.currency)} profit</strong>
-                </div>
-              )}
-
-              <div className="section-title">Manual cost</div>
-              <div className="hint mb8">
-                Anything Etsy's ledger doesn't tie to this order by itself - Etsy Ads spend, packaging, or any other
-                extra cost. Type it in and it's subtracted from the ledger net above.
-              </div>
-              <div className="row gap8 mb8">
-                <input
-                  className="input" type="number" step="0.01" style={{ maxWidth: 140 }}
-                  placeholder="0.00" value={manualCost} onChange={(e) => setManualCost(e.target.value)}
-                />
-                <input
-                  className="input" style={{ flex: 1 }} placeholder="What is this for? (optional)"
-                  value={manualCostNote} onChange={(e) => setManualCostNote(e.target.value)}
-                />
-                <button className="btn sm" onClick={saveManualCost}>Save</button>
-              </div>
-              {order.netAfterManualCost && (
-                <div className="small dim mb16">
-                  Net after manual cost: <strong>{fmtMoney(order.netAfterManualCost.value, order.netAfterManualCost.currency)}</strong>
-                </div>
-              )}
 
               {(order.messages.fromBuyer || order.messages.giftMessage) && (
                 <>
@@ -1148,7 +1198,8 @@ function OrderDetail({ id, onClose, onChanged }) {
               ))}
             </>
           )}
-        </>
+          </div>
+        </div>
       )}
     </Drawer>
   );

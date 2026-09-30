@@ -752,6 +752,167 @@ function SupplyCostCell({ row, onSaved }) {
   );
 }
 
+/**
+ * Everything money-related about this Shopify order, in one place: the total
+ * (with cancel/refund treatment), Shopify's own transactions (with each
+ * fee's type/rate and the VAT/GST it charges on top where that applies),
+ * what it actually cost to ship and source the goods, the manual-cost
+ * catch-all (including the Shop Campaigns attribution that field exists
+ * for), and the profit left once all of it is accounted for. Lives on the
+ * left of the drawer, so none of this is scattered a scroll apart from the
+ * rest - a deliberately different layout from Etsy's finance panel, built
+ * around what Shopify's API actually gives (transactions/fees, not a ledger).
+ */
+function ShopifyFinancePanel({ data, manualCost, setManualCost, manualCostNote, setManualCostNote, saveManualCost, onSaved }) {
+  const isCanceled = data.isCanceled || data.isLocallyCanceled;
+  const marginPct = (data.costBreakdown?.profit && data.total)
+    ? Math.round((data.costBreakdown.profit.value / data.total) * 1000) / 10
+    : null;
+
+  return (
+    <div className="finance-panel">
+      <div className="card-head"><h3>Finance</h3></div>
+
+      <div className="section-title">Total</div>
+      <dl className="kv mb12">
+        <dt>Subtotal</dt><dd>{fmtMoney(data.subtotal, data.currency)}</dd>
+        <dt>Shipping</dt><dd>{fmtMoney(data.shipping, data.currency)}</dd>
+        <dt>Tax</dt><dd>{fmtMoney(data.tax, data.currency)}</dd>
+        {data.discountCodes?.length > 0 && (
+          <>
+            <dt>Discount</dt>
+            <dd>{data.discountCodes.join(', ')} {data.discounts ? `(−${fmtMoney(data.discounts, data.currency)})` : ''}</dd>
+          </>
+        )}
+        <dt><strong>Total</strong></dt>
+        <dd>
+          {isCanceled ? (
+            <>
+              <strong>{fmtMoney(0, data.currency)}</strong>
+              <div className="small muted" style={{ textDecoration: 'line-through' }}>{fmtMoney(data.total, data.currency)}</div>
+            </>
+          ) : (
+            <>
+              <strong>{fmtMoney(data.displayTotal?.value ?? data.total, data.currency)}</strong>
+              {data.refundedAmount && (
+                <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}>
+                  (−{fmtMoney(data.refundedAmount.value, data.refundedAmount.currency)} refunded)
+                </div>
+              )}
+            </>
+          )}
+        </dd>
+      </dl>
+      {data.isShopAdsAttributed && (
+        <div className="small dim mb12">
+          <span className="badge violet">Shop ads</span>{' '}
+          Shopify does not report a per-order ad cost - see Shop Campaigns for the actual spend, or type this
+          order's share into <strong>Manual cost</strong> below.
+        </div>
+      )}
+
+      <div className="section-title">Transactions (Shopify's own numbers)</div>
+      {data.transactions?.length > 0 ? (
+        <table className="data mb8">
+          <thead><tr><th>Kind</th><th>Status</th><th className="num">Amount</th><th className="num">Fee</th><th className="num">Net</th></tr></thead>
+          <tbody>
+            {data.transactions.map((t) => (
+              <React.Fragment key={t.transactionId}>
+                <tr>
+                  <td className="small">{t.kind}</td>
+                  <td><span className={`badge ${t.status === 'SUCCESS' ? 'green' : 'muted'}`}>{t.status}</span></td>
+                  <td className="num">{fmtMoney(t.amount, t.currency)}</td>
+                  <td className="num">{t.feeAmount != null ? fmtMoney(t.feeAmount, t.feeCurrency) : <span className="muted">—</span>}</td>
+                  <td className="num">{fmtMoney((t.amount ?? 0) - (t.feeAmount ?? 0), t.currency)}</td>
+                </tr>
+                {t.fees?.length > 0 && (
+                  <tr>
+                    <td colSpan={5} className="small dim" style={{ paddingTop: 0 }}>
+                      {t.fees.map((f, i) => (
+                        <div key={i}>
+                          ↳ {f.flatFeeName || f.rateName || f.type || 'Fee'}
+                          {f.rate != null && ` (${Math.round(f.rate * 10000) / 100}%)`}
+                          : −{fmtMoney(f.amount, f.currency)}
+                          {f.taxAmount != null && <> + VAT −{fmtMoney(f.taxAmount, f.currency)}</>}
+                        </div>
+                      ))}
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="small dim mb12">No transactions synced yet - press "Sync from Shopify" above.</div>
+      )}
+
+      <div className="section-title">Cost of goods &amp; shipping</div>
+      <dl className="kv mb8">
+        <dt>Shipping cost</dt>
+        <dd><ShippingCostCell row={data} onSaved={onSaved} /></dd>
+        <dt>Supply cost</dt>
+        <dd>
+          <SupplyCostCell row={data} onSaved={onSaved} />
+          {data.costBreakdown?.supply?.isEstimate && (
+            <div className="small dim">estimated from Shopify's own per-item cost - no real figure typed in yet</div>
+          )}
+        </dd>
+      </dl>
+
+      <div className="section-title">Manual cost</div>
+      <div className="hint mb8">
+        This order's share of Shop Campaigns spend, packaging, or anything else Shopify's transactions don't tie
+        to it by themselves. Subtracted from the net below.
+      </div>
+      <div className="flex wrap mb12">
+        <input
+          className="input" type="number" step="0.01" style={{ maxWidth: 100 }}
+          placeholder="0.00" value={manualCost} onChange={(e) => setManualCost(e.target.value)}
+        />
+        <input
+          className="input" style={{ flex: 1, minWidth: 100 }} placeholder="What is this for? (optional)"
+          value={manualCostNote} onChange={(e) => setManualCostNote(e.target.value)}
+        />
+        <button className="btn sm" onClick={saveManualCost}>Save</button>
+      </div>
+
+      {data.costBreakdown?.profit && (
+        <>
+          <div className="section-title">Profit</div>
+          <dl className="kv">
+            <dt>Net after fees</dt>
+            <dd>{fmtMoney(data.realNet?.value ?? data.total, data.realNet?.currency ?? data.currency)}</dd>
+            {data.costBreakdown.shipping && (
+              <>
+                <dt>− Shipping</dt>
+                <dd>{fmtMoney(data.costBreakdown.shipping.value, data.costBreakdown.shipping.currency)}</dd>
+              </>
+            )}
+            {data.costBreakdown.supply && (
+              <>
+                <dt>− Supply{data.costBreakdown.supply.isEstimate ? ' (est.)' : ''}</dt>
+                <dd>{fmtMoney(data.costBreakdown.supply.value, data.costBreakdown.supply.currency)}</dd>
+              </>
+            )}
+            {data.manualCost && (
+              <>
+                <dt>− Manual</dt>
+                <dd>{fmtMoney(data.manualCost.value, data.manualCost.currency)}</dd>
+              </>
+            )}
+            <dt><strong>Profit</strong></dt>
+            <dd>
+              <strong>{fmtMoney(data.costBreakdown.profit.value, data.costBreakdown.profit.currency)}</strong>
+              {marginPct !== null && <span className="small dim"> ({marginPct}% margin)</span>}
+            </dd>
+          </dl>
+        </>
+      )}
+    </div>
+  );
+}
+
 function OrderDetail({ orderId, onClose, onChanged }) {
   const toast = useToast();
   const showError = useErrorToast();
@@ -832,7 +993,7 @@ function OrderDetail({ orderId, onClose, onChanged }) {
   };
 
   return (
-    <Drawer open onClose={onClose} title={data?.name ?? orderId}
+    <Drawer open onClose={onClose} wide title={data?.name ?? orderId}
       footer={data && (
         data.isLocallyCanceled ? (
           <button className="btn ghost" onClick={restoreOrder}>Restore this order</button>
@@ -841,7 +1002,13 @@ function OrderDetail({ orderId, onClose, onChanged }) {
         )
       )}>
       {loading || !data ? <Spinner /> : (
-        <>
+        <div className="drawer-2col">
+          <ShopifyFinancePanel
+            data={data} manualCost={manualCost} setManualCost={setManualCost}
+            manualCostNote={manualCostNote} setManualCostNote={setManualCostNote} saveManualCost={saveManualCost}
+            onSaved={() => { reload(); onChanged(); }}
+          />
+          <div>
           <dl className="kv mb16">
             <dt>Buyer</dt>
             <dd>
@@ -851,58 +1018,6 @@ function OrderDetail({ orderId, onClose, onChanged }) {
             <dt>Ship to</dt><dd>{[data.shipName, data.shipAddress1, data.shipCity, data.shipCountry].filter(Boolean).join(', ') || '—'}</dd>
             <dt>Financial</dt><dd>{data.financialStatus}</dd>
             <dt>Fulfillment</dt><dd>{data.fulfillmentStatus || 'UNFULFILLED'}</dd>
-            <dt>Total</dt>
-            <dd>
-              {(data.isCanceled || data.isLocallyCanceled) ? (
-                <>
-                  {fmtMoney(0, data.currency)}
-                  <div className="small muted" style={{ textDecoration: 'line-through' }}>{fmtMoney(data.total, data.currency)}</div>
-                </>
-              ) : (
-                <>
-                  {fmtMoney(data.displayTotal?.value ?? data.total, data.currency)}
-                  {data.refundedAmount && (
-                    <div className="small" style={{ color: 'var(--warn, #e0a33e)' }}>
-                      (−{fmtMoney(data.refundedAmount.value, data.refundedAmount.currency)} refunded)
-                    </div>
-                  )}
-                  {data.realNet && (
-                    <div className="small dim">net after fees: {fmtMoney(data.realNet.value, data.realNet.currency)}</div>
-                  )}
-                  {data.manualCost && (
-                    <div className="small dim" title={data.manualCost.note || ''}>
-                      manual cost: −{fmtMoney(data.manualCost.value, data.manualCost.currency)}
-                    </div>
-                  )}
-                  {data.netAfterManualCost && (
-                    <div className="small dim">net after manual cost: <strong>{fmtMoney(data.netAfterManualCost.value, data.netAfterManualCost.currency)}</strong></div>
-                  )}
-                  {data.costBreakdown?.profit && (
-                    <div className="small">
-                      profit (after shipping + supply cost): <strong>{fmtMoney(data.costBreakdown.profit.value, data.costBreakdown.profit.currency)}</strong>
-                    </div>
-                  )}
-                </>
-              )}
-            </dd>
-            {data.isShopAdsAttributed && (
-              <>
-                <dt>Attribution</dt>
-                <dd>
-                  <span className="badge violet">Shop ads</span>{' '}
-                  <span className="small dim">
-                    Shopify does not report a per-order ad cost - see Shop Campaigns for the actual spend,
-                    or type this order's share into "Manual cost" below.
-                  </span>
-                </dd>
-              </>
-            )}
-            {data.discountCodes?.length > 0 && (
-              <>
-                <dt>Discount</dt>
-                <dd>{data.discountCodes.join(', ')} {data.discounts ? `(−${fmtMoney(data.discounts, data.currency)})` : ''}</dd>
-              </>
-            )}
             {data.tags?.length > 0 && (
               <>
                 <dt>Tags</dt>
@@ -968,83 +1083,6 @@ function OrderDetail({ orderId, onClose, onChanged }) {
             </tbody>
           </table>
 
-          <div className="section-title">Transactions (Shopify's own numbers)</div>
-          {data.transactions?.length > 0 ? (
-            <table className="data mb16">
-              <thead><tr><th>Kind</th><th>Status</th><th className="num">Amount</th><th className="num">Fee</th><th className="num">Net</th></tr></thead>
-              <tbody>
-                {data.transactions.map((t) => (
-                  <React.Fragment key={t.transactionId}>
-                    <tr>
-                      <td className="small">{t.kind}</td>
-                      <td><span className={`badge ${t.status === 'SUCCESS' ? 'green' : 'muted'}`}>{t.status}</span></td>
-                      <td className="num">{fmtMoney(t.amount, t.currency)}</td>
-                      <td className="num">{t.feeAmount != null ? fmtMoney(t.feeAmount, t.feeCurrency) : <span className="muted">—</span>}</td>
-                      <td className="num">{fmtMoney((t.amount ?? 0) - (t.feeAmount ?? 0), t.currency)}</td>
-                    </tr>
-                    {t.fees?.length > 0 && (
-                      <tr>
-                        <td colSpan={5} className="small dim" style={{ paddingTop: 0 }}>
-                          {t.fees.map((f, i) => (
-                            <div key={i}>
-                              ↳ {f.flatFeeName || f.rateName || f.type || 'Fee'}
-                              {f.rate != null && ` (${Math.round(f.rate * 10000) / 100}%)`}
-                              : −{fmtMoney(f.amount, f.currency)}
-                              {f.taxAmount != null && <> + VAT −{fmtMoney(f.taxAmount, f.currency)}</>}
-                            </div>
-                          ))}
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <div className="small dim mb16">No transactions synced yet - press "Sync from Shopify" above.</div>
-          )}
-
-          <div className="section-title">Cost of goods &amp; shipping</div>
-          <dl className="kv mb8">
-            <dt>Shipping cost</dt>
-            <dd><ShippingCostCell row={data} onSaved={() => { reload(); onChanged(); }} /></dd>
-            <dt>Supply cost</dt>
-            <dd>
-              <SupplyCostCell row={data} onSaved={() => { reload(); onChanged(); }} />
-              {data.costBreakdown?.supply?.isEstimate && (
-                <span className="small dim" style={{ marginLeft: 6 }}>
-                  (estimated from Shopify's own per-item cost - no real figure typed in yet)
-                </span>
-              )}
-            </dd>
-          </dl>
-          {data.costBreakdown?.profit && (
-            <div className="small dim mb16">
-              {fmtMoney(data.realNet?.value ?? data.total, data.currency)} net
-              {data.costBreakdown.shipping && <> − {fmtMoney(data.costBreakdown.shipping.value, data.costBreakdown.shipping.currency)} shipping</>}
-              {data.costBreakdown.supply && <> − {fmtMoney(data.costBreakdown.supply.value, data.costBreakdown.supply.currency)} supply</>}
-              {data.manualCost && <> − {fmtMoney(data.manualCost.value, data.manualCost.currency)} manual</>}
-              {' '}= <strong>{fmtMoney(data.costBreakdown.profit.value, data.costBreakdown.profit.currency)} profit</strong>
-            </div>
-          )}
-
-          <div className="section-title">Manual cost</div>
-          <div className="hint mb8">
-            Anything Shopify's transactions don't tie to this order by itself - this order's share of Shop Campaigns
-            spend, packaging, or any other extra cost. Type it in and it's subtracted from the net above.
-          </div>
-          <div className="row gap8 mb8">
-            <input
-              className="input" type="number" step="0.01" style={{ maxWidth: 140 }}
-              placeholder="0.00" value={manualCost} onChange={(e) => setManualCost(e.target.value)}
-            />
-            <input
-              className="input" style={{ flex: 1 }} placeholder="What is this for? (optional)"
-              value={manualCostNote} onChange={(e) => setManualCostNote(e.target.value)}
-            />
-            <button className="btn sm" onClick={saveManualCost}>Save</button>
-          </div>
-
           <div className="section-title">Supplier</div>
           <dl className="kv mb16">
             <dt>Supplier order code</dt>
@@ -1076,7 +1114,8 @@ function OrderDetail({ orderId, onClose, onChanged }) {
           <textarea className="textarea" value={notes} onChange={(e) => setNotes(e.target.value)}
                     placeholder="Private notes for this order…" />
           <button className="btn sm mt8" onClick={saveNotes}>Save notes</button>
-        </>
+          </div>
+        </div>
       )}
     </Drawer>
   );

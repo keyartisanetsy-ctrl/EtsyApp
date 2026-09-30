@@ -257,6 +257,18 @@ table.data td.mono, .mono { font-family: var(--mono); font-size: 12px; }
   display: flex; gap: 8px; align-items: center; flex: none; background: var(--surface-2);
 }
 
+/* One consolidated money panel, always on the left of a wide drawer, so
+   every cost/fee/profit figure for an order lives in exactly one place
+   instead of being spread across several tab sections. */
+.drawer-2col { display: grid; grid-template-columns: 340px 1fr; gap: 20px; align-items: start; }
+@media (max-width: 900px) { .drawer-2col { grid-template-columns: 1fr; } }
+.finance-panel {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px; position: sticky; top: 0;
+}
+.finance-panel .kv { grid-template-columns: 96px 1fr; }
+.finance-panel .section-title:first-child { margin-top: 0; }
+
 @keyframes fade { from { opacity: 0; } }
 @keyframes slide { from { transform: translateX(24px); opacity: 0; } }
 
@@ -373,9 +385,10 @@ table.data td.mono, .mono { font-family: var(--mono); font-size: 12px; }
 .flex { display: flex; align-items: center; gap: 8px; }
 .flex.wrap { flex-wrap: wrap; }
 .flex.col { flex-direction: column; align-items: stretch; }
-.gap4 { gap: 4px; } .gap12 { gap: 12px; }
+.gap4 { gap: 4px; } .gap8 { gap: 8px; } .gap12 { gap: 12px; }
 .mt4 { margin-top: 4px; }
-.mt8 { margin-top: 8px; } .mt16 { margin-top: 16px; } .mb8 { margin-bottom: 8px; } .mb16 { margin-bottom: 16px; }
+.mt8 { margin-top: 8px; } .mt16 { margin-top: 16px; }
+.mb4 { margin-bottom: 4px; } .mb8 { margin-bottom: 8px; } .mb12 { margin-bottom: 12px; } .mb16 { margin-bottom: 16px; }
 
 /* ------------------------------------------------------------ shop switcher */
 .shop-switch { position: relative; margin: 8px; }
