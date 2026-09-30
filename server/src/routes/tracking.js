@@ -21,11 +21,20 @@ router.get('/', asyncRoute(async (req, res) => {
 
 router.get('/summary', asyncRoute(async (req, res) => res.json(tracking.trackingSummary())));
 
-/** The carriers Etsy recognises for a ship-from country, plus the shop's
- *  own defaults, in one call -- everything a "add tracking" form needs. */
+/**
+ * The carriers Etsy recognises for a ship-from country, plus the shop's own
+ * defaults, in one call -- everything a "add tracking" form needs. The
+ * default carrier/note are local settings with nothing to do with Etsy;
+ * Shopify's own tracking dialogs call this purely for those two, with no
+ * Etsy shop necessarily connected at all. Etsy's carrier list is fetched
+ * best-effort - a failure there (no Etsy shop connected, its token expired,
+ * a transient API error) must never take the defaults down with it, which is
+ * exactly what happened when this used to be one all-or-nothing call.
+ */
 router.get('/carriers', asyncRoute(async (req, res) => {
+  const carriers = await tracking.carriersFor(req.query.country).catch(() => []);
   res.json({
-    carriers: await tracking.carriersFor(req.query.country),
+    carriers,
     defaultCarrier: readSetting('orders.default_carrier'),
     defaultNote: readSetting('orders.default_note'),
   });
