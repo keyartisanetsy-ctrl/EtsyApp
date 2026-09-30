@@ -61,18 +61,47 @@ export function resolveProvider(requested, { needsImages = false } = {}) {
 }
 
 // ------------------------------------------------------------------- Manus
+//
+// Rebuilt against Manus's current v2 API (open.manus.ai/docs/v2) - the
+// previous version of this called a v1 shape (`POST /v1/tasks`, an `API_KEY`
+// header, a flat `{prompt, agentProfile}` body) that the live API no longer
+// documents. v2's real shape: auth is the `x-manus-api-key` header; task
+// creation is `POST /v2/task.create` with the prompt nested under
+// `message.content` and the intelligence-tier knob is `agent_profile`
+// ('lite' | 'standard' | 'max'); polling is `GET /v2/task.detail`, whose
+// `status` is 'running' | 'stopped' | 'waiting' | 'error' - 'stopped' does not
+// by itself mean finished (see below); and the actual answer text lives in a
+// *separate* call, `GET /v2/task.listMessages`, not in task.detail at all.
+
+async function manusTaskDetail(base, apiKey, taskId, signal) {
+  const res = await outboundFetch(`${base}/v2/task.detail?task_id=${encodeURIComponent(taskId)}`, {
+    headers: { 'x-manus-api-key': apiKey }, signal,
+  });
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => ({}));
+  return body?.task ?? null;
+}
+
+async function manusTaskMessages(base, apiKey, taskId, signal) {
+  const res = await outboundFetch(`${base}/v2/task.listMessages?task_id=${encodeURIComponent(taskId)}&limit=200`, {
+    headers: { 'x-manus-api-key': apiKey }, signal,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new AppError(res.status, `Manus error reading task messages: ${body.message || res.statusText}`);
+  return body?.messages ?? [];
+}
 
 async function manusComplete({ prompt, system, onProgress, signal }) {
   const apiKey = readSetting('ai.manus.api_key');
   const base = config.ai.manus.base;
   const body = {
-    prompt: system ? `${system}\n\n---\n\n${prompt}` : prompt,
-    agentProfile: readSetting('ai.manus.agent_profile') || 'manus-1.6',
+    message: { content: system ? `${system}\n\n---\n\n${prompt}` : prompt },
+    agent_profile: readSetting('ai.manus.agent_profile') || 'standard',
   };
 
-  const res = await outboundFetch(`${base}/v1/tasks`, {
+  const res = await outboundFetch(`${base}/v2/task.create`, {
     method: 'POST',
-    headers: { API_KEY: apiKey, 'Content-Type': 'application/json' },
+    headers: { 'x-manus-api-key': apiKey, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
     signal,
   });
@@ -86,9 +115,9 @@ async function manusComplete({ prompt, system, onProgress, signal }) {
     throw new AppError(res.status, `Manus error: ${created.message || res.statusText}`);
   }
 
-  const taskId = created.task_id ?? created.id;
+  const taskId = created.task_id;
   if (!taskId) throw new AppError(502, 'Manus did not return a task id.');
-  const taskUrl = created.task_url ?? created.metadata?.task_url ?? null;
+  const taskUrl = created.task_url ?? null;
   onProgress?.({ stage: 'submitted', taskId, taskUrl });
 
   const deadline = Date.now() + config.ai.manus.timeoutMs;
@@ -96,32 +125,34 @@ async function manusComplete({ prompt, system, onProgress, signal }) {
     if (Date.now() > deadline) throw new AppError(504, `Manus task ${taskId} did not finish within the timeout. It may still complete at ${taskUrl ?? 'manus.im'}.`);
     await sleep(config.ai.manus.pollIntervalMs);
 
-    const poll = await outboundFetch(`${base}/v1/tasks/${taskId}`, { headers: { API_KEY: apiKey }, signal });
-    if (!poll.ok) { log.warn(`Manus poll ${poll.status}, retrying`); continue; }
-    const task = await poll.json();
+    const task = await manusTaskDetail(base, apiKey, taskId, signal);
+    if (!task) { log.warn(`Manus poll for task ${taskId} failed, retrying`); continue; }
     onProgress?.({ stage: task.status, taskId, taskUrl });
 
-    if (task.status === 'completed' || task.status === 'succeeded') {
-      return { text: extractManusText(task), externalId: taskId, externalUrl: taskUrl, raw: task };
+    if (task.status === 'error') {
+      throw new AppError(502, `Manus task failed${task.error_message ? `: ${task.error_message}` : ''}`);
     }
-    if (task.status === 'failed' || task.status === 'cancelled' || task.status === 'stopped') {
-      throw new AppError(502, `Manus task ${task.status}${task.error ? `: ${task.error}` : ''}`);
+    // Manus's own docs: a "stopped" main run can still have background work
+    // in flight, so it is only treated as finished once has_running_background_jobs
+    // is explicitly false - otherwise this keeps polling up to the deadline,
+    // same as the docs' own "bounded application polling deadline" advice.
+    if (task.status === 'stopped' && task.has_running_background_jobs === false) {
+      const messages = await manusTaskMessages(base, apiKey, taskId, signal);
+      return { text: extractManusText(messages, task), externalId: taskId, externalUrl: taskUrl, raw: { task, messages } };
     }
+    // 'running' and 'waiting' both just keep polling - 'waiting' means Manus
+    // wants a confirmation this app has no UI to supply; it either resolves
+    // on its own or the task times out above, same as any other stall.
   }
 }
 
-/** Manus returns a transcript; take the assistant's text parts. */
-export function extractManusText(task) {
+/** The answer is the assistant_message events from task.listMessages, in order. */
+export function extractManusText(messages, task) {
   const chunks = [];
-  for (const item of task.output ?? []) {
-    if (item.role === 'user') continue;
-    for (const c of item.content ?? []) {
-      if (typeof c === 'string') chunks.push(c);
-      else if (c.type === 'output_text' && c.text) chunks.push(c.text);
-      else if (c.type === 'text' && c.text) chunks.push(c.text);
-    }
+  for (const m of messages ?? []) {
+    if (m.type === 'assistant_message' && m.assistant_message?.content) chunks.push(m.assistant_message.content);
   }
-  return chunks.join('\n').trim() || (task.metadata?.task_title ?? '');
+  return chunks.join('\n').trim() || (task?.title ?? '');
 }
 
 /**
@@ -145,35 +176,84 @@ export function extractManusText(task) {
  * model does not support, so this is what keeps the effort picker honest.
  */
 export const MODEL_CATALOGUE = {
+  // Verified against Anthropic's current model table and thinking/effort
+  // reference (2026-09-25) - every model Anthropic serves today, not a
+  // hand-picked subset. `defaultEffort` is what the model uses when no
+  // `effort` is sent at all - most default to 'high'; Opus 5.5 is the one
+  // exception, at 'medium'.
   anthropic: [
-    { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'max', 'xhigh'],
-      note: 'The current flagship. Use it for judgement calls - address checks, mapping, anything you would double-check by hand.' },
-    { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'max', 'xhigh'],
-      note: 'Nearly Opus-level and quicker. A strong everyday default.' },
-    { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'max', 'xhigh'],
+    { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium',
+      note: 'The current Opus and the default model. Thinking can’t be turned off - use effort to control depth. Use it for judgement calls: address checks, mapping, anything you would double-check by hand.' },
+    { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high',
+      note: 'The current Sonnet. Nearly Opus-level and quicker - a strong everyday default for listing copy and replies.' },
+    { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high',
+      note: 'Anthropic’s most capable widely released model - the most demanding reasoning and long-horizon agentic work. Slower and pricier than Opus; save it for the hardest jobs.' },
+    { id: 'claude-fable-5', label: 'Claude Fable 5', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high',
+      note: 'Predecessor to Fable 5.1, same tier and price, still served.' },
+    { id: 'claude-opus-5', label: 'Claude Opus 5', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high',
+      note: 'Predecessor to Opus 5.5, a little pricier. Kept in case this is what you have pinned.' },
+    { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high',
+      note: 'Previous-generation Opus, still served.' },
+    { id: 'claude-opus-4-7', label: 'Claude Opus 4.7', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high',
+      note: 'Previous-generation Opus - this is the generation ‘xhigh’ effort was introduced on.' },
+    { id: 'claude-opus-4-6', label: 'Claude Opus 4.6', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'max'], defaultEffort: 'high',
+      note: 'Older Opus, no ‘xhigh’ level. Kept here in case it is still what you have pinned.' },
+    { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high',
       note: 'One generation behind Sonnet 5.5, still fully current and fast.' },
-    { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'max', 'xhigh'],
-      note: 'Tuned for writing. Good for listing copy.' },
-    { id: 'claude-opus-4-6', label: 'Claude Opus 4.6', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'max', 'xhigh'],
-      note: 'Previous-generation flagship, kept here in case it is still what you have pinned.' },
-    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'max', 'xhigh'],
-      note: 'Previous-generation Sonnet.' },
-    { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', thinking: 'enabled', effortLevels: [],
+    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'max'], defaultEffort: 'high',
+      note: 'Older Sonnet, no ‘xhigh’ level.' },
+    { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', thinking: 'enabled', effortLevels: [],
       note: 'Fastest and cheapest. Fine for bulk jobs where each answer is small. No reasoning-effort control - only a thinking budget, which this app does not expose per-request.' },
+    { id: 'claude-mythos-5-1', label: 'Claude Mythos 5.1 (restricted access)', thinking: 'adaptive', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high',
+      note: 'Same tier as Fable 5.1, available only under Anthropic’s Project Glasswing access program - picking it will fail here unless your account has that access.' },
   ],
+  // Verified against the live OpenAI model catalog and its reasoning guide
+  // (2026-09-25). Limited to models this app can actually call through Chat
+  // Completions with text/vision - the catalog also lists audio, realtime,
+  // image-generation, embedding and moderation models, which are separate
+  // endpoints this app either doesn't use or calls directly (editImage()
+  // below), so they are left out of this picker rather than shown as if they
+  // would work with a text prompt. `reasoning.mode` ('standard'/'pro') is a
+  // second effort-like dimension OpenAI documents for GPT-5.6/6 - it is a
+  // Responses-API field, and this app only calls Chat Completions, so it is
+  // not wired up; noted here so the gap is a documented choice, not a miss.
   openai: [
-    { id: 'gpt-6-astra', label: 'GPT-6 Astra', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
-      note: "OpenAI's current flagship - the most capable, for the hardest end-to-end work. Reads images." },
-    { id: 'gpt-6-sol', label: 'GPT-6 Sol', effortLevels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
-      note: 'Built for complex coding and agentic workflows. Reads images.' },
-    { id: 'gpt-6-luna', label: 'GPT-6 Luna', effortLevels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
-      note: "OpenAI's efficient model for high-volume, everyday tasks. Reads images." },
+    { id: 'gpt-6-astra', label: 'GPT-6 Astra', effortLevels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium',
+      note: "OpenAI's current flagship - the most capable, for the hardest end-to-end work. Reads images. Always reasons - no 'none' level." },
+    { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium',
+      note: 'Built for complex coding and agentic workflows. Reads images. No ‘none’ or ‘minimal’ level.' },
+    { id: 'gpt-6-luna', label: 'GPT-6 Luna', effortLevels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium',
+      note: "OpenAI's efficient model for high-volume, everyday tasks. Reads images. A solid everyday default." },
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol', effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium',
+      note: 'Previous version of Sol, replaced by GPT-6.1 Sol above but still served.' },
+    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', effortLevels: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium', note: 'Previous-generation coding/agentic model.' },
+    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', effortLevels: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium', note: 'Previous-generation efficient model.' },
+    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', effortLevels: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium', note: 'Previous-generation GPT-5.6 tier model.' },
+    { id: 'gpt-5.6-cyber', label: 'GPT-5.6 Cyber', effortLevels: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium', note: 'Specialised for cybersecurity work - not a general pick for listing/order tasks.' },
+    { id: 'gpt-5.5', label: 'GPT-5.5', effortLevels: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'medium', note: 'Previous flagship generation, still served.' },
+    { id: 'gpt-5.5-pro', label: 'GPT-5.5 Pro', effortLevels: ['minimal', 'low', 'medium', 'high'], defaultEffort: 'medium', note: 'Higher-cost Pro variant of GPT-5.5.' },
+    { id: 'gpt-5.2', label: 'GPT-5.2', effortLevels: ['minimal', 'low', 'medium', 'high'], note: 'Older generation, still served.' },
+    { id: 'gpt-5.1', label: 'GPT-5.1', effortLevels: ['minimal', 'low', 'medium', 'high'], note: 'Older generation, still served.' },
+    { id: 'gpt-5', label: 'GPT-5', effortLevels: ['minimal', 'low', 'medium', 'high'], note: 'Older generation, still served.' },
+    { id: 'o3-pro', label: 'o3-pro', effortLevels: ['low', 'medium', 'high'], note: 'Pure reasoning model, no chat tuning. Slower; used for the hardest analytical problems only.' },
+    { id: 'o3', label: 'o3', effortLevels: ['low', 'medium', 'high'], note: 'Pure reasoning model, no chat tuning.' },
+    { id: 'gpt-4.1', label: 'GPT-4.1', effortLevels: [], note: 'Previous-generation, non-reasoning, still generally available. Reads images.' },
+    { id: 'gpt-4.1-mini', label: 'GPT-4.1 mini', effortLevels: [], note: 'Previous-generation, cheap bulk option. Reads images.' },
     { id: 'gpt-4o', label: 'GPT-4o', effortLevels: [], note: 'Previous-generation, still generally available. Reads images.' },
-    { id: 'gpt-4o-mini', label: 'GPT-4o mini', effortLevels: [], note: 'Previous-generation, cheap bulk option.' },
+    { id: 'gpt-4o-mini', label: 'GPT-4o mini', effortLevels: [], note: 'Previous-generation, cheap bulk option. Reads images.' },
   ],
+  // Manus has no live model-list endpoint (its /v2/agent.list is for the
+  // agents you have configured, not Manus's own model tiers) - agent_profile
+  // is a small, documented enum, verified against the current v2 API
+  // reference (open.manus.ai/docs/v2/task.create), so this static list IS
+  // the full truth rather than a fallback the way the other two providers'
+  // catalogues are. Older version strings ("manus-1.6" etc.) are still
+  // accepted by the API as "versioned forms" but no longer the documented
+  // way to ask for a tier, so they are not offered here.
   manus: [
-    { id: 'manus-2.0', label: 'Manus 2.0', note: "Manus's current agent profile - runs as an agent, so it takes longer but can look things up." },
-    { id: 'manus-1.6', label: 'Manus 1.6', note: 'Previous agent profile, still usable.' },
+    { id: 'lite', label: 'Manus Lite', note: 'Fastest and cheapest - lighter reasoning, good for a quick, low-stakes task.' },
+    { id: 'standard', label: 'Manus Standard', note: 'The default balance of speed, cost and reasoning depth.' },
+    { id: 'max', label: 'Manus Max', note: 'Most thorough reasoning Manus offers - slower and costs more credits, for the hardest research/agentic tasks.' },
   ],
 };
 
@@ -188,15 +268,26 @@ export const MODEL_CATALOGUE = {
 const LIVE_MODEL_CACHE = new Map(); // provider -> { at, models }
 const LIVE_MODEL_TTL_MS = 10 * 60 * 1000;
 
-/** OpenAI's model levels only where the family is known to take one - the
- *  plain models list does not say, so this is a name-based best guess
- *  covering every reasoning family shipped so far. Wrong for a future name
- *  this does not recognise only means the effort picker stays hidden for it;
- *  the model id itself is unaffected and still works normally. */
+/**
+ * OpenAI's model levels only where the family is known to take one - the
+ * plain `/v1/models` list returns ids with no capability metadata at all, so
+ * this name-based guess is what actually annotates the *live* list (the
+ * static MODEL_CATALOGUE above is only the offline fallback). Patterns
+ * verified against OpenAI's current model catalog and reasoning guide
+ * (2026-09-25): Astra and Luna always reason (no 'none'); Sol (6 and 6.1)
+ * additionally drops 'minimal'; the 5.x/o-series reasoning families take the
+ * older, shorter scale. Wrong for a future name this does not recognise only
+ * means the effort picker stays hidden for it - the model id itself is
+ * unaffected and still works normally.
+ */
 function guessOpenAiEffortLevels(id) {
-  if (/^gpt-6-(astra)/i.test(id)) return ['low', 'medium', 'high', 'xhigh', 'max'];
-  if (/^gpt-6-(sol|luna)/i.test(id)) return ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
-  if (/^(o[134](-mini)?|gpt-5(\.\d+)?(-mini|-nano)?)/i.test(id)) return ['minimal', 'low', 'medium', 'high'];
+  if (/^gpt-6-astra/i.test(id)) return ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  if (/^gpt-6(\.\d+)?-sol/i.test(id)) return ['low', 'medium', 'high', 'xhigh', 'max'];
+  if (/^gpt-6-luna/i.test(id)) return ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  if (/^gpt-5\.6-(sol|luna|terra|cyber)/i.test(id)) return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  if (/^gpt-5\.5(-pro)?$/i.test(id)) return ['minimal', 'low', 'medium', 'high'];
+  if (/^o[134](-pro|-mini)?$/i.test(id)) return ['low', 'medium', 'high'];
+  if (/^gpt-5(\.\d+)?(-mini|-nano|-pro)?$/i.test(id)) return ['minimal', 'low', 'medium', 'high'];
   return [];
 }
 

@@ -48,21 +48,23 @@ export const config = {
     manus: {
       base: process.env.MANUS_API_BASE || 'https://api.manus.ai',
       apiKey: process.env.MANUS_API_KEY || '',
-      agentProfile: process.env.MANUS_AGENT_PROFILE || 'manus-1.6',
+      // Manus's v2 API takes an intelligence tier, not a version string -
+      // see services/ai/providers.js's Manus section for the full API shape.
+      agentProfile: process.env.MANUS_AGENT_PROFILE || 'standard',
       pollIntervalMs: int(process.env.MANUS_POLL_MS, 4000),
       timeoutMs: int(process.env.MANUS_TIMEOUT_MS, 900_000),
     },
     anthropic: {
       base: process.env.ANTHROPIC_API_BASE || 'https://api.anthropic.com',
       apiKey: process.env.ANTHROPIC_API_KEY || '',
-      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-5',
+      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5',
       version: '2023-06-01',
     },
     openai: {
       base: process.env.OPENAI_API_BASE || 'https://api.openai.com',
       apiKey: process.env.OPENAI_API_KEY || '',
-      model: process.env.OPENAI_MODEL || 'gpt-4o',
-      imageModel: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1',
+      model: process.env.OPENAI_MODEL || 'gpt-6-luna',
+      imageModel: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2',
     },
   },
 

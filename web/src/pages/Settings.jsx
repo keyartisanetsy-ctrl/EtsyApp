@@ -678,7 +678,7 @@ function ModelPicker({ draft, setDraft }) {
                   value={valueOf(`ai.${p.provider}.effort`, p.currentEffort ?? '')}
                   onChange={(e) => set(`ai.${p.provider}.effort`, e.target.value)}
                 >
-                  <option value="">Default for this model</option>
+                  <option value="">Default for this model{selectedModel?.defaultEffort ? ` (${selectedModel.defaultEffort})` : ''}</option>
                   {effortLevels.map((lvl) => <option key={lvl} value={lvl}>{lvl}</option>)}
                 </select>
                 <div className="hint">
