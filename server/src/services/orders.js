@@ -578,10 +578,17 @@ export function ledgerForReceipt(receiptId) {
 
   const currency = rows[0].currency;
   return {
-    // The actual money left once every fee, tax pass-through and ad charge
-    // synced for this order is accounted for - summing every line nets to
-    // exactly what landed, with no need to know which lines mean what.
-    netAmount: rows.reduce((sum, r) => sum + (r.amount || 0), 0) / 100,
+    // The actual money left once every fee and ad charge synced for this
+    // order is accounted for. Sales tax Etsy collected from the buyer and
+    // remits straight to the tax authority (isTaxPassThrough() below) is
+    // deliberately left out of this sum - it is already netted to zero
+    // between the sale and its own remittance line, and including it here
+    // would risk the same bug the Shopify side had (a pass-through line
+    // landing outside its matching entry's sync window, throwing net off by
+    // whichever side happened to be missing). VAT Etsy itself charges the
+    // shop on its own fees ("VAT: Processing Fee" etc.) is a real cost, not a
+    // pass-through, and stays counted.
+    netAmount: rows.reduce((sum, r) => sum + (isTaxPassThrough(r.ledger_type, r.description) ? 0 : (r.amount || 0)), 0) / 100,
     currency,
     lines: rows.map((r) => ({
       entryId: r.entry_id,
@@ -599,8 +606,24 @@ export function ledgerForReceipt(receiptId) {
       // present only on shops Etsy actually charges VAT on.
       parentEntryId: r.parent_entry_id,
       createdTs: r.create_date,
+      // Shown for information only (Etsy booked it, so it stays visible) -
+      // never folded into netAmount/profit above. See isTaxPassThrough().
+      isTaxPassThrough: isTaxPassThrough(r.ledger_type, r.description),
     })),
   };
+}
+
+/**
+ * Sales tax Etsy collected from the buyer and remits directly to the tax
+ * authority on the shop's behalf - a wash for the seller (nets to zero
+ * against its own remittance), never a real cost or credit. Matched on
+ * Etsy's own type/description containing "tax" - but not the shop's own VAT
+ * on Etsy's fees ("VAT: Processing Fee", "VAT: transaction", ...), which
+ * really does come off the shop's balance and must stay counted.
+ */
+function isTaxPassThrough(ledgerType, description) {
+  const raw = `${ledgerType || ''} ${description || ''}`;
+  return /tax/i.test(raw) && !/vat/i.test(raw);
 }
 
 /**
@@ -630,7 +653,7 @@ function loadLedgerSummaries(db, shopId, receiptIds) {
 
   const refs = [...refToReceipt.keys()];
   const rows = db.prepare(`
-    SELECT amount, currency, reference_id FROM etsy_ledger_entries
+    SELECT amount, currency, reference_id, ledger_type, description FROM etsy_ledger_entries
     WHERE shop_id IS ? AND reference_id IN (${refs.map(() => '?').join(',')})`).all(shopId, ...refs);
 
   for (const r of rows) {
@@ -638,7 +661,9 @@ function loadLedgerSummaries(db, shopId, receiptIds) {
     if (receiptId == null) continue;
     if (!map.has(receiptId)) map.set(receiptId, { netAmount: 0, currency: r.currency, lineCount: 0 });
     const entry = map.get(receiptId);
-    entry.netAmount += (r.amount || 0) / 100;
+    // Same exclusion as ledgerForReceipt() - a tax pass-through line never
+    // counts toward net here either.
+    if (!isTaxPassThrough(r.ledger_type, r.description)) entry.netAmount += (r.amount || 0) / 100;
     entry.lineCount += 1;
   }
   return map;

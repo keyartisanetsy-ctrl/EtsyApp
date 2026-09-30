@@ -843,10 +843,12 @@ function EtsyFinancePanel({ order, manualCost, setManualCost, manualCostNote, se
             <thead><tr><th>Etsy's label</th><th className="num">Amount</th></tr></thead>
             <tbody>
               {orderLedgerRows(order.ledgerLines).map((l) => (
-                <tr key={l.entryId}>
-                  <td style={l.depth ? { paddingLeft: 16 + l.depth * 16 } : undefined}>
+                <tr key={l.entryId} className={l.isTaxPassThrough ? 'dim' : undefined}>
+                  <td style={l.depth ? { paddingLeft: 16 + l.depth * 16 } : undefined}
+                    title={l.isTaxPassThrough ? 'Sales tax Etsy collected from the buyer and remits to the tax authority - a wash, not counted in Net below' : undefined}>
                     {l.depth > 0 && <span className="dim">↳ </span>}
                     {l.label}
+                    {l.isTaxPassThrough && <span className="small dim"> (pass-through, not counted)</span>}
                     {l.referenceId && String(l.referenceId) !== String(order.receiptId) && (
                       <span className="small dim"> · {l.referenceType || 'ref'} {l.referenceId}</span>
                     )}
@@ -866,8 +868,11 @@ function EtsyFinancePanel({ order, manualCost, setManualCost, manualCostNote, se
           </table>
           <div className="hint mb12">
             Every line Etsy actually booked against this order - the sale, its transaction/processing fee, an
-            Offsite Ads fee when it applies, tax and VAT pass-through - straight from Etsy's ledger, synced
-            automatically. Nothing here is re-derived.
+            Offsite Ads fee when it applies, VAT on Etsy's own fees - straight from Etsy's ledger, synced
+            automatically. Nothing here is re-derived. Sales tax Etsy collected from the buyer and remitted to
+            the tax authority is shown too, dimmed - it nets to zero for the shop, so it is left out of Net
+            below (and out of Profit, further down) rather than risk it throwing either off by whichever side
+            of the pass-through happened to sync first.
           </div>
         </>
       ) : (
