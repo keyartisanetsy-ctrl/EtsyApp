@@ -129,8 +129,11 @@ export function ProductImageCell({ order }) {
  * The warehouse photo for every item on the order - upload, replace, remove
  * or AI-compare each one individually, using the same control as the order
  * detail drawer (WarehousePhotoCell). A multi-item order used to only ever
- * show and check one "preview" item; now every item gets its own row, and a
- * "Check all" button covers all of them in one action.
+ * show and check one "preview" item; now every item gets its own row. In
+ * practice most sellers take one photo of everything packed together rather
+ * than one photo per product - uploading it under any single item's slot is
+ * enough, since the "Check all" button below detects that case and searches
+ * that one photo for every product on the order.
  */
 export function WarehouseCell({ order, channel, onChanged }) {
   const isShopify = channel === 'shopify';
@@ -156,43 +159,81 @@ export function WarehouseCell({ order, channel, onChanged }) {
 }
 
 /**
- * One click to AI-compare every item on the order that already has a
- * warehouse photo, instead of pressing "AI compare" once per item - the
- * point of a multi-item order showing every product is that all of them
- * actually get checked, not just whichever one used to be picked as the
- * "preview" item.
+ * One click to AI-check every item on the order, instead of pressing "AI
+ * compare" once per item. Two shapes of evidence lead to two different
+ * checks, picked automatically from what has actually been uploaded:
+ *
+ * - One shared photo (the common case - a single warehouse photo showing
+ *   everything packed for the order together): a single "group" AI call
+ *   searches that one photo for every item's own listing photo, and a
+ *   verdict is stored per item exactly as if each had been checked alone.
+ * - Several distinct photos (one per item, genuinely different pictures):
+ *   the original per-item loop, comparing each item's own photo against its
+ *   own listing photo one at a time.
  */
 function CheckAllButton({ channel, orderPath, items, onChanged }) {
   const showError = useErrorToast();
   const [busy, setBusy] = useState(false);
   const [summary, setSummary] = useState(null);
-  const checkable = items.filter((it) => it.warehousePhotoUrl);
-  if (checkable.length < 2) return null;
+  if (items.length < 2) return null;
+  const withPhotos = items.filter((it) => it.warehousePhotoUrl);
+  if (!withPhotos.length) return null;
+  const distinctPhotoIds = new Set(withPhotos.map((it) => it.warehousePhotoId));
+  const groupMode = distinctPhotoIds.size === 1;
+  if (!groupMode && withPhotos.length < 2) return null;
+
+  const tallyOf = (verdicts) => {
+    const tally = { match: 0, mismatch: 0, unsure: 0, failed: 0 };
+    for (const v of verdicts) tally[v] = (tally[v] ?? 0) + 1;
+    return tally;
+  };
+
+  const runGroup = async () => {
+    try {
+      const res = await api.post(`${orderPath}/warehouse-check-all`, {});
+      setSummary(tallyOf(res.results.map((r) => r.verdict)));
+    } catch (err) {
+      showError(err, 'Could not run the group check');
+    }
+  };
+
+  const runPerItem = async () => {
+    const verdicts = [];
+    let failed = 0;
+    for (const it of withPhotos) {
+      const itemId = channel === 'shopify' ? it.lineItemId : it.transactionId;
+      try {
+        const res = await api.post(`${orderPath}/items/${encodeURIComponent(itemId)}/warehouse-check`, {});
+        verdicts.push(res.verdict);
+      } catch (err) {
+        failed += 1;
+        showError(err, `Could not check item ${itemId}`);
+      }
+    }
+    const tally = tallyOf(verdicts);
+    tally.failed = failed;
+    setSummary(tally);
+  };
 
   const runAll = async () => {
     setBusy(true);
     setSummary(null);
-    const tally = { match: 0, mismatch: 0, unsure: 0, failed: 0 };
-    for (const it of checkable) {
-      const itemId = channel === 'shopify' ? it.lineItemId : it.transactionId;
-      try {
-        const res = await api.post(`${orderPath}/items/${encodeURIComponent(itemId)}/warehouse-check`, {});
-        tally[res.verdict] = (tally[res.verdict] ?? 0) + 1;
-      } catch (err) {
-        tally.failed += 1;
-        showError(err, `Could not check item ${itemId}`);
-      }
-    }
-    setSummary(tally);
+    if (groupMode) await runGroup(); else await runPerItem();
     setBusy(false);
     onChanged();
   };
 
+  const label = groupMode
+    ? `Check this photo against all ${items.length} products`
+    : `Check all ${withPhotos.length} items`;
+  const title = groupMode
+    ? 'Ask the AI to look for every product in this order inside the one shared warehouse photo'
+    : "Ask the AI to compare every item's own warehouse photo against its own listing photo";
+
   return (
     <div>
-      <button className="btn xs" disabled={busy} onClick={runAll}
-        title="Ask the AI to compare every item's own warehouse photo against its own listing photo">
-        {busy ? <Spinner /> : `Check all ${checkable.length} items`}
+      <button className="btn xs" disabled={busy} onClick={runAll} title={title}>
+        {busy ? <Spinner /> : label}
       </button>
       {summary && (
         <div className="small dim mt4">

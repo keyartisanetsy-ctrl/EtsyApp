@@ -235,6 +235,16 @@ router.get('/:id/items/:transactionId/warehouse-check', asyncRoute(async (req, r
   res.json(warehouse.getCheck('etsy', Number(req.params.transactionId)) ?? { checked: false });
 }));
 
+/** Compare ONE shared warehouse photo (whichever item already has one) against every item's own listing photo. */
+router.post('/:id/warehouse-check-all', asyncRoute(async (req, res) => {
+  res.json(await warehouse.checkOrder({
+    channel: 'etsy',
+    orderId: Number(req.params.id),
+    provider: req.body?.provider,
+    model: req.body?.model,
+  }));
+}));
+
 /** The default template for one order, rendered and ready to copy. */
 router.get('/:id/message-preview', asyncRoute(async (req, res) => {
   required(req.query, ['kind']);

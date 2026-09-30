@@ -211,6 +211,16 @@ router.get('/orders/:id/items/:lineItemId/warehouse-check', asyncRoute(async (re
   res.json(warehouse.getCheck('shopify', req.params.lineItemId) ?? { checked: false });
 }));
 
+/** Compare ONE shared warehouse photo (whichever item already has one) against every item's own listing photo. */
+router.post('/orders/:id/warehouse-check-all', asyncRoute(async (req, res) => {
+  res.json(await warehouse.checkOrder({
+    channel: 'shopify',
+    orderId: req.params.id,
+    provider: req.body?.provider,
+    model: req.body?.model,
+  }));
+}));
+
 // ------------------------------------------------------- shop campaigns ads
 
 /** What Shopify's own Shop Campaigns ads have cost lately, per campaign. */
