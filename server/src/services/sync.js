@@ -544,13 +544,18 @@ export async function syncReceipts({ full = false, sinceDays = null, onProgress 
  * needs an explicit window; after that the shop's own last-synced entry
  * decides where to resume, the same watermark idea as syncReceipts.
  */
+// Etsy rejects a min_created..max_created window wider than this (31 days),
+// so a first sync (or one that has fallen behind) walks the requested range
+// in chunks this wide instead of asking for it all in one call.
+const LEDGER_MAX_WINDOW_SECONDS = 31 * 86_400;
+
 export async function syncLedgerEntries({ sinceDays = 90 } = {}) {
   const shopId = requireShopId();
   const db = getDb();
 
   const last = db.prepare('SELECT MAX(create_date) AS t FROM etsy_ledger_entries WHERE shop_id IS ?').get(shopId)?.t;
-  const minCreated = last ? Math.max(0, last - 86_400) : Math.floor(Date.now() / 1000) - sinceDays * 86_400;
-  const maxCreated = Math.floor(Date.now() / 1000);
+  const windowStart = last ? Math.max(0, last - 86_400) : Math.floor(Date.now() / 1000) - sinceDays * 86_400;
+  const windowEnd = Math.floor(Date.now() / 1000);
 
   const upsert = db.prepare(`
     INSERT INTO etsy_ledger_entries (entry_id, shop_id, ledger_id, amount, currency, description,
@@ -562,21 +567,25 @@ export async function syncLedgerEntries({ sinceDays = 90 } = {}) {
       reference_type=excluded.reference_type, reference_id=excluded.reference_id,
       parent_entry_id=excluded.parent_entry_id, synced_at=excluded.synced_at`);
 
-  const entries = await callAll('getShopPaymentAccountLedgerEntries',
-    { shop_id: shopId, min_created: minCreated, max_created: maxCreated });
-
-  for (const e of entries) {
-    upsert.run({
-      entryId: e.entry_id, shopId, ledgerId: e.ledger_id ?? null, amount: e.amount ?? null,
-      currency: e.currency ?? null, description: e.description ?? null, ledgerType: e.ledger_type ?? null,
-      referenceType: e.reference_type ?? null, referenceId: e.reference_id != null ? String(e.reference_id) : null,
-      parentEntryId: e.parent_entry_id ?? null, createDate: e.create_date ?? e.created_timestamp ?? null,
-    });
+  let total = 0;
+  for (let from = windowStart; from < windowEnd; from += LEDGER_MAX_WINDOW_SECONDS) {
+    const to = Math.min(from + LEDGER_MAX_WINDOW_SECONDS, windowEnd);
+    const entries = await callAll('getShopPaymentAccountLedgerEntries',
+      { shop_id: shopId, min_created: from, max_created: to });
+    for (const e of entries) {
+      upsert.run({
+        entryId: e.entry_id, shopId, ledgerId: e.ledger_id ?? null, amount: e.amount ?? null,
+        currency: e.currency ?? null, description: e.description ?? null, ledgerType: e.ledger_type ?? null,
+        referenceType: e.reference_type ?? null, referenceId: e.reference_id != null ? String(e.reference_id) : null,
+        parentEntryId: e.parent_entry_id ?? null, createDate: e.create_date ?? e.created_timestamp ?? null,
+      });
+    }
+    total += entries.length;
   }
 
-  log.info(`ledger entries synced: ${entries.length}`);
-  audit('sync.ledger', { entity: 'ledger', detail: { count: entries.length } });
-  return { entries: entries.length };
+  log.info(`ledger entries synced: ${total}`);
+  audit('sync.ledger', { entity: 'ledger', detail: { count: total } });
+  return { entries: total };
 }
 
 /**
