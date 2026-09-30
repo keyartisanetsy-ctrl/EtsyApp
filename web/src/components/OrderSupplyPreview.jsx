@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import api from '../lib/api.js';
-import { Thumb, useErrorToast } from './ui.jsx';
+import { Thumb, Spinner, useErrorToast } from './ui.jsx';
 import WarehousePhotoCell from './WarehousePhoto.jsx';
 
 /**
@@ -97,47 +97,112 @@ export function SupplyCell({ order, channel, onChanged }) {
 }
 
 /**
- * The order item's own photo(s), right next to the Warehouse column, so a
- * mismatch between what was actually stocked and what the listing shows is
- * catchable at a glance - or with the AI compare button in the Warehouse
- * cell right beside it, which checks the warehouse photo against exactly
- * this same item's picture. Etsy keeps a separate variant-specific photo
- * (set on the SKU page) on top of the listing's own cover photo, so both
- * show when they differ; Shopify already resolves one photo per line item,
- * so there is only ever one to show there.
+ * Every item's own photo(s) on the order, right next to the Warehouse
+ * column, so a mismatch between what was actually stocked and what the
+ * listing shows is catchable at a glance - or with the AI compare button in
+ * the Warehouse cell right beside it, which checks each item's warehouse
+ * photo against exactly that item's own picture. A single-item order shows
+ * exactly what it always did; a multi-item order now shows every item's
+ * photo, not just one. Etsy keeps a separate variant-specific photo (set on
+ * the SKU page) on top of the listing's own cover photo, so both show when
+ * they differ; Shopify already resolves one photo per line item, so there is
+ * only ever one per item there.
  */
 export function ProductImageCell({ order }) {
-  const hasVariant = order.variantImageUrl && order.variantImageUrl !== order.imageUrl;
-  if (!order.imageUrl && !hasVariant) return <span className="muted small">no photo</span>;
+  const items = order.items?.length ? order.items : [{ imageUrl: order.imageUrl, variantImageUrl: order.variantImageUrl }];
+  const photos = items.flatMap((it, i) => {
+    const hasVariant = it.variantImageUrl && it.variantImageUrl !== it.imageUrl;
+    return [
+      it.imageUrl ? { key: `${i}-main`, url: it.imageUrl, alt: 'Listing photo' } : null,
+      hasVariant ? { key: `${i}-variant`, url: it.variantImageUrl, alt: 'Variant photo' } : null,
+    ].filter(Boolean);
+  });
+  if (!photos.length) return <span className="muted small">no photo</span>;
   return (
-    <div className="flex gap4">
-      {order.imageUrl && <Thumb src={order.imageUrl} alt="Listing photo" />}
-      {hasVariant && <Thumb src={order.variantImageUrl} alt="Variant photo" />}
+    <div className="flex gap4" style={{ flexWrap: 'wrap', maxWidth: 150 }}>
+      {photos.map((p) => <Thumb key={p.key} src={p.url} alt={p.alt} />)}
     </div>
   );
 }
 
 /**
- * The warehouse photo for whichever item the list preview is showing -
- * upload, replace or remove right here, using the exact same control as the
- * order detail drawer (WarehousePhotoCell), just pointed at that one item.
+ * The warehouse photo for every item on the order - upload, replace, remove
+ * or AI-compare each one individually, using the same control as the order
+ * detail drawer (WarehousePhotoCell). A multi-item order used to only ever
+ * show and check one "preview" item; now every item gets its own row, and a
+ * "Check all" button covers all of them in one action.
  */
 export function WarehouseCell({ order, channel, onChanged }) {
   const isShopify = channel === 'shopify';
-  const itemId = isShopify ? order.warehousePhotoLineItemId : order.warehousePhotoTransactionId;
-  if (!itemId) return <span className="muted small">no items</span>;
+  const items = order.items ?? [];
+  if (!items.length) return <span className="muted small">no items</span>;
 
   const orderPath = isShopify
     ? `/shopify/orders/${encodeURIComponent(order.orderId)}`
     : `/orders/${order.receiptId}`;
-  const item = isShopify
-    ? { lineItemId: itemId, warehousePhotoUrl: order.warehousePhotoUrl }
-    : { transactionId: itemId, warehousePhotoUrl: order.warehousePhotoUrl };
+
+  return (
+    <div className="flex" style={{ flexDirection: 'column', gap: 6 }}>
+      {items.map((it) => {
+        const itemId = isShopify ? it.lineItemId : it.transactionId;
+        const item = isShopify
+          ? { lineItemId: itemId, warehousePhotoUrl: it.warehousePhotoUrl }
+          : { transactionId: itemId, warehousePhotoUrl: it.warehousePhotoUrl };
+        return <WarehousePhotoCell key={itemId} channel={channel} orderPath={orderPath} item={item} onChanged={onChanged} />;
+      })}
+      <CheckAllButton channel={channel} orderPath={orderPath} items={items} onChanged={onChanged} />
+    </div>
+  );
+}
+
+/**
+ * One click to AI-compare every item on the order that already has a
+ * warehouse photo, instead of pressing "AI compare" once per item - the
+ * point of a multi-item order showing every product is that all of them
+ * actually get checked, not just whichever one used to be picked as the
+ * "preview" item.
+ */
+function CheckAllButton({ channel, orderPath, items, onChanged }) {
+  const showError = useErrorToast();
+  const [busy, setBusy] = useState(false);
+  const [summary, setSummary] = useState(null);
+  const checkable = items.filter((it) => it.warehousePhotoUrl);
+  if (checkable.length < 2) return null;
+
+  const runAll = async () => {
+    setBusy(true);
+    setSummary(null);
+    const tally = { match: 0, mismatch: 0, unsure: 0, failed: 0 };
+    for (const it of checkable) {
+      const itemId = channel === 'shopify' ? it.lineItemId : it.transactionId;
+      try {
+        const res = await api.post(`${orderPath}/items/${encodeURIComponent(itemId)}/warehouse-check`, {});
+        tally[res.verdict] = (tally[res.verdict] ?? 0) + 1;
+      } catch (err) {
+        tally.failed += 1;
+        showError(err, `Could not check item ${itemId}`);
+      }
+    }
+    setSummary(tally);
+    setBusy(false);
+    onChanged();
+  };
 
   return (
     <div>
-      <WarehousePhotoCell channel={channel} orderPath={orderPath} item={item} onChanged={onChanged} />
-      {order.itemCount > 1 && <div className="small dim mt4">{order.itemsWithPhoto}/{order.itemCount} items</div>}
+      <button className="btn xs" disabled={busy} onClick={runAll}
+        title="Ask the AI to compare every item's own warehouse photo against its own listing photo">
+        {busy ? <Spinner /> : `Check all ${checkable.length} items`}
+      </button>
+      {summary && (
+        <div className="small dim mt4">
+          {summary.match} match
+          {summary.mismatch > 0 && <strong style={{ color: 'var(--bad, #e05252)' }}>, {summary.mismatch} mismatch</strong>}
+          {summary.mismatch === 0 && ', 0 mismatch'}
+          {summary.unsure > 0 && `, ${summary.unsure} unsure`}
+          {summary.failed > 0 && `, ${summary.failed} failed`}
+        </div>
+      )}
     </div>
   );
 }

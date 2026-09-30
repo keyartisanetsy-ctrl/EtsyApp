@@ -496,8 +496,9 @@ function loadSupplyPreview(db, shopId, orderIds) {
     ORDER BY x.line_item_id`).all(shopId, ...orderIds);
 
   for (const it of items) {
-    if (!map.has(it.order_id)) map.set(it.order_id, { firstItem: it, linkItem: null, linkCount: 0, photoItem: null, photoCount: 0 });
+    if (!map.has(it.order_id)) map.set(it.order_id, { firstItem: it, linkItem: null, linkCount: 0, photoItem: null, photoCount: 0, items: [] });
     const entry = map.get(it.order_id);
+    entry.items.push(it);
     if (it.supply_link) { entry.linkCount += 1; if (!entry.linkItem) entry.linkItem = it; }
     if (it.warehouse_photo_id) { entry.photoCount += 1; if (!entry.photoItem) entry.photoItem = it; }
   }
@@ -615,6 +616,17 @@ function shapeOrder(r, preview, txn, costs, ledger) {
     warehousePhotoUrl: photoItem?.warehouse_photo_id ? `/api/ai/attachments/${photoItem.warehouse_photo_id}` : null,
     warehousePhotoLineItemId: photoItem?.line_item_id ?? null,
     itemsWithPhoto: preview?.photoCount || 0,
+    // Every item on the order, so a multi-item order shows (and can be
+    // warehouse-checked) product by product on the list - same idea as the
+    // Etsy side's `items` field.
+    items: (preview?.items ?? []).map((it) => ({
+      lineItemId: it.line_item_id,
+      sku: it.sku || '',
+      imageUrl: it.image_url || null,
+      supplyLink: it.supply_link || null,
+      warehousePhotoId: it.warehouse_photo_id || null,
+      warehousePhotoUrl: it.warehouse_photo_id ? `/api/ai/attachments/${it.warehouse_photo_id}` : null,
+    })),
     discountCodes: parse(r.discount_codes, []),
     riskLevel: r.risk_level || null,
     sourceName: r.source_name || null,

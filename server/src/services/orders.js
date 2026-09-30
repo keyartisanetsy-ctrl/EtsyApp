@@ -164,8 +164,9 @@ function loadSupplyPreview(db, shopId, receiptIds) {
     ORDER BY x.transaction_id`).all(shopId, ...receiptIds);
 
   for (const it of items) {
-    if (!map.has(it.receipt_id)) map.set(it.receipt_id, { firstItem: it, linkItem: null, linkCount: 0, photoItem: null, photoCount: 0 });
+    if (!map.has(it.receipt_id)) map.set(it.receipt_id, { firstItem: it, linkItem: null, linkCount: 0, photoItem: null, photoCount: 0, items: [] });
     const entry = map.get(it.receipt_id);
+    entry.items.push(it);
     if (it.supply_link) { entry.linkCount += 1; if (!entry.linkItem) entry.linkItem = it; }
     if (it.warehouse_photo_id) { entry.photoCount += 1; if (!entry.photoItem) entry.photoItem = it; }
   }
@@ -268,6 +269,20 @@ function orderSummary(r, preview, ledger, costs) {
     // one) before finally giving up.
     imageUrl: resolveForTransaction(photoItem)?.best?.url || photoItem?.image_url || null,
     variantImageUrl: photoItem?.variant_image_url || null,
+    // Every item on the order, each resolved the same way as the single
+    // preview item above - a multi-item order shows (and can be
+    // warehouse-checked) product by product on the list, not just its first
+    // or best-covered item. Single-item orders get a one-entry array, so the
+    // list can treat every order the same way.
+    items: (preview?.items ?? []).map((it) => ({
+      transactionId: it.transaction_id,
+      sku: it.sku || '',
+      imageUrl: resolveForTransaction(it)?.best?.url || it.image_url || null,
+      variantImageUrl: it.variant_image_url || null,
+      supplyLink: it.supply_link || null,
+      warehousePhotoId: it.warehouse_photo_id || null,
+      warehousePhotoUrl: it.warehouse_photo_id ? `/api/ai/attachments/${it.warehouse_photo_id}` : null,
+    })),
     // Preview of what the Items tab holds, so the list does not need opening
     // just to see - or change - whether the supply chain side of an order is
     // covered. Each carries the item (transaction id + sku) the value belongs
