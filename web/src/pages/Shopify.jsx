@@ -10,6 +10,13 @@ import StockCheckCell from '../components/StockCheck.jsx';
 import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
 import { SupplyCell, WarehouseCell, ProductImageCell } from '../components/OrderSupplyPreview.jsx';
 
+// Shopify only auto-builds a tracking link (and shows one in the shipping
+// confirmation email) for a carrier name it recognises exactly, capitalization
+// included - "YunExpress", not "Yunexpress" or "yunexpress". Typed in any other
+// casing, the tracking number is still saved and pushed, just without a
+// clickable link for the customer.
+const SHOPIFY_KNOWN_CARRIER = 'YunExpress';
+
 /**
  * Shopify: connect a store, mirror its products/variants and orders, edit
  * them here, and push tracking back as a real fulfillment - the same
@@ -1006,7 +1013,11 @@ function OrderDetail({ orderId, onClose, onChanged }) {
   // Same shop-wide default carrier the Etsy tracking form uses (orders.default_carrier,
   // "Yunexpress" out of the box) - never overwrites a carrier typed by hand.
   React.useEffect(() => {
-    if (carrierDefaults && !companyTouched) setCompany(carrierDefaults.defaultCarrier || '');
+    // Show the known-good default immediately rather than leaving the field
+    // empty while /tracking/carriers is still loading (or failed outright,
+    // in which case carrierDefaults stays null forever - it must never mean
+    // "show nothing").
+    if (!companyTouched) setCompany(carrierDefaults?.defaultCarrier || SHOPIFY_KNOWN_CARRIER);
   }, [carrierDefaults]); // eslint-disable-line react-hooks/exhaustive-deps
   const [supplierRef, setSupplierRef] = useState('');
   const [supplyTrack, setSupplyTrack] = useState('');
@@ -1203,6 +1214,8 @@ function OrderDetail({ orderId, onClose, onChanged }) {
               <input className="input sm" placeholder="Tracking number" value={tracking} onChange={(e) => setTracking(e.target.value)} />
               <input className="input sm" placeholder="Carrier (optional)" value={company}
                 onChange={(e) => { setCompany(e.target.value); setCompanyTouched(true); }} />
+              <button type="button" className="btn sm ghost" title="Shopify only builds a tracking link for this exact spelling"
+                onClick={() => { setCompany(SHOPIFY_KNOWN_CARRIER); setCompanyTouched(true); }}>{SHOPIFY_KNOWN_CARRIER}</button>
               <Checkbox checked={notify} onChange={setNotify} label="Notify customer" />
               <button className="btn sm primary" disabled={busy || !tracking.trim()} onClick={fulfill}>{busy ? <Spinner /> : 'Fulfill on Shopify'}</button>
             </div>
@@ -1233,7 +1246,11 @@ function QuickFulfillForm({ orderId, onDone }) {
   // Same shop-wide default carrier the Etsy tracking form uses (orders.default_carrier,
   // "Yunexpress" out of the box) - never overwrites a carrier typed by hand.
   React.useEffect(() => {
-    if (carrierDefaults && !companyTouched) setCompany(carrierDefaults.defaultCarrier || '');
+    // Show the known-good default immediately rather than leaving the field
+    // empty while /tracking/carriers is still loading (or failed outright,
+    // in which case carrierDefaults stays null forever - it must never mean
+    // "show nothing").
+    if (!companyTouched) setCompany(carrierDefaults?.defaultCarrier || SHOPIFY_KNOWN_CARRIER);
   }, [carrierDefaults]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fulfill = async () => {
@@ -1251,6 +1268,8 @@ function QuickFulfillForm({ orderId, onDone }) {
       <input className="input sm" placeholder="Tracking number" autoFocus value={tracking} onChange={(e) => setTracking(e.target.value)} />
       <input className="input sm" placeholder="Carrier (optional)" value={company}
         onChange={(e) => { setCompany(e.target.value); setCompanyTouched(true); }} />
+      <button type="button" className="btn sm ghost" title="Shopify only builds a tracking link for this exact spelling"
+        onClick={() => { setCompany(SHOPIFY_KNOWN_CARRIER); setCompanyTouched(true); }}>{SHOPIFY_KNOWN_CARRIER}</button>
       <Checkbox checked={notify} onChange={setNotify} label="Notify customer" />
       <button className="btn sm primary" disabled={busy || !tracking.trim()} onClick={fulfill}>{busy ? <Spinner /> : 'Fulfill on Shopify'}</button>
     </div>
