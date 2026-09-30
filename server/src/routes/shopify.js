@@ -157,9 +157,14 @@ router.post('/orders/:id/supply-cost', asyncRoute(async (req, res) => {
   res.json(shopify.setSupplyCost(req.params.id, { cost: req.body?.cost, currency: req.body?.currency }));
 }));
 
-/** A hand-typed cost for this order - e.g. its share of Shop Campaigns spend. */
+/** A hand-typed cost for this order - anything Shopify doesn't tie to it and that isn't Shop ads spend. */
 router.post('/orders/:id/manual-cost', asyncRoute(async (req, res) => {
   res.json(shopify.setManualCost(req.params.id, { amount: req.body?.amount, note: req.body?.note }));
+}));
+
+/** Force this order's Shop-ads attribution on/off; { override: null } goes back to automatic. */
+router.post('/orders/:id/shop-ads', asyncRoute(async (req, res) => {
+  res.json(shopify.setShopAdsOverride(req.params.id, req.body?.override ?? null));
 }));
 
 /** Add tracking and mark the order fulfilled on Shopify. */

@@ -206,7 +206,7 @@ export function listOrders({ search = '', canceled = null, limit = 100, offset =
     SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
            f.supplier_order_ref, f.supply_tracking_number,
            COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at, f.notes,
-           f.manual_cost, f.manual_cost_note, f.supply_cost, f.supply_cost_currency,
+           f.manual_cost, f.manual_cost_note, f.supply_cost, f.supply_cost_currency, f.shop_ads_override,
            al.airtable_pushed_at,
            (SELECT COUNT(*) FROM shopify_order_line_items x WHERE x.order_id = o.order_id) AS item_count
     ${base}
@@ -251,31 +251,88 @@ function loadTransactionSummary(db, orderIds) {
 }
 
 /**
+ * Not every row Shopify posts against an order's balance-transaction ledger
+ * is part of settling THAT sale. Shopify also attaches marketing/referral
+ * activity (Shop Campaigns' referral fee, a promotional credit, an ads
+ * publisher credit...) and other rare account-level activity to the same
+ * order_id, purely for reporting/attribution. Summing every row blindly - the
+ * first version of this code did - produced a "net" that could land above
+ * the order's own gross amount (a promo credit inflating it) or far below
+ * what any real card-processing fee could explain (a referral fee being
+ * mislabelled as a "payment fee"). Three buckets instead:
+ *   - settlement: the sale itself - charge/refund/dispute/chargeback and the
+ *     real Shopify Payments processing fee on them. This is realNet/paymentFees.
+ *   - marketing: Shop Campaigns' own referral fee and related credits - a
+ *     real cost, but a marketing one, never a payment-processing fee. This is
+ *     adSpend, and its mere presence is definitive proof the order came
+ *     through Shop Campaigns (better evidence than the tags/source heuristic
+ *     in looksLikeShopAds() below).
+ *   - other: rare account-level activity (transfers, disputes-in-progress,
+ *     lending, etc.) that happens to reference this order_id. Kept visible in
+ *     the ledger-lines detail view, but deliberately left out of both totals
+ *     above rather than guessed into either one.
+ */
+const SETTLEMENT_TXN_TYPES = new Set([
+  'CHARGE', 'REFUND', 'REFUND_FAILURE', 'ADJUSTMENT', 'CHARGE_ADJUSTMENT', 'REFUND_ADJUSTMENT',
+  'SHOP_CASH_CREDIT', 'SHOP_CASH_CREDIT_REVERSAL', 'SHOP_CASH_REFUND_DEBIT', 'SHOP_CASH_REFUND_DEBIT_REVERSAL',
+  'DISPUTE_WITHDRAWAL', 'DISPUTE_REVERSAL', 'CHARGEBACK_FEE', 'CHARGEBACK_FEE_REFUND',
+  'CHARGEBACK_HOLD', 'CHARGEBACK_HOLD_RELEASE', 'APPLICATION_FEE_REFUND',
+  'TAX_ADJUSTMENT_DEBIT', 'TAX_ADJUSTMENT_DEBIT_REVERSAL', 'TAX_ADJUSTMENT_CREDIT', 'TAX_ADJUSTMENT_CREDIT_REVERSAL',
+  'CUSTOMS_DUTY', 'CUSTOMS_DUTY_ADJUSTMENT', 'IMPORT_TAX', 'IMPORT_TAX_ADJUSTMENT', 'IMPORT_TAX_REFUND',
+]);
+const MARKETING_TXN_TYPES = new Set([
+  'REFERRAL_FEE', 'REFERRAL_FEE_TAX',
+  'CHANNEL_PROMOTION_CREDIT', 'CHANNEL_PROMOTION_CREDIT_REVERSAL',
+  'CHANNEL_CREDIT', 'CHANNEL_CREDIT_REVERSAL',
+  'ADS_PUBLISHER_CREDIT', 'ADS_PUBLISHER_CREDIT_REVERSAL',
+  'MARKETPLACE_FEE_CREDIT', 'MARKETPLACE_FEE_CREDIT_REVERSAL',
+  'SHOP_CASH_CAMPAIGN_BILLING_DEBIT', 'SHOP_CASH_CAMPAIGN_BILLING_DEBIT_REVERSAL',
+  'SHOP_CASH_CAMPAIGN_BILLING_CREDIT', 'SHOP_CASH_CAMPAIGN_BILLING_CREDIT_REVERSAL',
+  'PROMOTION_CREDIT', 'PROMOTION_CREDIT_REVERSAL',
+]);
+
+/**
  * Shopify Payments' own balance ledger for these orders - ground truth, the
  * same numbers Settings > Payments > Payouts > Transactions shows, unlike
  * loadTransactionSummary() above which only ever recomputes a rate-card
  * estimate. A Shop Cash credit and its matching card charge are two separate
  * rows for the same order_id here, exactly as Shopify's own payout ledger
- * lists them - summing every row per order reproduces that page's numbers.
- * Empty (order not in the map) until syncBalanceTransactions() has run for
- * this store, or on a store still missing the read_shopify_payments_accounts
- * scope - financialsFor() below falls back to the estimate in either case.
+ * lists them - summing every settlement row per order reproduces that page's
+ * numbers. Empty (order not in the map) until syncBalanceTransactions() has
+ * run for this store, or on a store still missing the
+ * read_shopify_payments_accounts scope - financialsFor() below falls back to
+ * the estimate in either case.
  */
 function loadBalanceLedgerSummary(db, orderIds) {
   const map = new Map();
   if (!orderIds.length) return map;
   const holes = orderIds.map(() => '?').join(',');
   const rows = db.prepare(`
-    SELECT order_id, amount, fee, net, currency
+    SELECT order_id, type, amount, fee, net, currency
     FROM shopify_balance_transactions WHERE order_id IN (${holes})`).all(...orderIds);
   for (const r of rows) {
-    if (!map.has(r.order_id)) map.set(r.order_id, { grossAmount: 0, feeAmount: 0, netAmount: 0, currency: r.currency, count: 0 });
-    const s = map.get(r.order_id);
-    s.grossAmount += r.amount || 0;
-    s.feeAmount += r.fee || 0;
-    s.netAmount += r.net || 0;
-    s.currency = s.currency || r.currency;
-    s.count += 1;
+    if (!map.has(r.order_id)) {
+      map.set(r.order_id, {
+        settlement: { grossAmount: 0, feeAmount: 0, netAmount: 0, currency: r.currency, count: 0 },
+        marketing: { netAmount: 0, currency: r.currency, count: 0 },
+      });
+    }
+    const entry = map.get(r.order_id);
+    if (SETTLEMENT_TXN_TYPES.has(r.type)) {
+      const s = entry.settlement;
+      s.grossAmount += r.amount || 0;
+      s.feeAmount += r.fee || 0;
+      s.netAmount += r.net || 0;
+      s.currency = s.currency || r.currency;
+      s.count += 1;
+    } else if (MARKETING_TXN_TYPES.has(r.type)) {
+      const m = entry.marketing;
+      m.netAmount += r.net || 0;
+      m.currency = m.currency || r.currency;
+      m.count += 1;
+    }
+    // Anything else (transfers, disputes-in-progress, lending, ...) is left
+    // out of both totals - see the comment above SETTLEMENT_TXN_TYPES.
   }
   return map;
 }
@@ -289,6 +346,9 @@ function loadBalanceLedgerLines(db, orderId) {
       txnId: r.txn_id, type: r.type, sourceType: r.source_type,
       amount: r.amount, fee: r.fee, net: r.net, currency: r.currency,
       label: prettyBalanceLabel(r.type),
+      // Which total (if any) this row is folded into above - see the comment
+      // above SETTLEMENT_TXN_TYPES/MARKETING_TXN_TYPES.
+      category: SETTLEMENT_TXN_TYPES.has(r.type) ? 'settlement' : MARKETING_TXN_TYPES.has(r.type) ? 'marketing' : 'other',
       transactionDate: r.transaction_date, payoutStatus: r.payout_status,
     }));
 }
@@ -302,17 +362,48 @@ function prettyBalanceLabel(type) {
 }
 
 /**
- * What actually landed for one order: the real balance-ledger total when
- * syncBalanceTransactions() has found any rows for it (source: 'ledger'),
- * else the rate-card estimate from shopify_order_transactions.fees
- * (source: 'estimate') - never both mixed together, so the UI can say
- * plainly which one it is showing.
+ * What actually landed for one order: the real balance-ledger settlement
+ * total when syncBalanceTransactions() has found any settlement rows for it
+ * (source: 'ledger'), else the rate-card estimate from
+ * shopify_order_transactions.fees (source: 'estimate') - never both mixed
+ * together, so the UI can say plainly which one it is showing. Shop
+ * Campaigns' own referral-fee rows never enter this figure at all - see
+ * adSpendFor() below.
  */
 function financialsFor(txn, ledger) {
-  if (ledger && ledger.count > 0) {
-    return { netAmount: round2(ledger.netAmount), feeAmount: round2(ledger.feeAmount), currency: ledger.currency, hasFees: true, source: 'ledger' };
+  const settlement = ledger?.settlement;
+  if (settlement && settlement.count > 0) {
+    return { netAmount: round2(settlement.netAmount), feeAmount: round2(settlement.feeAmount), currency: settlement.currency, hasFees: true, source: 'ledger' };
   }
   if (txn) return { netAmount: txn.netAmount, feeAmount: txn.hasFees ? txn.feeAmount : null, currency: txn.currency, hasFees: txn.hasFees, source: 'estimate' };
+  return null;
+}
+
+/**
+ * What Shop Campaigns actually cost on this one order. The real referral-fee
+ * ledger rows (source: 'ledger') are definitive proof the order was Shop-ads
+ * attributed - far better evidence than the tags/source guess in
+ * looksLikeShopAds(). With no ledger data yet, falls back to the shop's own
+ * observed rule (source: 'estimate') only when something else already flags
+ * the order as Shop ads (the heuristic or a manual override) - never invented
+ * for an order nothing else points to.
+ */
+function adSpendFor(ledger, isShopAdsAttributed, totalAmount, currency) {
+  // A manual "Off" always wins outright, even over a real referral-fee ledger
+  // row - "cancel Shop ads for this order" means take it out of the profit
+  // math entirely, not just relabel it.
+  if (!isShopAdsAttributed) return null;
+  const marketing = ledger?.marketing;
+  if (marketing && marketing.count > 0) {
+    // A referral fee is a cost (positive spend) even though the ledger's own
+    // sign convention for it is negative (it reduces the balance).
+    return { value: round2(Math.abs(marketing.netAmount)), currency: marketing.currency || currency, source: 'ledger' };
+  }
+  // The shop's own reconciled rule: over $50, Shop Campaigns always costs a
+  // flat $25 - used only until the real ledger line has synced for this order.
+  if (totalAmount != null && totalAmount > 50) {
+    return { value: 25, currency: currency || 'USD', source: 'estimate' };
+  }
   return null;
 }
 
@@ -357,25 +448,30 @@ function loadOrderCosts(db, orderIds) {
 }
 
 /**
- * Shipping + supply cost, converted into the order's own currency, plus the
- * profit left once they and any manual cost come off Shopify's own
- * transactions net. Null fields (rather than a wrong number) whenever a
- * currency has no FX rate to convert with.
+ * Shipping + supply cost + Shop Campaigns ad spend, converted into the
+ * order's own currency, plus the profit left once they and any manual cost
+ * come off Shopify's own transactions net. Null fields (rather than a wrong
+ * number) whenever a currency has no FX rate to convert with.
  */
-function orderCostBreakdown(r, fin, costs) {
-  if (!costs) return { shipping: null, supply: null, profit: null };
-  const shipping = costs.shipping != null ? convert(costs.shipping, costs.shippingCcy, r.currency, r.created_at_shopify) : null;
-  const supply = costs.supply != null ? convert(costs.supply, costs.supplyCcy, r.currency, r.created_at_shopify) : null;
-  const shippingFailed = costs.shipping != null && shipping == null;
-  const supplyFailed = costs.supply != null && supply == null;
+function orderCostBreakdown(r, fin, costs, adSpend) {
+  // No shipping/supply data at all (a fresh order, or nothing costed yet) is
+  // "nothing to subtract", not "unknown" - it must never block adSpend or
+  // profit from showing when a real ledger fee or ad spend is already known.
+  const shipping = costs?.shipping != null ? convert(costs.shipping, costs.shippingCcy, r.currency, r.created_at_shopify) : null;
+  const supply = costs?.supply != null ? convert(costs.supply, costs.supplyCcy, r.currency, r.created_at_shopify) : null;
+  const ads = adSpend != null ? convert(adSpend.value, adSpend.currency, r.currency, r.created_at_shopify) : null;
+  const shippingFailed = costs?.shipping != null && shipping == null;
+  const supplyFailed = costs?.supply != null && supply == null;
+  const adsFailed = adSpend != null && ads == null;
 
   let profit = null;
-  if (fin && !shippingFailed && !supplyFailed) {
-    profit = { value: round2(fin.netAmount - (shipping || 0) - (supply || 0) - (r.manual_cost || 0)), currency: fin.currency };
+  if (fin && !shippingFailed && !supplyFailed && !adsFailed) {
+    profit = { value: round2(fin.netAmount - (shipping || 0) - (supply || 0) - (ads || 0) - (r.manual_cost || 0)), currency: fin.currency };
   }
   return {
     shipping: shipping != null ? { value: round2(shipping), currency: r.currency } : null,
     supply: supply != null ? { value: round2(supply), currency: r.currency, isEstimate: !!costs.supplyIsEstimate } : null,
+    adSpend: ads != null ? { value: round2(ads), currency: r.currency, source: adSpend.source } : null,
     profit,
   };
 }
@@ -410,20 +506,34 @@ function loadSupplyPreview(db, shopId, orderIds) {
 
 /**
  * A best-effort read of whether this sale is attributed to Shopify's own
- * Shop app / Shop Campaigns, from the same source/attribution fields the
- * order sync already pulls. Shopify does not split ad spend down to one
- * dollar figure per order - the actual cost lives at the campaign level in
- * Shop Campaigns (Shopify.jsx's ShopCampaignsPanel) - so this only flags
- * *which* orders to credit to it, never a per-order cost.
+ * Shop app / Shop Campaigns, from the source/attribution/tags fields the
+ * order sync already pulls - overridden by the per-order toggle
+ * (shop_ads_override) or superseded outright by a real referral-fee ledger
+ * line (adSpendFor() above), whichever is available. An explicit "shop
+ * campaigns"/"shop ads" mention anywhere is definitive; a bare "shop"
+ * channel order that also carries any tag is treated as likely Shop ads too
+ * - Shopify's Admin API has no order-level "was this an ad" flag on the
+ * order itself, only this kind of indirect evidence, which is exactly why
+ * the manual override and the real ledger check above exist.
  */
-function looksLikeShopAds(sourceName, attributionSource) {
-  return /\bshop[\s_-]*(campaigns?|ads?)\b/i.test(`${sourceName || ''} ${attributionSource || ''}`);
+function looksLikeShopAds(sourceName, attributionSource, tags) {
+  const haystack = `${sourceName || ''} ${attributionSource || ''} ${(tags || []).join(' ')}`;
+  if (/\bshop[\s_-]*(campaigns?|ads?)\b/i.test(haystack)) return true;
+  return /^shop$/i.test((sourceName || '').trim()) && (tags || []).length > 0;
 }
 
 function shapeOrder(r, preview, txn, costs, ledger) {
   const linkItem = preview?.linkItem ?? preview?.firstItem ?? null;
   const photoItem = preview?.photoItem ?? preview?.firstItem ?? null;
   const fin = financialsFor(txn, ledger);
+  const tags = parse(r.tags, []);
+  // shop_ads_override wins outright when set by hand; otherwise the real
+  // referral-fee ledger line (if it has synced) or the tags/source heuristic
+  // decides - see looksLikeShopAds() and adSpendFor() above.
+  const heuristicShopAds = looksLikeShopAds(r.source_name, r.attribution_source, tags);
+  const ledgerSaysShopAds = (ledger?.marketing?.count ?? 0) > 0;
+  const isShopAdsAttributed = r.shop_ads_override != null ? !!r.shop_ads_override : (ledgerSaysShopAds || heuristicShopAds);
+  const adSpend = adSpendFor(ledger, isShopAdsAttributed, r.total_amount, r.currency);
   return {
     orderId: r.order_id, name: r.name, email: r.email, phone: r.phone,
     financialStatus: r.financial_status, fulfillmentStatus: r.fulfillment_status, currency: r.currency,
@@ -436,7 +546,7 @@ function shapeOrder(r, preview, txn, costs, ledger) {
     customerName: r.customer_name,
     shipName: r.ship_name, shipAddress1: r.ship_address1, shipAddress2: r.ship_address2, shipCity: r.ship_city,
     shipProvince: r.ship_province, shipZip: r.ship_zip, shipCountry: r.ship_country, shipPhone: r.ship_phone,
-    note: r.note, tags: parse(r.tags, []), createdAt: r.created_at_shopify, cancelledAt: r.cancelled_at,
+    note: r.note, tags, createdAt: r.created_at_shopify, cancelledAt: r.cancelled_at,
     isCanceled: !!r.cancelled_at,
     // Ours, not Shopify's - set by the "Cancel" button in this app. Shopify's
     // API could really cancel the order, but this app deliberately never
@@ -462,23 +572,28 @@ function shapeOrder(r, preview, txn, costs, ledger) {
     // currency conversion); 'estimate' = this app's rate-card recomputation,
     // shown only until the real ledger has synced for this order.
     feeSource: fin?.source ?? null,
-    // See looksLikeShopAds() - attribution only, never an exact ad cost.
-    isShopAdsAttributed: looksLikeShopAds(r.source_name, r.attribution_source),
-    // The hand-typed cost field this flag exists for: what you actually spent
-    // on this order's share of Shop Campaigns (or anything else Shopify does
-    // not report per order). Kept apart from realNet, which is Shopify's own
-    // numbers untouched; `netAfterManualCost` is the two combined.
+    // See looksLikeShopAds()/adSpendFor() above - 'ledger' when a real
+    // referral-fee row proves it, 'override' when set by hand, else a guess
+    // from tags/source ('heuristic'). adSpend (in costBreakdown below) is the
+    // actual cost, when known.
+    isShopAdsAttributed,
+    shopAdsSource: r.shop_ads_override != null ? 'override' : ledgerSaysShopAds ? 'ledger' : heuristicShopAds ? 'heuristic' : null,
+    shopAdsOverride: r.shop_ads_override == null ? null : !!r.shop_ads_override,
+    // The hand-typed cost field: anything Shopify's transactions don't tie to
+    // this order by themselves and that isn't Shop Campaigns ad spend (that
+    // has its own line now - costBreakdown.adSpend). Kept apart from realNet,
+    // which is Shopify's own numbers untouched; `netAfterManualCost` is the two combined.
     manualCost: r.manual_cost != null
       ? { value: r.manual_cost, currency: r.currency, note: r.manual_cost_note || '' }
       : null,
     netAfterManualCost: (fin && r.manual_cost != null)
       ? { value: fin.netAmount - r.manual_cost, currency: fin.currency }
       : null,
-    // The full picture: what shipping and the goods themselves actually cost
-    // (real figures typed in below when there are any, else a clearly-flagged
-    // per-variant estimate from Shopify's own inventory cost), and what is
-    // left of the transactions net once those and the manual cost above come off.
-    costBreakdown: orderCostBreakdown(r, fin, costs),
+    // The full picture: what shipping, the goods themselves, and any Shop
+    // Campaigns ad spend actually cost (real figures typed in/synced when
+    // there are any, else a clearly-flagged estimate), and what is left of
+    // the transactions net once those and the manual cost above come off.
+    costBreakdown: orderCostBreakdown(r, fin, costs, adSpend),
     itemCount: r.item_count, trackingNumber: r.tracking_number || null, trackingCompany: r.tracking_company || null,
     shippingCost: r.shipping_cost ?? null, shippingCostCurrency: r.shipping_cost_currency ?? null,
     supplyCost: r.supply_cost ?? null, supplyCostCurrency: r.supply_cost_currency ?? null,
@@ -516,7 +631,7 @@ export function getOrder(orderId) {
     SELECT o.*, f.tracking_number, f.tracking_company, f.tracking_url, f.shipping_cost, f.shipping_cost_currency, f.pushed_at,
            f.supplier_order_ref, f.supply_tracking_number,
            COALESCE(f.is_canceled,0) AS locally_canceled, f.canceled_at, f.notes,
-           f.manual_cost, f.manual_cost_note, f.supply_cost, f.supply_cost_currency,
+           f.manual_cost, f.manual_cost_note, f.supply_cost, f.supply_cost_currency, f.shop_ads_override,
            al.airtable_pushed_at
     FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
     LEFT JOIN (SELECT receipt_id, MAX(last_pushed_at) AS airtable_pushed_at
@@ -661,6 +776,24 @@ export function setManualCost(orderId, { amount, note } = {}) {
   db.prepare('UPDATE shopify_fulfillments SET manual_cost = ?, manual_cost_note = ? WHERE order_id = ?')
     .run(value, note !== undefined ? String(note ?? '') : '', orderId);
   audit('shopify.manual_cost', { entity: 'shopify_order', entityId: orderId, detail: { amount: value, note } });
+  return getOrder(orderId);
+}
+
+/**
+ * Force this order's Shop-ads attribution on/off by hand, overriding
+ * looksLikeShopAds()'s tags/source guess (and the real referral-fee ledger
+ * check, for the rare case Shopify posts one on an order that plainly isn't
+ * Shop-ads, or vice versa). `override: null` goes back to automatic.
+ */
+export function setShopAdsOverride(orderId, override) {
+  const shopId = requireShopifyShopId();
+  const owns = getDb().prepare('SELECT 1 FROM shopify_orders WHERE order_id = ? AND shop_id = ?').get(orderId, shopId);
+  if (!owns) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
+  const value = override === null || override === undefined ? null : (override ? 1 : 0);
+  const db = getDb();
+  db.prepare('INSERT OR IGNORE INTO shopify_fulfillments (order_id) VALUES (?)').run(orderId);
+  db.prepare('UPDATE shopify_fulfillments SET shop_ads_override = ? WHERE order_id = ?').run(value, orderId);
+  audit('shopify.shop_ads_override', { entity: 'shopify_order', entityId: orderId, detail: { override: value } });
   return getOrder(orderId);
 }
 

@@ -1020,6 +1020,10 @@ CREATE TABLE IF NOT EXISTS shopify_fulfillments (
   -- this particular order cost, so this is where you write it in yourself.
   manual_cost             REAL,
   manual_cost_note        TEXT DEFAULT '',
+  -- Force this order's Shop-ads attribution on (1) or off (0) by hand; NULL
+  -- (the default) leaves it to the automatic read (tags/source, or a real
+  -- referral-fee line in shopify_balance_transactions once that has synced).
+  shop_ads_override       INTEGER,
   FOREIGN KEY (order_id) REFERENCES shopify_orders(order_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_draft_media_listing ON draft_media(listing_id, kind, rank);

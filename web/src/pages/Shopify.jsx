@@ -492,7 +492,9 @@ function OrdersPanel() {
                   )}
                   {o.isShopAdsAttributed && (
                     <span className="badge violet" style={{ marginLeft: 6 }}
-                      title="Attributed to Shop Campaigns - see the Shop Campaigns panel above for the actual ad spend, Shopify does not split it per order">
+                      title={o.shopAdsSource === 'ledger' ? "Confirmed by Shopify's own referral-fee ledger line"
+                        : o.shopAdsSource === 'override' ? 'Marked Shop ads by hand'
+                        : 'Guessed from tags/sales channel - open the order to correct it if wrong'}>
                       Shop ads
                     </span>
                   )}
@@ -789,7 +791,7 @@ function SupplyCostCell({ row, onSaved }) {
  * rest - a deliberately different layout from Etsy's finance panel, built
  * around what Shopify's API actually gives (transactions/fees, not a ledger).
  */
-function ShopifyFinancePanel({ data, manualCost, setManualCost, manualCostNote, setManualCostNote, saveManualCost, onSaved }) {
+function ShopifyFinancePanel({ data, manualCost, setManualCost, manualCostNote, setManualCostNote, saveManualCost, setShopAds, onSaved }) {
   const isCanceled = data.isCanceled || data.isLocallyCanceled;
   const marginPct = (data.costBreakdown?.profit && data.total)
     ? Math.round((data.costBreakdown.profit.value / data.total) * 1000) / 10
@@ -829,13 +831,26 @@ function ShopifyFinancePanel({ data, manualCost, setManualCost, manualCostNote, 
           )}
         </dd>
       </dl>
-      {data.isShopAdsAttributed && (
-        <div className="small dim mb12">
-          <span className="badge violet">Shop ads</span>{' '}
-          Shopify does not report a per-order ad cost - see Shop Campaigns for the actual spend, or type this
-          order's share into <strong>Manual cost</strong> below.
+      <div className="small dim mb12">
+        {data.isShopAdsAttributed && (
+          <div className="mb4">
+            <span className="badge violet">Shop ads</span>{' '}
+            {data.shopAdsSource === 'ledger'
+              ? "confirmed by Shopify's own referral-fee ledger line"
+              : data.shopAdsSource === 'override' ? 'marked by hand' : 'guessed from tags/sales channel'}
+            {data.costBreakdown?.adSpend && (
+              <> — {fmtMoney(data.costBreakdown.adSpend.value, data.costBreakdown.adSpend.currency)}
+                {data.costBreakdown.adSpend.source === 'estimate' ? ' (flat estimate, order > $50)' : ' (real ledger amount)'}</>
+            )}
+          </div>
+        )}
+        <div className="flex wrap">
+          <span>Shop ads for this order:</span>
+          <button className={`btn sm ${data.shopAdsOverride == null ? 'primary' : ''}`} onClick={() => setShopAds(null)}>Auto</button>
+          <button className={`btn sm ${data.shopAdsOverride === true ? 'primary' : ''}`} onClick={() => setShopAds(true)}>On</button>
+          <button className={`btn sm ${data.shopAdsOverride === false ? 'primary' : ''}`} onClick={() => setShopAds(false)}>Off</button>
         </div>
-      )}
+      </div>
 
       {data.feeSource && (
         <div className="small dim mb8">
@@ -852,8 +867,11 @@ function ShopifyFinancePanel({ data, manualCost, setManualCost, manualCostNote, 
             <thead><tr><th>Type</th><th className="num">Amount</th><th className="num">Fee</th><th className="num">Net</th></tr></thead>
             <tbody>
               {data.ledgerLines.map((l) => (
-                <tr key={l.txnId}>
-                  <td className="small">{l.label}</td>
+                <tr key={l.txnId} className={l.category !== 'settlement' ? 'dim' : undefined}>
+                  <td className="small" title={l.category === 'marketing' ? 'Shop Campaigns activity - counted as ad spend below, not payment fees'
+                    : l.category === 'other' ? 'Account-level activity referencing this order - not counted in net or ad spend above' : undefined}>
+                    {l.label}{l.category !== 'settlement' && <span className="small dim"> ({l.category})</span>}
+                  </td>
                   <td className="num">{fmtMoney(l.amount, l.currency)}</td>
                   <td className="num">{l.fee ? fmtMoney(l.fee, l.currency) : <span className="muted">—</span>}</td>
                   <td className="num">{fmtMoney(l.net, l.currency)}</td>
@@ -950,6 +968,12 @@ function ShopifyFinancePanel({ data, manualCost, setManualCost, manualCostNote, 
                 <dd>{fmtMoney(data.costBreakdown.supply.value, data.costBreakdown.supply.currency)}</dd>
               </>
             )}
+            {data.costBreakdown.adSpend && (
+              <>
+                <dt>− Shop ads{data.costBreakdown.adSpend.source === 'estimate' ? ' (est.)' : ''}</dt>
+                <dd>{fmtMoney(data.costBreakdown.adSpend.value, data.costBreakdown.adSpend.currency)}</dd>
+              </>
+            )}
             {data.manualCost && (
               <>
                 <dt>− Manual</dt>
@@ -1027,6 +1051,15 @@ function OrderDetail({ orderId, onClose, onChanged }) {
     } catch (err) { showError(err); }
   };
 
+  /** Force this order's Shop-ads attribution on/off, or back to automatic (override: null). */
+  const setShopAds = async (override) => {
+    try {
+      await api.post(`${orderPath}/shop-ads`, { override });
+      toast({ kind: 'ok', title: override === null ? 'Back to automatic' : override ? 'Marked as Shop ads' : 'Shop ads canceled for this order' });
+      reload(); onChanged();
+    } catch (err) { showError(err); }
+  };
+
   /** Local only - see the list's Cancel button for why this never calls Shopify's real cancel API. */
   const cancelOrder = async () => {
     if (!confirm(`Cancel order ${data.name} (${data.customerName || 'no name'})?\n\n`
@@ -1061,6 +1094,7 @@ function OrderDetail({ orderId, onClose, onChanged }) {
           <ShopifyFinancePanel
             data={data} manualCost={manualCost} setManualCost={setManualCost}
             manualCostNote={manualCostNote} setManualCostNote={setManualCostNote} saveManualCost={saveManualCost}
+            setShopAds={setShopAds}
             onSaved={() => { reload(); onChanged(); }}
           />
           <div>

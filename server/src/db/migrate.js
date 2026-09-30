@@ -264,6 +264,11 @@ export function migrateSchema(db) {
   // its shipping cost - Shopify's own equivalent of Etsy's tracking.supply_cost.
   addColumn(db, 'shopify_fulfillments', 'supply_cost', 'REAL');
   addColumn(db, 'shopify_fulfillments', 'supply_cost_currency', 'TEXT');
+
+  // Force this order's "Shop ads" attribution on or off by hand - NULL means
+  // "decide automatically" (tags/source + the real referral-fee ledger line,
+  // see services/shopify.js's looksLikeShopAds()/financialsFor()).
+  addColumn(db, 'shopify_fulfillments', 'shop_ads_override', 'INTEGER');
 }
 
 /** Runs AFTER schema.sql, once etsy_accounts is guaranteed to exist. */
