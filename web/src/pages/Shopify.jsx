@@ -996,10 +996,18 @@ function OrderDetail({ orderId, onClose, onChanged }) {
   const toast = useToast();
   const showError = useErrorToast();
   const { data, loading, reload } = useAsync(() => (orderId ? api.get(`/shopify/orders/${encodeURIComponent(orderId)}`) : null), [orderId], { immediate: !!orderId });
+  const { data: carrierDefaults } = useAsync(() => api.get('/tracking/carriers').catch(() => null), []);
   const [tracking, setTracking] = useState('');
   const [company, setCompany] = useState('');
-  const [notify, setNotify] = useState(false);
+  const [companyTouched, setCompanyTouched] = useState(false);
+  const [notify, setNotify] = useState(true);
   const [busy, setBusy] = useState(false);
+
+  // Same shop-wide default carrier the Etsy tracking form uses (orders.default_carrier,
+  // "Yunexpress" out of the box) - never overwrites a carrier typed by hand.
+  React.useEffect(() => {
+    if (carrierDefaults && !companyTouched) setCompany(carrierDefaults.defaultCarrier || '');
+  }, [carrierDefaults]); // eslint-disable-line react-hooks/exhaustive-deps
   const [supplierRef, setSupplierRef] = useState('');
   const [supplyTrack, setSupplyTrack] = useState('');
   const [notes, setNotes] = useState('');
@@ -1193,7 +1201,8 @@ function OrderDetail({ orderId, onClose, onChanged }) {
           ) : (
             <div className="flex mb16" style={{ flexWrap: 'wrap' }}>
               <input className="input sm" placeholder="Tracking number" value={tracking} onChange={(e) => setTracking(e.target.value)} />
-              <input className="input sm" placeholder="Carrier (optional)" value={company} onChange={(e) => setCompany(e.target.value)} />
+              <input className="input sm" placeholder="Carrier (optional)" value={company}
+                onChange={(e) => { setCompany(e.target.value); setCompanyTouched(true); }} />
               <Checkbox checked={notify} onChange={setNotify} label="Notify customer" />
               <button className="btn sm primary" disabled={busy || !tracking.trim()} onClick={fulfill}>{busy ? <Spinner /> : 'Fulfill on Shopify'}</button>
             </div>
@@ -1214,10 +1223,18 @@ function OrderDetail({ orderId, onClose, onChanged }) {
 function QuickFulfillForm({ orderId, onDone }) {
   const toast = useToast();
   const showError = useErrorToast();
+  const { data: carrierDefaults } = useAsync(() => api.get('/tracking/carriers').catch(() => null), []);
   const [tracking, setTracking] = useState('');
   const [company, setCompany] = useState('');
-  const [notify, setNotify] = useState(false);
+  const [companyTouched, setCompanyTouched] = useState(false);
+  const [notify, setNotify] = useState(true);
   const [busy, setBusy] = useState(false);
+
+  // Same shop-wide default carrier the Etsy tracking form uses (orders.default_carrier,
+  // "Yunexpress" out of the box) - never overwrites a carrier typed by hand.
+  React.useEffect(() => {
+    if (carrierDefaults && !companyTouched) setCompany(carrierDefaults.defaultCarrier || '');
+  }, [carrierDefaults]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fulfill = async () => {
     setBusy(true);
@@ -1232,7 +1249,8 @@ function QuickFulfillForm({ orderId, onDone }) {
   return (
     <div className="flex mb8" style={{ flexWrap: 'wrap' }}>
       <input className="input sm" placeholder="Tracking number" autoFocus value={tracking} onChange={(e) => setTracking(e.target.value)} />
-      <input className="input sm" placeholder="Carrier (optional)" value={company} onChange={(e) => setCompany(e.target.value)} />
+      <input className="input sm" placeholder="Carrier (optional)" value={company}
+        onChange={(e) => { setCompany(e.target.value); setCompanyTouched(true); }} />
       <Checkbox checked={notify} onChange={setNotify} label="Notify customer" />
       <button className="btn sm primary" disabled={busy || !tracking.trim()} onClick={fulfill}>{busy ? <Spinner /> : 'Fulfill on Shopify'}</button>
     </div>

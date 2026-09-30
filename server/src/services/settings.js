@@ -139,7 +139,10 @@ export const SETTING_DEFS = {
   'pricing.discount_percent': { env: String(config.pricing.discountPercent), def: '30', label: 'Discount percentage' },
   'orders.ship_days_min':  { env: '', def: '2', label: 'Expected dispatch: minimum business days' },
   'orders.ship_days_max':  { env: '', def: '5', label: 'Expected dispatch: maximum business days' },
-  'orders.default_carrier':   { env: '', def: 'Yunexpress', label: 'Default carrier when adding tracking' },
+  // Shopify only auto-builds a tracking URL and updates shipment_status for a
+  // carrier name it recognises, and capitalization matters there - "YunExpress"
+  // exactly, not "Yunexpress". Etsy's own carrier field is free text either way.
+  'orders.default_carrier':   { env: '', def: 'YunExpress', label: 'Default carrier when adding tracking' },
   'orders.notify_buyer':      { env: '', def: 'true', label: 'Email the buyer when tracking is added' },
   'orders.default_note':      { env: '', def:
     'Great news! Your order has been shipped and is on its way to you. \u{1F69A}✨\n\n'

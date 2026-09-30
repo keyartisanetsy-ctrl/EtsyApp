@@ -353,6 +353,16 @@ export function migrateData(db) {
     const bumped = db.prepare(`UPDATE shopify_accounts SET api_version = '2025-10' WHERE api_version < '2025-10'`).run();
     if (bumped.changes) log.info(`bumped ${bumped.changes} Shopify store(s) to API version 2025-10 (needed for ShopifyQL)`);
   }
+
+  // Shopify only recognises "YunExpress" (exact capitalization) as a known
+  // carrier - a saved default of the app's old "Yunexpress" default would
+  // silently never get an auto-built tracking URL or carrier-integrated
+  // status update on Shopify orders. Only touches a value that still exactly
+  // matches that old default, never one someone has since typed in by hand.
+  if (hasTable(db, 'settings')) {
+    const fixed = db.prepare(`UPDATE settings SET value = 'YunExpress' WHERE key = 'orders.default_carrier' AND value = 'Yunexpress'`).run();
+    if (fixed.changes) log.info(`corrected orders.default_carrier to Shopify's exact spelling "YunExpress"`);
+  }
 }
 
 /** Convenience for callers that do not need the two phases separately. */
