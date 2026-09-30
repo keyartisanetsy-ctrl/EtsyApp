@@ -476,8 +476,16 @@ export function getOrder(orderId) {
     feeAmount: t.fee_amount, feeCurrency: t.fee_currency,
     // Etsy's ledger equivalent shows each fee named and rated ("6.5% of
     // item total"); Shopify's TransactionFee carries the same shape -
-    // type/rate/rateName/flatFeeName - kept verbatim rather than re-labelled.
-    fees: parse(t.fees_raw, []),
+    // type/rate/rateName/flatFeeName, plus taxAmount for the VAT/GST Shopify
+    // charges on its own fee where that applies (a Shopify Payments merchant
+    // outside a VAT country never has one) - flattened here so the frontend
+    // does not have to unpack GraphQL's nested amount/taxAmount objects.
+    fees: parse(t.fees_raw, []).map((f) => ({
+      type: f.type, flatFeeName: f.flatFeeName, rateName: f.rateName, rate: f.rate,
+      amount: f.amount?.amount != null ? Number(f.amount.amount) : null,
+      currency: f.amount?.currencyCode ?? null,
+      taxAmount: f.taxAmount?.amount != null ? Number(f.taxAmount.amount) : null,
+    })),
   }));
 
   const costs = loadOrderCosts(db, [orderId]).get(orderId);

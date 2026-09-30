@@ -9,7 +9,7 @@ import { readSetting } from './services/settings.js';
 import { getStoredToken, refreshAllAccounts, listAccounts, withShop } from './etsy/client.js';
 import { listShopifyAccounts, withShopifyShop } from './shopify/client.js';
 import { syncTracking, refreshStaleFlags } from './services/tracking/index.js';
-import { syncReceipts, syncAll } from './services/sync.js';
+import { syncReceipts, syncAll, syncLedgerEntries } from './services/sync.js';
 import { syncProducts as syncShopifyProducts, syncOrders as syncShopifyOrders } from './services/shopify.js';
 import { ensureRates } from './services/fx.js';
 import { scanInbox } from './services/productstudio.js';
@@ -92,6 +92,16 @@ export function startScheduler() {
     forEachConnectedShop('full sync', () => syncAll({}));
   }, fullSyncHours * 60 * 60_000).unref());
 
+  // Etsy's own ledger: real per-order net and shop-level items (Etsy Ads,
+  // listing fees). Used to be a manual "Sync ledger" button only; runs on its
+  // own now, the same way order sync already did, so the numbers on the
+  // Orders page are never more than this many minutes behind Etsy's own.
+  const ledgerSyncMinutes = Math.max(10, Number(readSetting('etsy.ledger_sync_minutes')) || 30);
+  setTimeout(() => forEachConnectedShop('ledger sync', () => syncLedgerEntries({})), 30_000).unref();
+  timers.push(setInterval(() => {
+    forEachConnectedShop('ledger sync', () => syncLedgerEntries({}));
+  }, ledgerSyncMinutes * 60_000).unref());
+
   // Shopify's own version of the two jobs above, for every connected store -
   // Shopify sync had no schedule at all before this, so every store had to be
   // synced by hand.
@@ -173,7 +183,7 @@ export function startScheduler() {
   }
 
   log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every ${orderSyncMinutes}m, `
-    + `full sync every ${fullSyncHours}h, Shopify orders every ${shopifyOrderSyncMinutes}m, `
+    + `ledger every ${ledgerSyncMinutes}m, full sync every ${fullSyncHours}h, Shopify orders every ${shopifyOrderSyncMinutes}m, `
     + `Shopify full sync every ${shopifyFullSyncHours}h, drop folder every 20s)`);
 }
 

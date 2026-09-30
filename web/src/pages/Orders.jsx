@@ -216,8 +216,8 @@ export default function Orders() {
           <button className="btn sm" onClick={exportXlsx}>⤓ Excel</button>
           <button className="btn sm" onClick={syncOrders}>↻ Sync</button>
           <button className="btn sm" onClick={syncLedger} disabled={syncingLedger}
-            title="Pull Etsy's own ledger: the real per-order net, Etsy Ads bills and listing fees">
-            {syncingLedger ? <Spinner /> : '🧾'} Sync ledger
+            title="Pull Etsy's own ledger right now instead of waiting for the next automatic sync: the real per-order net, Etsy Ads bills and listing fees">
+            {syncingLedger ? <Spinner /> : '🧾'} Sync ledger now
           </button>
           <FeesAndAdsPanel />
           <button className="btn sm" onClick={() => setTemplatesOpen(true)}>✉ Message templates</button>
@@ -754,6 +754,33 @@ function AddressCheck({ receiptId, onChanged }) {
   );
 }
 
+/**
+ * Ledger lines in display order: each top-level line immediately followed by
+ * any line whose parentEntryId points back to it (a VAT-on-fee entry nested
+ * under the fee it taxed), so a shop Etsy charges VAT on reads as fee-then-VAT
+ * instead of two unrelated-looking rows. A shop with no VAT lines at all just
+ * never gets a nested row - nothing else about the table changes.
+ */
+function orderLedgerRows(lines) {
+  const byParent = new Map();
+  for (const l of lines) {
+    const key = l.parentEntryId ?? null;
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(l);
+  }
+  const out = [];
+  const visit = (parentId, depth) => {
+    for (const l of byParent.get(parentId) ?? []) {
+      out.push({ ...l, depth });
+      visit(l.entryId, depth + 1);
+    }
+  };
+  visit(null, 0);
+  const seen = new Set(out.map((l) => l.entryId));
+  for (const l of lines) if (!seen.has(l.entryId)) out.push({ ...l, depth: 0 });
+  return out;
+}
+
 function OrderDetail({ id, onClose, onChanged }) {
   const [tab, setTab] = useState('summary');
   const { data: order, loading, reload } = useAsync(() => (id ? api.get(`/orders/${id}`) : null), [id], { immediate: !!id });
@@ -903,9 +930,15 @@ function OrderDetail({ id, onClose, onChanged }) {
                   <table className="data mb8">
                     <thead><tr><th>Etsy's label</th><th className="num">Amount</th></tr></thead>
                     <tbody>
-                      {order.ledgerLines.map((l) => (
+                      {orderLedgerRows(order.ledgerLines).map((l) => (
                         <tr key={l.entryId}>
-                          <td>{l.ledgerType || l.description}</td>
+                          <td style={l.depth ? { paddingLeft: 16 + l.depth * 16 } : undefined}>
+                            {l.depth > 0 && <span className="dim">↳ </span>}
+                            {l.label}
+                            {l.referenceId && String(l.referenceId) !== String(order.receiptId) && (
+                              <span className="small dim"> · {l.referenceType || 'ref'} {l.referenceId}</span>
+                            )}
+                          </td>
                           <td className="num" style={{ color: l.amount < 0 ? 'var(--warn, #e0a33e)' : undefined }}>
                             {fmtMoney(l.amount, order.ledgerNet?.currency)}
                           </td>

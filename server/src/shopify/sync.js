@@ -123,6 +123,7 @@ query Orders($cursor: String) {
         fees {
           type flatFeeName rateName rate
           amount { amount currencyCode }
+          taxAmount { amount currencyCode }
         }
       }
       lineItems(first: 100) {
@@ -219,8 +220,12 @@ export async function syncOrders({ pages = 5 } = {}) {
       for (const t of o.transactions ?? []) {
         // `fees` is only ever populated for Shopify Payments transactions -
         // any other gateway (PayPal, manual, etc.) reports no fee at all,
-        // which is the honest answer rather than a guessed one.
-        const feeTotal = (t.fees ?? []).reduce((sum, f) => sum + (num(f.amount?.amount) ?? 0), 0);
+        // which is the honest answer rather than a guessed one. taxAmount is
+        // VAT/GST Shopify charges on its own fee, on stores where that
+        // applies - part of what actually comes off the payout, same as
+        // Etsy's "VAT on seller services" ledger line.
+        const feeTotal = (t.fees ?? []).reduce((sum, f) =>
+          sum + (num(f.amount?.amount) ?? 0) + (num(f.taxAmount?.amount) ?? 0), 0);
         insertTxn.run({
           id: t.id, orderId: o.id, kind: t.kind ?? null, status: t.status ?? null,
           amount: num(t.amountSet?.shopMoney?.amount), currency: t.amountSet?.shopMoney?.currencyCode ?? null,

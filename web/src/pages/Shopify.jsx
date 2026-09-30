@@ -974,13 +974,29 @@ function OrderDetail({ orderId, onClose, onChanged }) {
               <thead><tr><th>Kind</th><th>Status</th><th className="num">Amount</th><th className="num">Fee</th><th className="num">Net</th></tr></thead>
               <tbody>
                 {data.transactions.map((t) => (
-                  <tr key={t.transactionId}>
-                    <td className="small">{t.kind}</td>
-                    <td><span className={`badge ${t.status === 'SUCCESS' ? 'green' : 'muted'}`}>{t.status}</span></td>
-                    <td className="num">{fmtMoney(t.amount, t.currency)}</td>
-                    <td className="num">{t.feeAmount != null ? fmtMoney(t.feeAmount, t.feeCurrency) : <span className="muted">—</span>}</td>
-                    <td className="num">{fmtMoney((t.amount ?? 0) - (t.feeAmount ?? 0), t.currency)}</td>
-                  </tr>
+                  <React.Fragment key={t.transactionId}>
+                    <tr>
+                      <td className="small">{t.kind}</td>
+                      <td><span className={`badge ${t.status === 'SUCCESS' ? 'green' : 'muted'}`}>{t.status}</span></td>
+                      <td className="num">{fmtMoney(t.amount, t.currency)}</td>
+                      <td className="num">{t.feeAmount != null ? fmtMoney(t.feeAmount, t.feeCurrency) : <span className="muted">—</span>}</td>
+                      <td className="num">{fmtMoney((t.amount ?? 0) - (t.feeAmount ?? 0), t.currency)}</td>
+                    </tr>
+                    {t.fees?.length > 0 && (
+                      <tr>
+                        <td colSpan={5} className="small dim" style={{ paddingTop: 0 }}>
+                          {t.fees.map((f, i) => (
+                            <div key={i}>
+                              ↳ {f.flatFeeName || f.rateName || f.type || 'Fee'}
+                              {f.rate != null && ` (${Math.round(f.rate * 10000) / 100}%)`}
+                              : −{fmtMoney(f.amount, f.currency)}
+                              {f.taxAmount != null && <> + VAT −{fmtMoney(f.taxAmount, f.currency)}</>}
+                            </div>
+                          ))}
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
                 ))}
               </tbody>
             </table>

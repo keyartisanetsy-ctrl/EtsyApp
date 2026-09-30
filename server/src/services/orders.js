@@ -571,7 +571,7 @@ export function ledgerForReceipt(receiptId) {
   const refs = [String(receiptId), ...txnIds];
   const holes = refs.map(() => '?').join(',');
   const rows = db.prepare(`
-    SELECT entry_id, amount, currency, description, ledger_type, reference_type, reference_id, create_date
+    SELECT entry_id, amount, currency, description, ledger_type, reference_type, reference_id, parent_entry_id, create_date
     FROM etsy_ledger_entries WHERE shop_id IS ? AND reference_id IN (${holes})
     ORDER BY create_date, entry_id`).all(shopId, ...refs);
   if (!rows.length) return null;
@@ -589,9 +589,32 @@ export function ledgerForReceipt(receiptId) {
       currency: r.currency,
       description: r.description,
       ledgerType: r.ledger_type,
+      // A readable version of Etsy's own type string ("vat_seller_services" ->
+      // "VAT seller services"), never a re-guessed meaning - just formatting.
+      label: prettyLedgerLabel(r.ledger_type, r.description),
+      referenceType: r.reference_type,
+      referenceId: r.reference_id,
+      // Links e.g. a VAT-on-fee line back to the fee it taxed, so the
+      // detail view can nest it under that line instead of listing it flat -
+      // present only on shops Etsy actually charges VAT on.
+      parentEntryId: r.parent_entry_id,
       createdTs: r.create_date,
     })),
   };
+}
+
+/**
+ * Etsy's own ledger_type/description strings formatted for reading
+ * ("vat_seller_services" -> "VAT seller services", "transaction_fee" ->
+ * "Transaction fee") - a plain format pass, never a re-guessed label, so a
+ * type this hasn't seen before still reads as words instead of raw snake_case.
+ */
+function prettyLedgerLabel(ledgerType, description) {
+  const raw = (ledgerType || description || '').trim();
+  if (!raw) return 'Other';
+  const words = raw.replace(/[_-]+/g, ' ').trim().split(/\s+/);
+  const pretty = words.map((w, i) => (i === 0 ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : w.toLowerCase())).join(' ');
+  return pretty.replace(/\bvat\b/i, 'VAT');
 }
 
 /** Same thing, batched for the list - one query instead of one per row. */
