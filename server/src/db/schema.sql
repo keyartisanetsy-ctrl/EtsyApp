@@ -953,6 +953,37 @@ CREATE TABLE IF NOT EXISTS shopify_order_transactions (
 );
 CREATE INDEX IF NOT EXISTS idx_shopify_txn_order ON shopify_order_transactions(order_id);
 
+-- Shopify Payments' own balance ledger (shopifyPaymentsAccount.balanceTransactions)
+-- - the exact rows behind Settings > Payments > Payouts > Transactions in the
+-- real Shopify admin. This is ground truth: the actual fee/net Shopify
+-- charged, whatever the real card-brand rate or currency-conversion cut
+-- turned out to be, rather than a rate-card estimate recomputed from
+-- shopify_order_transactions.fees_raw. A Shop Cash credit and its matching
+-- card charge are two separate rows here for the same order, exactly as
+-- Shopify's own Payouts page lists them - summing every row for one order_id
+-- reproduces that page's numbers for it.
+CREATE TABLE IF NOT EXISTS shopify_balance_transactions (
+  txn_id             TEXT PRIMARY KEY,  -- gid://shopify/ShopifyPaymentsBalanceTransaction/123
+  shop_id            INTEGER,           -- shopify_accounts.id
+  order_id           TEXT,              -- gid://shopify/Order/123 (associatedOrder.id) - null for payouts/transfers
+  order_transaction_id TEXT,            -- gid://shopify/OrderTransaction/<sourceOrderTransactionId>, when known
+  type               TEXT,              -- CHARGE | REFUND | SHOP_CASH_CREDIT | ADJUSTMENT | TRANSFER | ...
+  source_type        TEXT,
+  amount             REAL,
+  fee                REAL,
+  net                REAL,
+  currency           TEXT,
+  is_test            INTEGER NOT NULL DEFAULT 0,
+  payout_id          TEXT,
+  payout_status      TEXT,
+  transaction_date   TEXT,
+  raw                TEXT,
+  synced_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_shopify_bal_txn_order ON shopify_balance_transactions(order_id);
+CREATE INDEX IF NOT EXISTS idx_shopify_bal_txn_shop ON shopify_balance_transactions(shop_id);
+CREATE INDEX IF NOT EXISTS idx_shopify_bal_txn_date ON shopify_balance_transactions(transaction_date);
+
 -- What you paid to ship a Shopify order, and the tracking you added. Kept
 -- separate from Etsy's `tracking` table (shaped around polling YunTrack)
 -- since pushing a Shopify fulfillment is a one-way "tell Shopify" action.

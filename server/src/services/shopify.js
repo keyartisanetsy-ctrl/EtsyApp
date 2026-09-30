@@ -5,14 +5,14 @@
  */
 import { getDb, json, parse, audit } from '../db/index.js';
 import { gql, checkUserErrors } from '../shopify/client.js';
-import { syncProducts, syncOrders } from '../shopify/sync.js';
+import { syncProducts, syncOrders, syncBalanceTransactions } from '../shopify/sync.js';
 import { requireShopifyShopId } from '../shopify/shop.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 import { convert } from './fx.js';
 
 const log = createLogger('shopify-svc');
-export { syncProducts, syncOrders };
+export { syncProducts, syncOrders, syncBalanceTransactions };
 const round2 = (n) => (n === null || n === undefined ? null : Math.round((n + Number.EPSILON) * 100) / 100);
 
 // ------------------------------------------------------------- products
@@ -216,11 +216,12 @@ export function listOrders({ search = '', canceled = null, limit = 100, offset =
   const total = db.prepare(`SELECT COUNT(*) AS c ${base}`).get(...params).c;
   const supplyPreview = loadSupplyPreview(db, shopId, rows.map((r) => r.order_id));
   const txnSummary = loadTransactionSummary(db, rows.map((r) => r.order_id));
+  const ledgerSummary = loadBalanceLedgerSummary(db, rows.map((r) => r.order_id));
   const orderCosts = loadOrderCosts(db, rows.map((r) => r.order_id));
 
   return {
     total, limit, offset,
-    rows: rows.map((r) => shapeOrder(r, supplyPreview.get(r.order_id), txnSummary.get(r.order_id), orderCosts.get(r.order_id))),
+    rows: rows.map((r) => shapeOrder(r, supplyPreview.get(r.order_id), txnSummary.get(r.order_id), orderCosts.get(r.order_id), ledgerSummary.get(r.order_id))),
   };
 }
 
@@ -247,6 +248,72 @@ function loadTransactionSummary(db, orderIds) {
     s.count += 1;
   }
   return map;
+}
+
+/**
+ * Shopify Payments' own balance ledger for these orders - ground truth, the
+ * same numbers Settings > Payments > Payouts > Transactions shows, unlike
+ * loadTransactionSummary() above which only ever recomputes a rate-card
+ * estimate. A Shop Cash credit and its matching card charge are two separate
+ * rows for the same order_id here, exactly as Shopify's own payout ledger
+ * lists them - summing every row per order reproduces that page's numbers.
+ * Empty (order not in the map) until syncBalanceTransactions() has run for
+ * this store, or on a store still missing the read_shopify_payments_accounts
+ * scope - financialsFor() below falls back to the estimate in either case.
+ */
+function loadBalanceLedgerSummary(db, orderIds) {
+  const map = new Map();
+  if (!orderIds.length) return map;
+  const holes = orderIds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT order_id, amount, fee, net, currency
+    FROM shopify_balance_transactions WHERE order_id IN (${holes})`).all(...orderIds);
+  for (const r of rows) {
+    if (!map.has(r.order_id)) map.set(r.order_id, { grossAmount: 0, feeAmount: 0, netAmount: 0, currency: r.currency, count: 0 });
+    const s = map.get(r.order_id);
+    s.grossAmount += r.amount || 0;
+    s.feeAmount += r.fee || 0;
+    s.netAmount += r.net || 0;
+    s.currency = s.currency || r.currency;
+    s.count += 1;
+  }
+  return map;
+}
+
+/** Every real ledger row for one order, for the detail drawer's line-by-line breakdown. */
+function loadBalanceLedgerLines(db, orderId) {
+  return db.prepare(`
+    SELECT txn_id, type, source_type, amount, fee, net, currency, transaction_date, payout_status
+    FROM shopify_balance_transactions WHERE order_id = ? ORDER BY transaction_date, txn_id`).all(orderId)
+    .map((r) => ({
+      txnId: r.txn_id, type: r.type, sourceType: r.source_type,
+      amount: r.amount, fee: r.fee, net: r.net, currency: r.currency,
+      label: prettyBalanceLabel(r.type),
+      transactionDate: r.transaction_date, payoutStatus: r.payout_status,
+    }));
+}
+
+/** "SHOP_CASH_CREDIT" -> "Shop cash credit" - formatting only, never a re-guessed meaning. */
+function prettyBalanceLabel(type) {
+  const raw = (type || '').trim();
+  if (!raw) return 'Other';
+  const words = raw.replace(/_+/g, ' ').trim().split(/\s+/);
+  return words.map((w, i) => (i === 0 ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : w.toLowerCase())).join(' ');
+}
+
+/**
+ * What actually landed for one order: the real balance-ledger total when
+ * syncBalanceTransactions() has found any rows for it (source: 'ledger'),
+ * else the rate-card estimate from shopify_order_transactions.fees
+ * (source: 'estimate') - never both mixed together, so the UI can say
+ * plainly which one it is showing.
+ */
+function financialsFor(txn, ledger) {
+  if (ledger && ledger.count > 0) {
+    return { netAmount: round2(ledger.netAmount), feeAmount: round2(ledger.feeAmount), currency: ledger.currency, hasFees: true, source: 'ledger' };
+  }
+  if (txn) return { netAmount: txn.netAmount, feeAmount: txn.hasFees ? txn.feeAmount : null, currency: txn.currency, hasFees: txn.hasFees, source: 'estimate' };
+  return null;
 }
 
 /**
@@ -295,7 +362,7 @@ function loadOrderCosts(db, orderIds) {
  * transactions net. Null fields (rather than a wrong number) whenever a
  * currency has no FX rate to convert with.
  */
-function orderCostBreakdown(r, txn, costs) {
+function orderCostBreakdown(r, fin, costs) {
   if (!costs) return { shipping: null, supply: null, profit: null };
   const shipping = costs.shipping != null ? convert(costs.shipping, costs.shippingCcy, r.currency, r.created_at_shopify) : null;
   const supply = costs.supply != null ? convert(costs.supply, costs.supplyCcy, r.currency, r.created_at_shopify) : null;
@@ -303,8 +370,8 @@ function orderCostBreakdown(r, txn, costs) {
   const supplyFailed = costs.supply != null && supply == null;
 
   let profit = null;
-  if (txn && !shippingFailed && !supplyFailed) {
-    profit = { value: round2(txn.netAmount - (shipping || 0) - (supply || 0) - (r.manual_cost || 0)), currency: txn.currency };
+  if (fin && !shippingFailed && !supplyFailed) {
+    profit = { value: round2(fin.netAmount - (shipping || 0) - (supply || 0) - (r.manual_cost || 0)), currency: fin.currency };
   }
   return {
     shipping: shipping != null ? { value: round2(shipping), currency: r.currency } : null,
@@ -353,9 +420,10 @@ function looksLikeShopAds(sourceName, attributionSource) {
   return /\bshop[\s_-]*(campaigns?|ads?)\b/i.test(`${sourceName || ''} ${attributionSource || ''}`);
 }
 
-function shapeOrder(r, preview, txn, costs) {
+function shapeOrder(r, preview, txn, costs, ledger) {
   const linkItem = preview?.linkItem ?? preview?.firstItem ?? null;
   const photoItem = preview?.photoItem ?? preview?.firstItem ?? null;
+  const fin = financialsFor(txn, ledger);
   return {
     orderId: r.order_id, name: r.name, email: r.email, phone: r.phone,
     financialStatus: r.financial_status, fulfillmentStatus: r.fulfillment_status, currency: r.currency,
@@ -382,12 +450,18 @@ function shapeOrder(r, preview, txn, costs) {
         ? { value: Math.max(0, (r.total_amount ?? 0) - r.refunded_amount), currency: r.currency }
         : { value: r.total_amount, currency: r.currency },
     notes: r.notes || '',
-    // What Shopify's own transactions say actually landed, after whatever
-    // Shopify Payments fee it reported - null until orders have been synced
-    // since transactions were added, or on a non-Shopify-Payments gateway
-    // that reports no fee at all.
-    realNet: txn ? { value: txn.netAmount, currency: txn.currency } : null,
-    paymentFees: txn?.hasFees ? { value: txn.feeAmount, currency: txn.currency } : null,
+    // What actually landed on this order: Shopify Payments' own balance
+    // ledger when syncBalanceTransactions() has found rows for it (the exact
+    // numbers Payouts > Transactions shows - source 'ledger'), else a
+    // rate-card estimate recomputed from the transaction's fees (source
+    // 'estimate') - null only when this order has no Shopify Payments data
+    // at all (a non-Shopify-Payments gateway, or nothing synced yet).
+    realNet: fin ? { value: fin.netAmount, currency: fin.currency } : null,
+    paymentFees: fin?.hasFees ? { value: fin.feeAmount, currency: fin.currency } : null,
+    // 'ledger' = Shopify's own real per-charge fee (varies by card brand and
+    // currency conversion); 'estimate' = this app's rate-card recomputation,
+    // shown only until the real ledger has synced for this order.
+    feeSource: fin?.source ?? null,
     // See looksLikeShopAds() - attribution only, never an exact ad cost.
     isShopAdsAttributed: looksLikeShopAds(r.source_name, r.attribution_source),
     // The hand-typed cost field this flag exists for: what you actually spent
@@ -397,14 +471,14 @@ function shapeOrder(r, preview, txn, costs) {
     manualCost: r.manual_cost != null
       ? { value: r.manual_cost, currency: r.currency, note: r.manual_cost_note || '' }
       : null,
-    netAfterManualCost: (txn && r.manual_cost != null)
-      ? { value: txn.netAmount - r.manual_cost, currency: txn.currency }
+    netAfterManualCost: (fin && r.manual_cost != null)
+      ? { value: fin.netAmount - r.manual_cost, currency: fin.currency }
       : null,
     // The full picture: what shipping and the goods themselves actually cost
     // (real figures typed in below when there are any, else a clearly-flagged
     // per-variant estimate from Shopify's own inventory cost), and what is
     // left of the transactions net once those and the manual cost above come off.
-    costBreakdown: orderCostBreakdown(r, txn, costs),
+    costBreakdown: orderCostBreakdown(r, fin, costs),
     itemCount: r.item_count, trackingNumber: r.tracking_number || null, trackingCompany: r.tracking_company || null,
     shippingCost: r.shipping_cost ?? null, shippingCostCurrency: r.shipping_cost_currency ?? null,
     supplyCost: r.supply_cost ?? null, supplyCostCurrency: r.supply_cost_currency ?? null,
@@ -489,7 +563,18 @@ export function getOrder(orderId) {
   }));
 
   const costs = loadOrderCosts(db, [orderId]).get(orderId);
-  return { ...shapeOrder(o, null, txnSummary, costs), trackingUrl: o.tracking_url || null, items, transactions };
+  const ledgerSummary = loadBalanceLedgerSummary(db, [orderId]).get(orderId);
+  const ledgerLines = loadBalanceLedgerLines(db, orderId);
+  return {
+    ...shapeOrder(o, null, txnSummary, costs, ledgerSummary),
+    trackingUrl: o.tracking_url || null, items, transactions,
+    // The real Shopify Payments ledger for this order - empty until
+    // syncBalanceTransactions() has run for this store (or on a store still
+    // missing the read_shopify_payments_accounts scope), in which case
+    // `feeSource` above reads 'estimate' and `transactions[].fees` is what is
+    // shown instead.
+    ledgerLines,
+  };
 }
 
 /** What this parcel cost to send, typed in next to the tracking number - mirrors tracking.setShippingCost. */

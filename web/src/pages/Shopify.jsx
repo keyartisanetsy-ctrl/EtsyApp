@@ -379,6 +379,7 @@ function OrdersPanel() {
   const showError = useErrorToast();
   const [search, setSearch] = useState('');
   const [syncing, setSyncing] = useState(false);
+  const [syncingLedger, setSyncingLedger] = useState(false);
   const [detail, setDetail] = useState(null);
   const [quickTrackId, setQuickTrackId] = useState(null);
   const [selected, setSelected] = useState(new Set());
@@ -392,6 +393,25 @@ function OrdersPanel() {
     setSyncing(true);
     try { const r = await api.post('/shopify/sync/orders', {}); toast({ kind: 'ok', title: `Synced ${r.orders} order(s)` }); reload(); }
     catch (err) { showError(err, 'Sync failed'); } finally { setSyncing(false); }
+  };
+
+  /**
+   * Shopify Payments' own balance ledger - the real per-order fee/net (Payouts
+   * > Transactions), not the rate-card estimate. `hasAccount: false` in the
+   * response means the store's token has no read_shopify_payments_accounts
+   * scope yet - reconnect the store (Settings > Shopify) to grant it.
+   */
+  const syncLedger = async () => {
+    setSyncingLedger(true);
+    try {
+      const r = await api.post('/shopify/sync/balance-transactions', {});
+      if (!r.hasAccount) {
+        toast({ kind: 'info', title: 'No Shopify Payments ledger access', body: 'Reconnect this store (Settings > Shopify) to grant read_shopify_payments_accounts, then try again.', duration: 12000 });
+      } else {
+        toast({ kind: 'ok', title: `Synced ${r.transactions} real fee/net entr${r.transactions === 1 ? 'y' : 'ies'}` });
+      }
+      reload();
+    } catch (err) { showError(err, 'Balance-ledger sync failed'); } finally { setSyncingLedger(false); }
   };
 
   /**
@@ -433,6 +453,10 @@ function OrdersPanel() {
           <button className="btn sm primary" onClick={() => setSendingToAirtable([...selected])}>⇉ Send {selected.size} to Airtable</button>
         )}
         <ShopCampaignsPanel />
+        <button className="btn sm" disabled={syncingLedger} onClick={syncLedger}
+          title="Pull Shopify Payments' own balance ledger - the real per-order fee/net, matching Payouts > Transactions">
+          {syncingLedger ? <Spinner /> : '↻ Sync real fees'}
+        </button>
         <button className="btn sm" disabled={syncing} onClick={sync}>{syncing ? <Spinner /> : '↻ Sync from Shopify'}</button>
       </div>
 
@@ -498,8 +522,10 @@ function OrdersPanel() {
                         </div>
                       )}
                       {o.realNet && (
-                        <div className="small dim" title={o.paymentFees ? `−${fmtMoney(o.paymentFees.value, o.paymentFees.currency)} Shopify Payments fee` : 'No processing fee reported (not a Shopify Payments charge)'}>
-                          net: {fmtMoney(o.realNet.value, o.realNet.currency)}
+                        <div className="small dim"
+                          title={(o.paymentFees ? `−${fmtMoney(o.paymentFees.value, o.paymentFees.currency)} Shopify Payments fee` : 'No processing fee reported (not a Shopify Payments charge)')
+                            + (o.feeSource === 'estimate' ? ' (rate-card estimate - press "Sync real fees" for the actual number)' : o.feeSource === 'ledger' ? ' (Shopify Payments\' own ledger)' : '')}>
+                          net: {fmtMoney(o.realNet.value, o.realNet.currency)}{o.feeSource === 'estimate' && <sup>~</sup>}
                         </div>
                       )}
                       {o.manualCost && (
@@ -811,7 +837,36 @@ function ShopifyFinancePanel({ data, manualCost, setManualCost, manualCostNote, 
         </div>
       )}
 
-      <div className="section-title">Transactions (Shopify's own numbers)</div>
+      {data.feeSource && (
+        <div className="small dim mb8">
+          {data.feeSource === 'ledger'
+            ? "Net below is Shopify Payments' own ledger total (Payouts > Transactions) - the actual fee it charged, not an estimate."
+            : 'Net below is a rate-card estimate - press "Sync real fees" (Orders toolbar) to pull the real numbers from Shopify Payments.'}
+        </div>
+      )}
+
+      {data.ledgerLines?.length > 0 && (
+        <>
+          <div className="section-title">Real ledger (Shopify Payments)</div>
+          <table className="data mb12">
+            <thead><tr><th>Type</th><th className="num">Amount</th><th className="num">Fee</th><th className="num">Net</th></tr></thead>
+            <tbody>
+              {data.ledgerLines.map((l) => (
+                <tr key={l.txnId}>
+                  <td className="small">{l.label}</td>
+                  <td className="num">{fmtMoney(l.amount, l.currency)}</td>
+                  <td className="num">{l.fee ? fmtMoney(l.fee, l.currency) : <span className="muted">—</span>}</td>
+                  <td className="num">{fmtMoney(l.net, l.currency)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      <div className="section-title">
+        Transaction detail {data.ledgerLines?.length > 0 ? '(rate-card breakdown, for reference)' : "(Shopify's own numbers)"}
+      </div>
       {data.transactions?.length > 0 ? (
         <table className="data mb8">
           <thead><tr><th>Kind</th><th>Status</th><th className="num">Amount</th><th className="num">Fee</th><th className="num">Net</th></tr></thead>

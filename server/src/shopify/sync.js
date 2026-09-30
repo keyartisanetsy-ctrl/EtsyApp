@@ -125,6 +125,7 @@ query Orders($cursor: String) {
           amount { amount currencyCode }
           taxAmount { amount currencyCode }
         }
+        currencyExchangeAdjustment { adjustment { amount currencyCode } }
       }
       lineItems(first: 100) {
         nodes {
@@ -223,15 +224,26 @@ export async function syncOrders({ pages = 5 } = {}) {
         // which is the honest answer rather than a guessed one. taxAmount is
         // VAT/GST Shopify charges on its own fee, on stores where that
         // applies - part of what actually comes off the payout, same as
-        // Etsy's "VAT on seller services" ledger line.
-        const feeTotal = (t.fees ?? []).reduce((sum, f) =>
+        // Etsy's "VAT on seller services" ledger line. currencyExchangeAdjustment
+        // is Shopify's separate cut for converting a foreign-currency charge
+        // into the store's payout currency - a real deduction `fees[]` never
+        // includes, and part of why this rate-card total is only ever a
+        // fallback estimate: syncBalanceTransactions() below is the real number.
+        const fxAdj = num(t.currencyExchangeAdjustment?.adjustment?.amount);
+        const fxFee = fxAdj != null ? Math.abs(fxAdj) : 0;
+        const fxCurrency = t.currencyExchangeAdjustment?.adjustment?.currencyCode ?? null;
+        const feesForDisplay = fxFee
+          ? [...(t.fees ?? []), { type: 'Currency conversion fee', flatFeeName: null, rateName: null, rate: null,
+              amount: { amount: fxFee, currencyCode: fxCurrency }, taxAmount: null }]
+          : (t.fees ?? []);
+        const feeTotal = feesForDisplay.reduce((sum, f) =>
           sum + (num(f.amount?.amount) ?? 0) + (num(f.taxAmount?.amount) ?? 0), 0);
         insertTxn.run({
           id: t.id, orderId: o.id, kind: t.kind ?? null, status: t.status ?? null,
           amount: num(t.amountSet?.shopMoney?.amount), currency: t.amountSet?.shopMoney?.currencyCode ?? null,
-          feeAmount: t.fees?.length ? feeTotal : null,
-          feeCurrency: t.fees?.[0]?.amount?.currencyCode ?? null,
-          feesRaw: t.fees?.length ? json(t.fees) : null,
+          feeAmount: feesForDisplay.length ? feeTotal : null,
+          feeCurrency: feesForDisplay[0]?.amount?.currencyCode ?? null,
+          feesRaw: feesForDisplay.length ? json(feesForDisplay) : null,
           createdAt: o.createdAt,
         });
       }
@@ -243,4 +255,97 @@ export async function syncOrders({ pages = 5 } = {}) {
   }
   log.info(`synced ${orders} order(s)`);
   return { orders };
+}
+
+// ----------------------------------------------------- balance transactions
+
+const BALANCE_TRANSACTIONS_QUERY = `
+query BalanceTransactions($cursor: String, $query: String) {
+  shopifyPaymentsAccount {
+    balanceTransactions(first: 50, after: $cursor, query: $query, sortKey: PROCESSED_AT, reverse: true) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id type test sourceId sourceType sourceOrderTransactionId
+        amount { amount currencyCode }
+        fee { amount currencyCode }
+        net { amount currencyCode }
+        transactionDate
+        associatedOrder { id name }
+        associatedPayout { id status }
+      }
+    }
+  }
+}`;
+
+/**
+ * Shopify Payments' own balance ledger - the exact rows behind Settings >
+ * Payments > Payouts > Transactions in the real Shopify admin, and the only
+ * place the *actual* fee Shopify charged on a given charge lives. The rate
+ * card synced onto shopify_order_transactions (syncOrders() above) only ever
+ * describes what a transaction is *supposed* to cost; a Shop Cash credit, a
+ * currency conversion, a dispute, or simply a different card brand than the
+ * rate card assumed all change what really came off the balance, and none of
+ * that is visible anywhere except here.
+ *
+ * `shopifyPaymentsAccount` needs the `read_shopify_payments_accounts` scope
+ * (see shopify/oauth.js) - a store connected before that scope existed reads
+ * back `shopifyPaymentsAccount: null` with an ACCESS_DENIED error gql()
+ * already treats as "field skipped, not a hard failure" (see client.js), so
+ * this quietly does nothing rather than breaking the rest of the sync;
+ * reconnecting that store once picks the scope up.
+ *
+ * No documented cap on the `processed_at` filter's window (unlike Etsy's
+ * ledger, which requires chunking into 31-day calls) - a first sync just asks
+ * for everything back to `sinceDays`.
+ */
+export async function syncBalanceTransactions({ sinceDays = 90 } = {}) {
+  const shopId = requireShopifyShopId();
+  const db = getDb();
+
+  const last = db.prepare('SELECT MAX(transaction_date) AS t FROM shopify_balance_transactions WHERE shop_id = ?')
+    .get(shopId)?.t;
+  const windowStart = last
+    ? new Date(new Date(last).getTime() - 86_400_000)
+    : new Date(Date.now() - sinceDays * 86_400_000);
+  const queryFilter = `processed_at:>='${windowStart.toISOString().slice(0, 10)}'`;
+
+  const upsert = db.prepare(`
+    INSERT INTO shopify_balance_transactions (txn_id, shop_id, order_id, order_transaction_id, type, source_type,
+      amount, fee, net, currency, is_test, payout_id, payout_status, transaction_date, raw, synced_at)
+    VALUES (@id,@shopId,@orderId,@orderTransactionId,@type,@sourceType,@amount,@fee,@net,@currency,@isTest,
+      @payoutId,@payoutStatus,@transactionDate,@raw,datetime('now'))
+    ON CONFLICT(txn_id) DO UPDATE SET order_id=excluded.order_id, order_transaction_id=excluded.order_transaction_id,
+      type=excluded.type, source_type=excluded.source_type, amount=excluded.amount, fee=excluded.fee, net=excluded.net,
+      currency=excluded.currency, is_test=excluded.is_test, payout_id=excluded.payout_id, payout_status=excluded.payout_status,
+      transaction_date=excluded.transaction_date, raw=excluded.raw, synced_at=excluded.synced_at`);
+
+  let cursor = null;
+  let total = 0;
+  let sawAccount = false;
+  for (;;) {
+    const data = await gql(BALANCE_TRANSACTIONS_QUERY, { cursor, query: queryFilter });
+    const account = data.shopifyPaymentsAccount;
+    if (!account) break; // no Shopify Payments account, or the scope above is missing - nothing to read
+    sawAccount = true;
+    for (const n of account.balanceTransactions.nodes) {
+      upsert.run({
+        id: n.id, shopId, orderId: n.associatedOrder?.id ?? null,
+        orderTransactionId: n.sourceOrderTransactionId != null ? `gid://shopify/OrderTransaction/${n.sourceOrderTransactionId}` : null,
+        type: n.type ?? null, sourceType: n.sourceType ?? null,
+        amount: num(n.amount?.amount), fee: num(n.fee?.amount), net: num(n.net?.amount),
+        currency: n.amount?.currencyCode ?? n.net?.currencyCode ?? null,
+        isTest: n.test ? 1 : 0, payoutId: n.associatedPayout?.id ?? null, payoutStatus: n.associatedPayout?.status ?? null,
+        transactionDate: n.transactionDate, raw: json(n),
+      });
+      total += 1;
+    }
+    if (!account.balanceTransactions.pageInfo.hasNextPage) break;
+    cursor = account.balanceTransactions.pageInfo.endCursor;
+  }
+  if (!sawAccount) {
+    log.warn('shopifyPaymentsAccount not readable - missing read_shopify_payments_accounts scope, or this store has no Shopify Payments account. Reconnect the store to grant the scope.');
+  } else {
+    log.info(`balance transactions synced: ${total}`);
+  }
+  return { transactions: total, hasAccount: sawAccount };
 }

@@ -42,6 +42,13 @@ export const DEFAULT_SCOPES = [
   // Shop Campaigns ad spend via ShopifyQL - also needs Shopify's separate
   // Level 2 Protected Customer Data approval before it returns real data.
   'read_reports',
+  // shopifyPaymentsAccount.balanceTransactions - the real per-charge fee/net
+  // Shopify Payments actually applied (varies by card brand and currency
+  // conversion), the same numbers shown on Payouts > Transactions. A store
+  // connected before this scope was added needs reconnecting once to pick it
+  // up; until then the balance-transaction sync just finds nothing to read
+  // and the order screens keep using the rate-card estimate.
+  'read_shopify_payments_accounts',
 ];
 
 const cleanDomain = (d) => String(d ?? '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '').toLowerCase();

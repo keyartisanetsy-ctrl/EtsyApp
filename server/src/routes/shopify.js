@@ -104,6 +104,11 @@ router.get('/test', asyncRoute(async (req, res) => res.json(await client.testCon
 router.post('/sync/products', asyncRoute(async (req, res) => res.json(await shopify.syncProducts())));
 router.post('/sync/orders', asyncRoute(async (req, res) => res.json(await shopify.syncOrders({ pages: int(req.body?.pages, 5) }))));
 
+/** Shopify Payments' own balance ledger - the real per-order fee/net, matching Payouts > Transactions. */
+router.post('/sync/balance-transactions', asyncRoute(async (req, res) => {
+  res.json(await shopify.syncBalanceTransactions({ sinceDays: int(req.body?.sinceDays, 90) }));
+}));
+
 // ------------------------------------------------------------- products
 
 router.get('/products', asyncRoute(async (req, res) => {

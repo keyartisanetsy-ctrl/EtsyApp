@@ -10,7 +10,7 @@ import { getStoredToken, refreshAllAccounts, listAccounts, withShop } from './et
 import { listShopifyAccounts, withShopifyShop } from './shopify/client.js';
 import { syncTracking, refreshStaleFlags } from './services/tracking/index.js';
 import { syncReceipts, syncAll, syncLedgerEntries } from './services/sync.js';
-import { syncProducts as syncShopifyProducts, syncOrders as syncShopifyOrders } from './services/shopify.js';
+import { syncProducts as syncShopifyProducts, syncOrders as syncShopifyOrders, syncBalanceTransactions as syncShopifyBalanceTransactions } from './services/shopify.js';
 import { ensureRates } from './services/fx.js';
 import { scanInbox } from './services/productstudio.js';
 import { checkForUpdate, applyUpdate } from '../../scripts/self-update.mjs';
@@ -118,6 +118,16 @@ export function startScheduler() {
   setTimeout(shopifyFullSync, 25_000).unref();
   timers.push(setInterval(shopifyFullSync, shopifyFullSyncHours * 60 * 60_000).unref());
 
+  // Shopify Payments' own balance ledger: the real per-order fee/net
+  // (Payouts > Transactions), not the rate-card estimate - same idea as
+  // Etsy's ledger sync above, and just as much the one true source for what
+  // an order actually netted.
+  const shopifyLedgerSyncMinutes = Math.max(10, Number(readSetting('shopify.balance_sync_minutes')) || 30);
+  setTimeout(() => forEachConnectedShopifyStore('Shopify balance-ledger sync', () => syncShopifyBalanceTransactions({})), 35_000).unref();
+  timers.push(setInterval(() => {
+    forEachConnectedShopifyStore('Shopify balance-ledger sync', () => syncShopifyBalanceTransactions({}));
+  }, shopifyLedgerSyncMinutes * 60_000).unref());
+
   // A shop that isn't the active one can otherwise sit untouched for months
   // between switches, long enough for Etsy's own refresh-token lifetime to
   // run out on its own - keep every connected shop alive, not just today's.
@@ -184,7 +194,7 @@ export function startScheduler() {
 
   log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every ${orderSyncMinutes}m, `
     + `ledger every ${ledgerSyncMinutes}m, full sync every ${fullSyncHours}h, Shopify orders every ${shopifyOrderSyncMinutes}m, `
-    + `Shopify full sync every ${shopifyFullSyncHours}h, drop folder every 20s)`);
+    + `Shopify full sync every ${shopifyFullSyncHours}h, Shopify balance ledger every ${shopifyLedgerSyncMinutes}m, drop folder every 20s)`);
 }
 
 export const stopScheduler = () => { for (const t of timers) clearInterval(t); timers.length = 0; };

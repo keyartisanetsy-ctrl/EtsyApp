@@ -125,6 +125,7 @@ export const SETTING_DEFS = {
     label: 'Shopify OAuth redirect URI' },
   'shopify.orders_sync_minutes': { env: '', def: '5', label: 'How often to check every connected store for new/updated orders (minutes)' },
   'shopify.auto_sync_hours':     { env: '', def: '4', label: 'Full auto-sync interval - products and orders, every connected store (hours)' },
+  'shopify.balance_sync_minutes': { env: '', def: '30', label: 'How often to pull Shopify Payments\' real balance ledger (actual fee/net, Payouts > Transactions) - every connected store (minutes)' },
 
   // OneBound (万邦) is a paid, documented data API - unlike scraping Taobao
   // directly, this is a real, permitted way to read a live product's price
