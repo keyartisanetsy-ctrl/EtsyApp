@@ -42,7 +42,7 @@ function itemsForOrder(channel, orderId) {
 }
 
 /** Reuse a cached copy of the same listing photo instead of re-downloading it every check. */
-async function cachedProductImageId(url) {
+export async function cachedProductImageId(url) {
   const db = getDb();
   const existing = db.prepare("SELECT id FROM attachments WHERE purpose = 'product-image-cache' AND filename = ?").get(url);
   if (existing) return existing.id;

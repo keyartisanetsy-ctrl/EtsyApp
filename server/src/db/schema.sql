@@ -1042,3 +1042,31 @@ CREATE TABLE IF NOT EXISTS warehouse_checks (
   checked_at   TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (channel, item_id)
 );
+
+-- A parcel the warehouse in China reports as arrived over WeChat: a photo, the
+-- domestic carrier, the last digits of its tracking number and a piece count
+-- ("中通 3324 1件"). It waits here until it is matched, by eye or by the AI, to
+-- the order item it was bought for; matching is what fills in the order code
+-- the team's packing sheet carries next to it.
+CREATE TABLE IF NOT EXISTS inbound_parcels (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  carrier        TEXT NOT NULL DEFAULT '',
+  last4          TEXT NOT NULL DEFAULT '',
+  quantity       INTEGER NOT NULL DEFAULT 1,
+  attachment_id  TEXT,                    -- the warehouse's photo (attachments.id)
+  warehouse      TEXT NOT NULL DEFAULT '',
+  note           TEXT NOT NULL DEFAULT '',
+  received_on    TEXT,                    -- YYYY-MM-DD the warehouse reported it
+  match_channel  TEXT,                    -- etsy | shopify, null while unmatched
+  match_order_id TEXT,                    -- receipts.receipt_id / shopify_orders.order_id
+  match_item_id  TEXT,                    -- receipt_transactions.transaction_id / shopify_order_line_items.line_item_id
+  match_code     TEXT,                    -- 26-1005-15 on Etsy, "#1001" on Shopify
+  match_source   TEXT,                    -- ai | manual
+  match_score    REAL,
+  matched_at     TEXT,
+  packed_at      TEXT,
+  suggestions    TEXT,                    -- JSON: what the last AI match run found
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_parcels_match ON inbound_parcels(match_channel, match_item_id);
+CREATE INDEX IF NOT EXISTS idx_parcels_received ON inbound_parcels(received_on);

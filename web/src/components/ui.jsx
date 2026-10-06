@@ -1,4 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { withBase } from '../lib/api.js';
 
 // ------------------------------------------------------------------ toasts
 
@@ -251,7 +252,11 @@ export function DecimalInput({ value, onChange, className = 'input', placeholder
 export function Thumb({ src, alt, size = '', fallback = '□' }) {
   const [broken, setBroken] = useState(false);
   if (!src || broken) return <div className={`thumb ${size} placeholder`}>{fallback}</div>;
-  return <img className={`thumb ${size}`} src={src} alt={alt ?? ''} loading="lazy" onError={() => setBroken(true)} />;
+  // A photo this server stores is served from this app's own /api, which
+  // sits under the URL prefix when the app is mounted on one (/etsy-shopify)
+  // - a bare /api/... would ask the site root instead and never find it.
+  const url = src.startsWith('/api/') ? withBase(src) : src;
+  return <img className={`thumb ${size}`} src={url} alt={alt ?? ''} loading="lazy" onError={() => setBroken(true)} />;
 }
 
 export const Tabs = ({ tabs, active, onChange }) => (

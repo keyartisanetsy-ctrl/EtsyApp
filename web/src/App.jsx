@@ -17,6 +17,7 @@ import BulkJobs from './pages/BulkJobs.jsx';
 import Exports from './pages/Exports.jsx';
 import Airtable from './pages/Airtable.jsx';
 import Shopify from './pages/Shopify.jsx';
+import Packing from './pages/Packing.jsx';
 import Analytics from './pages/Analytics.jsx';
 import Drafts from './pages/Drafts.jsx';
 import Supply from './pages/Supply.jsx';
@@ -48,6 +49,7 @@ const NAV = [
     label: 'Fulfilment',
     items: [
       { to: '/orders', icon: '▣', label: 'Orders', badge: 'newOrders' },
+      { to: '/packing', icon: '📦', label: 'Packing' },
       { to: '/tracking', icon: '➤', label: 'Tracking', badge: 'alerts', badgeKind: 'alert' },
       { to: '/exports', icon: '⤓', label: 'Excel exports' },
       { to: '/airtable', icon: '⇉', label: 'Airtable sync' },
@@ -210,6 +212,7 @@ export default function App() {
             <Route path="/listings/new" element={<NewListing />} />
             <Route path="/skus" element={<Skus />} />
             <Route path="/orders" element={<Orders />} />
+            <Route path="/packing" element={<Packing />} />
             <Route path="/tracking" element={<Tracking />} />
             <Route path="/ai" element={<AiStudio />} />
             <Route path="/prompts" element={<Prompts />} />

@@ -31,6 +31,7 @@ import supplyRoutes from './routes/supply.js';
 import etsyExtraRoutes from './routes/etsyextra.js';
 import integrationRoutes from './routes/integrations.js';
 import shopifyRoutes from './routes/shopify.js';
+import packingRoutes from './routes/packing.js';
 
 import { startScheduler } from './scheduler.js';
 import { openBrowser, shouldOpenBrowser } from './lib/open-browser.js';
@@ -121,6 +122,7 @@ router.use('/api/supply', supplyRoutes);
 router.use('/api/etsy-extra', etsyExtraRoutes);
 router.use('/api/integrations', integrationRoutes);
 router.use('/api/shopify', shopifyRoutes);
+router.use('/api/packing', packingRoutes);
 
 // Serve the built frontend when it exists, so `npm start` runs the whole app.
 const webDist = path.join(ROOT, 'web', 'dist');
