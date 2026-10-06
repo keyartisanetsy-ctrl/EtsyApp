@@ -199,6 +199,27 @@ const chunk = (arr, size) => {
   return out;
 };
 
+/**
+ * Which of these record ids Airtable still has. Airtable cannot be asked for a
+ * list of ids directly, so this reads them back with a formula - and only the
+ * one field named in `primaryField`, so the answer stays small however wide
+ * the table is. Used before updating rows we pushed earlier, because someone
+ * may have deleted them in Airtable since.
+ */
+export async function existingRecordIds(baseId, tableId, recordIds, { primaryField } = {}) {
+  const found = new Set();
+  const ids = [...new Set(recordIds.map((id) => String(id).replace(/[^A-Za-z0-9]/g, '')).filter(Boolean))];
+  for (const batch of chunk(ids, 40)) {
+    const formula = `OR(${batch.map((id) => `RECORD_ID()='${id}'`).join(',')})`;
+    // eslint-disable-next-line no-await-in-loop
+    const rows = await listRecords(baseId, tableId, {
+      filterByFormula: formula, fields: primaryField ? [primaryField] : undefined, max: batch.length + 10,
+    });
+    rows.forEach((r) => found.add(r.id));
+  }
+  return found;
+}
+
 /** Create records, 10 at a time. `records` is an array of field objects. */
 export async function createRecords(baseId, tableId, records, { typecast = true } = {}) {
   const created = [];

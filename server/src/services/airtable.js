@@ -387,6 +387,30 @@ function rememberLink(destinationId, receiptId, transactionId, recordId, shopId)
     .run(destinationId, shopId, receiptId, transactionId ?? 0, recordId);
 }
 
+/**
+ * The rows we pushed before whose Airtable record is gone - someone deleted
+ * the row in Airtable. Updating one by its record id is an error from
+ * Airtable ("ROW_DOES_NOT_EXIST") that fails the whole send, so they are
+ * found first and sent again as new rows instead. If Airtable cannot be asked,
+ * nothing is called stale: a wrong "gone" would make a duplicate row.
+ */
+async function findStaleLinks(destination, links, table) {
+  if (!links.length) return new Set();
+  try {
+    const live = await at.existingRecordIds(destination.baseId, destination.tableId,
+      links.map((l) => l.record_id), { primaryField: table.primaryFieldId });
+    return new Set(links.filter((l) => !live.has(l.record_id)).map((l) => l.record_id));
+  } catch (err) {
+    log.warn(`could not check which linked Airtable rows still exist: ${err.message}`);
+    return new Set();
+  }
+}
+
+function forgetLinks(destinationId, recordIds) {
+  const db = getDb();
+  for (const id of recordIds) db.prepare('DELETE FROM airtable_links WHERE destination_id = ? AND record_id = ?').run(destinationId, id);
+}
+
 export function linksFor(destinationId, receiptIds = []) {
   if (!receiptIds.length) return [];
   const holes = receiptIds.map(() => '?').join(',');
@@ -453,8 +477,12 @@ export async function push({ destinationId, receiptIds = [], mode = 'upsert', dr
 
   await prepareSources(destination, receiptIds);
   const { records, issues, table } = await buildRecords(destination, receiptIds);
-  const known = linksFor(destination.id, receiptIds);
-  const knownByRow = new Map(known.map((l) => [`${l.receipt_id}:${l.transaction_id}`, l.record_id]));
+  const links = linksFor(destination.id, receiptIds);
+  const stale = await findStaleLinks(destination, links, table);
+  const rowKey = (l) => `${l.receipt_id}:${l.transaction_id}`;
+  const knownByRow = new Map(links.filter((l) => !stale.has(l.record_id)).map((l) => [rowKey(l), l.record_id]));
+  const deletedInAirtable = new Set(links.filter((l) => stale.has(l.record_id)).map(rowKey));
+  const isReAdd = (r) => deletedInAirtable.has(`${r.receiptId}:${r.transactionId ?? 0}`);
 
   if (dryRun) {
     return {
@@ -466,15 +494,19 @@ export async function push({ destinationId, receiptIds = [], mode = 'upsert', dr
         receiptId: r.receiptId,
         transactionId: r.transactionId,
         existingRecordId: knownByRow.get(`${r.receiptId}:${r.transactionId ?? 0}`) ?? null,
+        deletedInAirtable: isReAdd(r) && mode !== 'update',
         fields: r.fields,
       })),
       issues,
       willCreate: records.filter((r) => !knownByRow.has(`${r.receiptId}:${r.transactionId ?? 0}`)).length,
       willUpdate: records.filter((r) => knownByRow.has(`${r.receiptId}:${r.transactionId ?? 0}`)).length,
+      willReAdd: mode === 'update' ? 0 : records.filter(isReAdd).length,
     };
   }
 
-  const summary = { created: 0, updated: 0, skipped: 0, failed: 0, errors: [], issues };
+  const summary = { created: 0, updated: 0, skipped: 0, failed: 0, reAdded: 0, errors: [], issues };
+  // A dead link must not survive: the next push would trip over it again.
+  forgetLinks(destination.id, [...stale]);
   const typecast = destination.createOptions;
 
   // Rows we have pushed before go by record id - that survives someone editing
@@ -485,38 +517,68 @@ export async function push({ destinationId, receiptIds = [], mode = 'upsert', dr
     const existing = knownByRow.get(`${record.receiptId}:${record.transactionId ?? 0}`);
     if (existing) withId.push({ ...record, id: existing });
     else if (mode === 'update') summary.skipped += 1;
-    else fresh.push(record);
+    else {
+      fresh.push(record);
+      if (isReAdd(record)) summary.reAdded += 1;
+    }
   }
 
   try {
-    if (withId.length) {
-      // An Airtable automation that turns this link into a picture (e.g. the
-      // user's own "Varyant Görsel" attachment automation) only fires on a
-      // genuine empty-to-value transition. Overwriting an already-filled cell
-      // with a different value in one PATCH does not always retrigger it -
-      // the same reason a manual delete-then-retype worked for them. Clear it
-      // first, in its own call, so the real write right after is a fresh
-      // transition Airtable can't mistake for a no-op.
-      const variantImageTargets = [...new Set(
-        destination.fieldMap.filter((e) => isVariantImageSource(e.source)).map((e) => e.target),
-      )];
-      if (variantImageTargets.length) {
-        const toClear = withId
-          .filter((r) => variantImageTargets.some((t) => r.fields[t] != null && r.fields[t] !== ''))
-          .map((r) => ({ id: r.id, fields: Object.fromEntries(variantImageTargets.map((t) => [t, null])) }));
-        if (toClear.length) {
-          try { await at.updateRecords(destination.baseId, destination.tableId, toClear, { typecast }); }
-          catch (err) { log.warn(`could not clear variant-image field before retrigger: ${err.message}`); }
-        }
-      }
+    // An Airtable automation that turns this link into a picture (e.g. the
+    // user's own "Varyant Görsel" attachment automation) only fires on a
+    // genuine empty-to-value transition. Overwriting an already-filled cell
+    // with a different value in one PATCH does not always retrigger it -
+    // the same reason a manual delete-then-retype worked for them. Clear it
+    // first, in its own call, so the real write right after is a fresh
+    // transition Airtable can't mistake for a no-op.
+    const variantImageTargets = [...new Set(
+      destination.fieldMap.filter((e) => isVariantImageSource(e.source)).map((e) => e.target),
+    )];
+    const clearVariantImages = async (rows) => {
+      if (!variantImageTargets.length) return;
+      const toClear = rows
+        .filter((r) => variantImageTargets.some((t) => r.fields[t] != null && r.fields[t] !== ''))
+        .map((r) => ({ id: r.id, fields: Object.fromEntries(variantImageTargets.map((t) => [t, null])) }));
+      if (!toClear.length) return;
+      try { await at.updateRecords(destination.baseId, destination.tableId, toClear, { typecast }); }
+      catch (err) { log.warn(`could not clear variant-image field before retrigger: ${err.message}`); }
+    };
 
-      const updated = await at.updateRecords(
-        destination.baseId, destination.tableId,
-        withId.map((r) => ({ id: r.id, fields: r.fields })),
-        { typecast },
-      );
-      summary.updated += updated.length;
-      withId.forEach((r) => rememberLink(destination.id, r.receiptId, r.transactionId, r.id, shopId));
+    // The up-front check catches rows deleted in Airtable earlier; this catches
+    // one deleted in the seconds since. Airtable then rejects the whole batch,
+    // so find which rows are gone, send those as new rows, and update the rest.
+    let toUpdate = withId;
+    for (let attempt = 0; toUpdate.length; attempt += 1) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await clearVariantImages(toUpdate);
+        // eslint-disable-next-line no-await-in-loop
+        const updated = await at.updateRecords(
+          destination.baseId, destination.tableId,
+          toUpdate.map((r) => ({ id: r.id, fields: r.fields })),
+          { typecast },
+        );
+        summary.updated += updated.length;
+        toUpdate.forEach((r) => rememberLink(destination.id, r.receiptId, r.transactionId, r.id, shopId));
+        break;
+      } catch (err) {
+        if (err.details?.airtableType !== 'ROW_DOES_NOT_EXIST' || attempt > 0) throw err;
+        let live;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          live = await at.existingRecordIds(destination.baseId, destination.tableId,
+            toUpdate.map((r) => r.id), { primaryField: table.primaryFieldId });
+        } catch { throw err; }
+        const gone = toUpdate.filter((r) => !live.has(r.id));
+        if (!gone.length) throw err;
+        forgetLinks(destination.id, gone.map((r) => r.id));
+        if (mode === 'update') summary.skipped += gone.length;
+        else {
+          fresh.push(...gone.map(({ id, ...row }) => row));
+          summary.reAdded += gone.length;
+        }
+        toUpdate = toUpdate.filter((r) => live.has(r.id));
+      }
     }
 
     if (fresh.length) {
@@ -557,8 +619,8 @@ export async function push({ destinationId, receiptIds = [], mode = 'upsert', dr
   }
 
   getDb().prepare("UPDATE airtable_destinations SET last_push_at = datetime('now') WHERE id = ?").run(destination.id);
-  recordRun(destination.id, mode, summary, shopId);
-  log.info(`pushed ${summary.created} new and ${summary.updated} updated rows to ${destination.label}`);
+  recordRun(destination.id, mode, { ...summary, detail: summary.reAdded ? { reAdded: summary.reAdded } : undefined }, shopId);
+  log.info(`pushed ${summary.created} new and ${summary.updated} updated rows to ${destination.label}${summary.reAdded ? ` (${summary.reAdded} had been deleted in Airtable and were added again)` : ''}`);
 
   return { ...summary, destination: { id: destination.id, label: destination.label, table: table.name }, mode };
 }

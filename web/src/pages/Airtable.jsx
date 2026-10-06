@@ -796,7 +796,8 @@ export function SendToAirtable({ receiptIds, onClose, onDone, channel = 'etsy' }
       toast({
         kind: 'ok',
         title: mode === 'delete' ? `Deleted ${r.deleted} row(s)` : `${r.created} added, ${r.updated} updated`,
-        body: r.errors?.length ? r.errors[0] : undefined,
+        body: r.errors?.length ? r.errors[0]
+          : r.reAdded ? `${r.reAdded} row(s) had been deleted in Airtable and were added again.` : undefined,
         duration: 8000,
       });
       onDone?.();
@@ -815,7 +816,7 @@ export function SendToAirtable({ receiptIds, onClose, onDone, channel = 'etsy' }
       footer={(
         <div className="flex" style={{ width: '100%' }}>
           <span className="small muted">
-            {preview && mode !== 'delete' && `${preview.willCreate} new row(s), ${preview.willUpdate} existing row(s)`}
+            {preview && mode !== 'delete' && `${preview.willCreate} new row(s), ${preview.willUpdate} existing row(s)${preview.willReAdd ? ` · ${preview.willReAdd} of the new ones were deleted in Airtable and are added again` : ''}`}
             {preview && mode === 'delete' && `${preview.willDelete ?? 0} row(s) will be removed from Airtable`}
           </span>
           <div className="spacer" />
@@ -882,6 +883,7 @@ export function SendToAirtable({ receiptIds, onClose, onDone, channel = 'etsy' }
                         <td className="small">
                           {r.receiptId}
                           {r.existingRecordId && <div className="small muted">updates an existing row</div>}
+                          {r.deletedInAirtable && <div className="small" style={{ color: 'var(--warn)' }}>was deleted in Airtable - added again</div>}
                         </td>
                         {columns.map((c) => (
                           <td key={c} className="small">{formatCell(r.fields[c])}</td>
