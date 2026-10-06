@@ -430,6 +430,14 @@ async function anthropicComplete({ prompt, system, images = [], maxTokens = 4096
 
 // ------------------------------------------------------------------ OpenAI
 
+/**
+ * Which name this OpenAI-compatible endpoint wants for the output cap. OpenAI
+ * itself now takes only `max_completion_tokens` (its newer models reject the
+ * old `max_tokens` outright), while some compatible servers still only know
+ * the old name - so the one that works is tried first and remembered.
+ */
+const OPENAI_TOKEN_PARAM = new Map();
+
 async function openaiComplete({ prompt, system, images = [], maxTokens = 4096, model: override, effort: overrideEffort, signal }) {
   const apiKey = readSetting('ai.openai.api_key');
   const model = override || readSetting('ai.openai.model');
@@ -441,24 +449,50 @@ async function openaiComplete({ prompt, system, images = [], maxTokens = 4096, m
   }
   const messages = [...(system ? [{ role: 'system', content: system }] : []), { role: 'user', content }];
 
-  const payload = { model, messages, max_tokens: maxTokens };
+  const meta = await modelMeta('openai', model, apiKey);
+  const levels = meta.effortLevels ?? [];
+  const payload = { model, messages };
   // Only sent when this exact model is known to take it - a model that
   // rejects the parameter gets an ordinary completion instead of a 400.
-  if (effort) {
-    const meta = await modelMeta('openai', model, apiKey);
-    if (meta.effortLevels.includes(effort)) payload.reasoning_effort = effort;
-  }
+  if (effort && levels.includes(effort)) payload.reasoning_effort = effort;
 
-  const res = await outboundFetch(`${config.ai.openai.base}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    signal,
-  });
-  const body = await res.json().catch(() => ({}));
+  // A reasoning model spends its hidden thinking out of the same output cap
+  // as the answer. Capped at just the answer's size it can use everything on
+  // thinking and return nothing, so it gets the thinking budget on top - the
+  // same per-effort allowance the Anthropic path uses. A ceiling, not a spend.
+  const reasons = levels.length > 0 || /^(o\d|gpt-[5-9])/i.test(model);
+  const thinkingRoom = !reasons || effort === 'none' ? 0
+    : (ANTHROPIC_EFFORT_BUDGET[effort || meta.defaultEffort || 'medium'] ?? ANTHROPIC_EFFORT_BUDGET.medium);
+  const budget = maxTokens + thinkingRoom;
+
+  const url = `${config.ai.openai.base}/v1/chat/completions`;
+  const remembered = OPENAI_TOKEN_PARAM.get(config.ai.openai.base);
+  const order = remembered === 'max_tokens' ? ['max_tokens', 'max_completion_tokens'] : ['max_completion_tokens', 'max_tokens'];
+
+  let res;
+  let body;
+  for (const param of order) {
+    // eslint-disable-next-line no-await-in-loop
+    res = await outboundFetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, [param]: budget }),
+      signal,
+    });
+    // eslint-disable-next-line no-await-in-loop
+    body = await res.json().catch(() => ({}));
+    if (res.ok) { OPENAI_TOKEN_PARAM.set(config.ai.openai.base, param); break; }
+    const complaint = res.status === 400 && /max_tokens|max_completion_tokens/i.test(String(body?.error?.message ?? ''));
+    if (!complaint) break;
+  }
   if (!res.ok) throw new AppError(res.status, `OpenAI error: ${body?.error?.message || res.statusText}`);
 
-  return { text: body.choices?.[0]?.message?.content?.trim() ?? '', model: body.model, usage: body.usage, raw: body };
+  const choice = body.choices?.[0];
+  const text = choice?.message?.content?.trim() ?? '';
+  if (!text && choice?.finish_reason === 'length') {
+    throw new AppError(502, 'OpenAI used its whole output allowance thinking and never answered. Lower the reasoning effort in Settings > AI, or try again.');
+  }
+  return { text, model: body.model, usage: body.usage, raw: body };
 }
 
 /**

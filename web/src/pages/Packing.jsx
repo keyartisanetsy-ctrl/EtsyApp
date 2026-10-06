@@ -12,7 +12,7 @@ const daysAgo = (n) => localDay(new Date(Date.now() - n * 86_400_000));
 const shortDay = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '');
 
 function loadFilters() {
-  const fallback = { etsy: true, shopify: true, from: daysAgo(30), to: localDay(new Date()), autoConfirm: true, warehouse: '' };
+  const fallback = { etsy: true, shopify: true, from: daysAgo(30), to: localDay(new Date()), autoAssign: false, warehouse: '' };
   try { return { ...fallback, ...JSON.parse(localStorage.getItem(FILTER_KEY) || '{}'), to: localDay(new Date()) }; } catch { return fallback; }
 }
 
@@ -81,6 +81,7 @@ function AddParcel({ warehouse, onWarehouse, onAdded }) {
       <div className="card-head"><h3>New arrival</h3></div>
       <div className="card-sub">
         Paste the photo from WeChat (Ctrl+V), then the line under it - carrier, last 4 digits and piece count, like 中通 3324 1件.
+        Adding an arrival only saves it; the AI looks for its order when you press Find match.
       </div>
       <div className="flex" style={{ alignItems: 'flex-start', flexWrap: 'wrap', gap: 14 }}>
         <label
@@ -386,7 +387,7 @@ export default function Packing() {
     try {
       const p = await api.post(`/packing/parcels/${id}/match`, range);
       const s = p.suggestions;
-      if (filters.autoConfirm && s?.confident) {
+      if (filters.autoAssign && s?.confident) {
         const top = s.items[0];
         const d = top.demands.find((x) => x.remaining > 0) ?? top.demands[0];
         if (d) await api.post(`/packing/parcels/${id}/confirm`, { channel: d.channel, orderId: d.orderId, itemId: d.itemId, source: 'ai', score: top.score });
@@ -395,7 +396,7 @@ export default function Packing() {
       }
       return true;
     } catch (err) { showError(err, 'Matching failed'); return false; } finally { flag(id, false); parcels.reload(); queue.reload(); }
-  }, [range, filters.autoConfirm]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [range, filters.autoAssign]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const matchAll = async () => {
     const todo = (parcels.data?.rows ?? []).filter((p) => p.status === 'unmatched' && p.photoUrl);
@@ -412,10 +413,10 @@ export default function Packing() {
     refresh();
   };
 
-  const onAdded = async (parcel) => {
+  // Adding an arrival only records it. The AI is never asked until "Find match" or "Match all" is pressed.
+  const onAdded = (parcel) => {
     toast({ kind: 'ok', title: `Added ${parcel.label}` });
     if (status !== 'all' && status !== 'unmatched') setStatus('all'); else parcels.reload();
-    if (parcel.photoUrl && channels.length) await matchOne(parcel.id, { quiet: true });
   };
 
   const unmatch = async (id) => {
@@ -467,7 +468,9 @@ export default function Packing() {
             <button key={n} className="btn xs ghost" onClick={() => setFilter({ from: daysAgo(n), to: localDay(new Date()) })}>{n}d</button>
           ))}
           <div style={{ flex: 1 }} />
-          <Checkbox checked={filters.autoConfirm} onChange={(v) => setFilter({ autoConfirm: v })} label="Auto-assign confident matches" />
+          <span title="Off by default: after Find match, the AI's best guesses are shown and nothing is assigned until you press Assign. Turn on to have a very confident match assigned straight away.">
+            <Checkbox checked={filters.autoAssign} onChange={(v) => setFilter({ autoAssign: v })} label="Assign automatically when the AI is sure" />
+          </span>
         </div>
         <div className="small muted mt4">
           Only orders placed in this range that have not shipped (no tracking yet, not canceled) are compared. Oldest orders come first.
