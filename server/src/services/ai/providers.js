@@ -385,7 +385,9 @@ async function anthropicComplete({ prompt, system, images = [], maxTokens = 4096
   // careful model, a title rewrite wants a fast one - without disturbing the
   // saved default.
   const model = override || readSetting('ai.anthropic.model');
-  const effort = overrideEffort ?? readSetting('ai.anthropic.effort') ?? '';
+  // 'fast' is a quick look at a picture: no extended thinking, whatever the saved
+  // effort is for the slower text jobs.
+  const effort = overrideEffort === 'fast' ? '' : (overrideEffort ?? readSetting('ai.anthropic.effort') ?? '');
 
   const content = [];
   for (const img of images) {
@@ -424,6 +426,7 @@ async function anthropicComplete({ prompt, system, images = [], maxTokens = 4096
     text: (body.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join('\n').trim(),
     model: body.model,
     usage: body.usage,
+    tokens: { input: body.usage?.input_tokens ?? 0, output: body.usage?.output_tokens ?? 0 },
     raw: body,
   };
 }
@@ -438,19 +441,28 @@ async function anthropicComplete({ prompt, system, images = [], maxTokens = 4096
  */
 const OPENAI_TOKEN_PARAM = new Map();
 
+/** What "fast" means for a reasoning model: the least thinking this model allows. */
+const FAST_EFFORT_ORDER = ['none', 'minimal', 'low'];
+
 async function openaiComplete({ prompt, system, images = [], maxTokens = 4096, model: override, effort: overrideEffort, signal }) {
   const apiKey = readSetting('ai.openai.api_key');
   const model = override || readSetting('ai.openai.model');
-  const effort = overrideEffort ?? readSetting('ai.openai.effort') ?? '';
+  const wanted = overrideEffort ?? readSetting('ai.openai.effort') ?? '';
 
+  // `detail` sets what a picture costs: "low" is one flat 85 tokens however big
+  // the photo is, "high" is up to ~765 for a normal photo (more for a huge one).
   const content = [{ type: 'text', text: prompt }];
   for (const img of images) {
-    content.push({ type: 'image_url', image_url: { url: `data:${img.mime || 'image/png'};base64,${img.base64}` } });
+    content.push({
+      type: 'image_url',
+      image_url: { url: `data:${img.mime || 'image/png'};base64,${img.base64}`, ...(img.detail ? { detail: img.detail } : {}) },
+    });
   }
   const messages = [...(system ? [{ role: 'system', content: system }] : []), { role: 'user', content }];
 
   const meta = await modelMeta('openai', model, apiKey);
   const levels = meta.effortLevels ?? [];
+  const effort = wanted === 'fast' ? (FAST_EFFORT_ORDER.find((l) => levels.includes(l)) ?? '') : wanted;
   const payload = { model, messages };
   // Only sent when this exact model is known to take it - a model that
   // rejects the parameter gets an ordinary completion instead of a 400.
@@ -492,7 +504,10 @@ async function openaiComplete({ prompt, system, images = [], maxTokens = 4096, m
   if (!text && choice?.finish_reason === 'length') {
     throw new AppError(502, 'OpenAI used its whole output allowance thinking and never answered. Lower the reasoning effort in Settings > AI, or try again.');
   }
-  return { text, model: body.model, usage: body.usage, raw: body };
+  return {
+    text, model: body.model, usage: body.usage, raw: body,
+    tokens: { input: body.usage?.prompt_tokens ?? 0, output: body.usage?.completion_tokens ?? 0 },
+  };
 }
 
 /**

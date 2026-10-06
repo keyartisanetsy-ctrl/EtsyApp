@@ -114,14 +114,20 @@ export const listRuns = (kind, limit = 50) =>
 
 export const getRun = (id) => getDb().prepare('SELECT * FROM ai_runs WHERE id = ?').get(id) || null;
 
-/** Load stored screenshots as base64 for the vision-capable providers. */
+/**
+ * Load stored pictures as base64 for the vision-capable providers. An entry is
+ * an attachment id, or { id, detail } to say how closely this one picture
+ * should be looked at ("low" costs a fraction of "high" with OpenAI).
+ */
+const idOf = (entry) => (typeof entry === 'string' ? entry : entry.id);
 function loadImages(attachmentIds = []) {
   if (!attachmentIds.length) return [];
   const db = getDb();
-  return attachmentIds.map((id) => {
+  return attachmentIds.map((entry) => {
+    const id = idOf(entry);
     const a = db.prepare('SELECT * FROM attachments WHERE id = ?').get(id);
     if (!a) throw notFound(`Attachment ${id} not found.`);
-    return { base64: fs.readFileSync(a.path).toString('base64'), mime: a.mime, filename: a.filename };
+    return { base64: fs.readFileSync(a.path).toString('base64'), mime: a.mime, filename: a.filename, detail: entry.detail };
   });
 }
 
@@ -149,14 +155,15 @@ export async function run({
   if (images.length && !parts.length) parts.push('The input is in the attached image(s).');
   const prompt = parts.join('\n\n');
 
-  const runId = startRun({ kind, provider: chosen, promptId: usedPromptId, input: prompt, attachments: attachmentIds });
+  const runId = startRun({ kind, provider: chosen, promptId: usedPromptId, input: prompt, attachments: attachmentIds.map(idOf) });
 
   try {
     const result = await complete({ provider: chosen, model, effort, prompt, system, images, maxTokens });
     finishRun(runId, { output: result.text, model: result.model, externalId: result.externalId, externalUrl: result.externalUrl, durationMs: result.durationMs });
     bumpUsage(usedPromptId);
-    log.info(`${kind} via ${result.provider} in ${result.durationMs}ms`);
-    return { runId, kind, provider: result.provider, model: result.model, text: result.text, externalUrl: result.externalUrl, durationMs: result.durationMs, promptId: usedPromptId };
+    const t = result.tokens;
+    log.info(`${kind} via ${result.provider} in ${result.durationMs}ms${t ? ` (${t.input} tokens in, ${t.output} out)` : ''}`);
+    return { runId, kind, provider: result.provider, model: result.model, text: result.text, externalUrl: result.externalUrl, durationMs: result.durationMs, promptId: usedPromptId, tokens: t ?? null };
   } catch (err) {
     finishRun(runId, { error: err.message });
     throw err;

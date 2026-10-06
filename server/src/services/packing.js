@@ -367,10 +367,13 @@ true and keep scores low rather than guessing.
 
 Reply with JSON only, with an entry for every numbered listing:
 {"unreadable":false,
- "matches":[{"index":1,"score":0.0,"reason":"one short line naming the detail that decided it"}]}`;
+ "matches":[{"index":1,"score":0.0,"reason":"a few words naming the detail that decided it, left empty when the score is under 0.5"}]}`;
 
-const BATCH_SIZE = 8;
-const MAX_PRODUCTS = 48;
+// Listing photos are only references, and at "low" detail a picture costs a flat
+// 85 tokens however large it is - so a lot of them fit in one cheap call.
+const BATCH_SIZE = 16;
+const MAX_PRODUCTS = 64;
+const FINALISTS = 4;
 const CONFIDENT_SCORE = 0.8;
 const CONFIDENT_GAP = 0.15;
 
@@ -386,17 +389,29 @@ async function mapLimit(list, limit, fn) {
   return out;
 }
 
-async function scoreBatch(parcel, batch, { provider, model, runner }) {
+/**
+ * One AI look: the warehouse photo against up to BATCH_SIZE listing photos.
+ * The warehouse photo is always seen closely; `detail` is how closely the
+ * listings are - "low" for the wide first pass, "high" for the few that make
+ * the final.
+ */
+async function scoreBatch(parcel, batch, { provider, model, runner, detail, usage }) {
   const ai = await runner({
     kind: 'custom',
     provider: provider || readSetting('ai.warehouse.provider') || undefined,
     model: model || readSetting('ai.warehouse.model') || undefined,
     promptOverride: MATCH_SYSTEM,
-    attachmentIds: [parcel.attachment_id, ...batch.map((p) => p.attachmentId)],
+    attachmentIds: [{ id: parcel.attachment_id, detail: 'high' }, ...batch.map((p) => ({ id: p.attachmentId, detail }))],
+    // Picking a picture out of a few is not a task to think hard about.
+    effort: 'fast',
     context: { listings: batch.map((p, i) => ({ index: i + 1, title: p.title, sku: p.sku })) },
     userInput: 'The first image is the warehouse photo. Each image after it is one numbered listing photo, in order. JSON only.',
-    maxTokens: 1200,
+    maxTokens: 900,
   });
+  usage.calls += 1;
+  usage.input += ai.tokens?.input ?? 0;
+  usage.output += ai.tokens?.output ?? 0;
+
   const parsed = parseJsonish(ai.text);
   if (!parsed || !Array.isArray(parsed.matches)) throw new Error('The AI did not return a usable answer.');
   const scored = [];
@@ -409,13 +424,23 @@ async function scoreBatch(parcel, batch, { provider, model, runner }) {
   return { scored, unreadable: !!parsed.unreadable, provider: ai.provider, model: ai.model };
 }
 
+const byScore = (a, b) => b.score - a.score;
+const isSure = (ordered) => {
+  const [top, second] = ordered;
+  return !!top && top.score >= CONFIDENT_SCORE && (!second || top.score - second.score >= CONFIDENT_GAP);
+};
+
 /**
  * Look through the unshipped orders in the window for the product this
- * parcel's photo shows. Listings are grouped by their picture first - ten
- * orders for the same product are one candidate, not ten - and compared in
- * batches; when there are several batches the best of each go through one
- * more round together, so the final order comes from a single side-by-side
- * comparison instead of scores that were never seen next to each other.
+ * parcel's photo shows - cheaply first, closely only when it has to be.
+ *
+ * Listings are grouped by their picture (ten orders for one product are one
+ * candidate) and compared in one low-detail pass, usually a single call. When
+ * that pass already has a clear winner, that is the answer. When it does not,
+ * the few best candidates get a second, high-detail look side by side with
+ * the photo - unless several of them already score high, which means the photo
+ * holds more than one of the products (or lookalike variants) and a closer
+ * look would not choose between them.
  */
 export async function matchParcel(id, { channels, from, to, provider, model, runner = run } = {}) {
   const db = getDb();
@@ -434,14 +459,15 @@ export async function matchParcel(id, { channels, from, to, provider, model, run
   const distinct = [...byImage.values()];
   const candidates = distinct.slice(0, MAX_PRODUCTS);
 
+  const usage = { calls: 0, input: 0, output: 0 };
   const result = {
     ranAt: new Date().toISOString(), channels: range.channels, from: range.from, to: range.to,
     considered: candidates.length, truncated: distinct.length > candidates.length, skipped: 0,
-    unreadable: false, confident: false, provider: null, model: null, items: [],
+    unreadable: false, confident: false, provider: null, model: null, closeLook: false, items: [], usage,
   };
 
   if (candidates.length) {
-    const cached = await mapLimit(candidates, 4, async (c) => {
+    const cached = await mapLimit(candidates, 6, async (c) => {
       try { return { ...c, attachmentId: await cachedProductImageId(c.imageUrl) }; } catch { return null; }
     });
     const usable = cached.filter(Boolean);
@@ -449,37 +475,33 @@ export async function matchParcel(id, { channels, from, to, provider, model, run
     result.considered = usable.length;
 
     if (usable.length) {
-      const opts = { provider, model, runner };
+      const opts = { provider, model, runner, usage };
       const batches = [];
       for (let i = 0; i < usable.length; i += BATCH_SIZE) batches.push(usable.slice(i, i + BATCH_SIZE));
 
       let failure = null;
-      const rounds = await mapLimit(batches, 2, async (b) => {
-        try { return await scoreBatch(parcel, b, opts); } catch (err) { failure = err; return null; }
+      const rounds = await mapLimit(batches, 3, async (b) => {
+        try { return await scoreBatch(parcel, b, { ...opts, detail: 'low' }); } catch (err) { failure = err; return null; }
       });
       const good = rounds.filter(Boolean);
       if (!good.length) throw failure ?? new Error('The AI did not return a usable answer.');
 
-      const byScore = (a, b) => b.score - a.score;
       let ordered = good.flatMap((r) => r.scored).sort(byScore);
       result.unreadable = good.some((r) => r.unreadable);
       result.provider = good[0].provider;
       result.model = good[0].model;
 
-      if (good.length > 1) {
-        const finalists = good
-          .flatMap((r) => [...r.scored].sort((a, b) => b.score - a.score).slice(0, 3))
-          .filter((s) => s.score >= 0.35)
-          .sort((a, b) => b.score - a.score)
-          .slice(0, BATCH_SIZE)
-          .map((s) => s.product);
-        if (finalists.length > 1) {
-          try {
-            const final = await scoreBatch(parcel, finalists, opts);
-            const decided = new Set(final.scored.map((s) => s.product));
-            ordered = [...final.scored.sort(byScore), ...ordered.filter((s) => !decided.has(s.product))];
-          } catch { /* the first-round scores still stand */ }
-        }
+      const contenders = ordered.filter((s) => s.score >= 0.3);
+      const several = ordered.filter((s) => s.score >= CONFIDENT_SCORE).length >= 2;
+      if (!isSure(ordered) && contenders.length && !several) {
+        const finalists = contenders.slice(0, FINALISTS).map((s) => s.product);
+        try {
+          const close = await scoreBatch(parcel, finalists, { ...opts, detail: 'high' });
+          const decided = new Set(close.scored.map((s) => s.product));
+          ordered = [...close.scored.sort(byScore), ...ordered.filter((s) => !decided.has(s.product))];
+          result.closeLook = true;
+          result.unreadable = result.unreadable || close.unreadable;
+        } catch { /* the first look still stands */ }
       }
 
       const ranked = ordered.filter((s) => s.score >= 0.2).slice(0, 5);
@@ -487,9 +509,7 @@ export async function matchParcel(id, { channels, from, to, provider, model, run
         imageUrl: s.product.imageUrl, title: s.product.title, sku: s.product.sku,
         score: round2(s.score), reason: s.reason, demands: s.product.demands.slice(0, 8).map(slimDemand),
       }));
-      const [top, second] = result.items;
-      result.confident = !!top && !result.unreadable && top.score >= CONFIDENT_SCORE
-        && (!second || top.score - second.score >= CONFIDENT_GAP);
+      result.confident = !result.unreadable && isSure(result.items);
     }
   }
 
@@ -760,7 +780,8 @@ export async function detectRegions(id, { provider, model, runner = run } = {}) 
     provider: provider || readSetting('ai.warehouse.provider') || undefined,
     model: model || readSetting('ai.warehouse.model') || undefined,
     promptOverride: DETECT_SYSTEM,
-    attachmentIds: [parcel.attachment_id],
+    attachmentIds: [{ id: parcel.attachment_id, detail: 'high' }],
+    effort: 'fast',
     userInput: `The warehouse reported ${parcel.quantity} piece${parcel.quantity === 1 ? '' : 's'} in this photo. JSON only.`,
     maxTokens: 900,
   });

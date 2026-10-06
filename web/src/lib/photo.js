@@ -20,10 +20,12 @@ const toBlob = (canvas, quality = 0.92) => new Promise((resolve, reject) => {
 
 /**
  * A photo ready to keep and to show an AI: turned upright, no larger than
- * `maxSide` on its long edge, as a JPEG. Falls back to the file as it came if
+ * `maxSide` on its long edge, as a JPEG. 1280px is plenty to read a box and
+ * tell two products apart, and a smaller picture is a cheaper one to send to an
+ * AI that bills by pixels. Falls back to the file as it came if
  * the browser cannot open it, so adding an arrival never fails here.
  */
-export async function normalizePhoto(file, { maxSide = 2000, quality = 0.9 } = {}) {
+export async function normalizePhoto(file, { maxSide = 1280, quality = 0.85 } = {}) {
   let url;
   try {
     url = URL.createObjectURL(file);

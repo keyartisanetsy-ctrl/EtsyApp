@@ -41,13 +41,36 @@ function itemsForOrder(channel, orderId) {
   ).all(orderId);
 }
 
+/**
+ * A smaller copy of a listing photo from the shop's own image CDN. A photo is
+ * paid for by its size, a comparison never needs more than ~600px, and both
+ * Etsy and Shopify will hand out a smaller rendition of the same picture.
+ * Anything else comes back unchanged.
+ */
+export function smallRendition(url) {
+  try {
+    const u = new URL(url);
+    if (/(^|\.)etsystatic\.com$/i.test(u.hostname)) {
+      return url.replace(/\/il_(?:fullxfull|\d+x(?:\d+|N))\./, '/il_570xN.');
+    }
+    if (u.hostname === 'cdn.shopify.com' || u.pathname.includes('/cdn/shop/')) {
+      if (!u.searchParams.has('width')) u.searchParams.set('width', '640');
+      return u.toString();
+    }
+  } catch { /* not a URL there is anything to say about */ }
+  return url;
+}
+
 /** Reuse a cached copy of the same listing photo instead of re-downloading it every check. */
 export async function cachedProductImageId(url) {
   const db = getDb();
   const existing = db.prepare("SELECT id FROM attachments WHERE purpose = 'product-image-cache' AND filename = ?").get(url);
   if (existing) return existing.id;
 
-  const res = await outboundFetch(url, { headers: { Accept: 'image/*' } });
+  const small = smallRendition(url);
+  let res = await outboundFetch(small, { headers: { Accept: 'image/*' } });
+  // The smaller copy is a courtesy: if the CDN will not serve it, take the original.
+  if (!res.ok && small !== url) res = await outboundFetch(url, { headers: { Accept: 'image/*' } });
   if (!res.ok) throw badRequest(`Could not download the product photo (HTTP ${res.status}).`);
   const buf = Buffer.from(await res.arrayBuffer());
   const mime = res.headers.get('content-type') || 'image/jpeg';
@@ -151,7 +174,10 @@ export async function checkItem({ channel, itemId, provider, model, runner = run
       provider: chosenProvider,
       model: chosenModel,
       promptOverride: AI_SYSTEM,
-      attachmentIds: [item.warehouse_photo_id, productAttachmentId],
+      // Telling two similar items apart is the whole job here, so both pictures
+      // get a close look - but no long think about them.
+      attachmentIds: [{ id: item.warehouse_photo_id, detail: 'high' }, { id: productAttachmentId, detail: 'high' }],
+      effort: 'fast',
       context: { title: item.title || '', sku: item.sku || '' },
       userInput: 'The first image is the warehouse photo, the second the listing photo. Compare them. JSON only.',
       maxTokens: 500,
@@ -215,7 +241,10 @@ export async function checkOrder({ channel, orderId, provider, model, runner = r
       provider: chosenProvider,
       model: chosenModel,
       promptOverride: GROUP_AI_SYSTEM,
-      attachmentIds: [photoItem.warehouse_photo_id, ...productAttachmentIds],
+      // The packing photo is looked at closely; each listing photo is only a
+      // reference for "what am I looking for", and a studio shot needs far less.
+      attachmentIds: [{ id: photoItem.warehouse_photo_id, detail: 'high' }, ...productAttachmentIds.map((id) => ({ id, detail: 'low' }))],
+      effort: 'fast',
       context: { products: targets.map((it, i) => ({ index: i + 1, title: it.title || '', sku: it.sku || '' })) },
       userInput: 'The first image is the warehouse photo. Each image after it is one numbered product listing photo, in order. JSON only.',
       maxTokens: 800,

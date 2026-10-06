@@ -207,6 +207,12 @@ function Suggestions({ parcel, onAssign, onSplit, busy }) {
           {s.unreadable && <span className="badge amber" style={{ marginLeft: 6 }}>photo hard to read</span>}
           {s.truncated && <span className="badge grey" style={{ marginLeft: 6 }}>only the oldest {s.considered} compared</span>}
           {s.skipped > 0 && <span className="badge grey" style={{ marginLeft: 6 }}>{s.skipped} listing photo{s.skipped === 1 ? '' : 's'} could not be loaded</span>}
+          {s.usage?.calls > 0 && (
+            <span className="badge grey" style={{ marginLeft: 6 }}
+                  title={`${s.usage.input.toLocaleString()} tokens in, ${s.usage.output.toLocaleString()} out${s.closeLook ? ' - a second, closer look was needed' : ''}`}>
+              AI: {s.usage.calls} call{s.usage.calls === 1 ? '' : 's'} · {(s.usage.input + s.usage.output).toLocaleString()} tokens
+            </span>
+          )}
         </div>
         {strong.length >= 2 && (
           <div className="flex gap8 mb8" style={{ flexWrap: 'wrap' }}>
