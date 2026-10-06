@@ -125,6 +125,13 @@ export function migrateSchema(db) {
   addColumn(db, 'sku_meta', 'variant_supply_link', "TEXT DEFAULT ''");
   addColumn(db, 'sku_meta', 'variant_image_url', "TEXT DEFAULT ''");
 
+  // A photo that held several customers' products split into one arrival per
+  // product (see services/packing.js splitParcel).
+  addColumn(db, 'inbound_parcels', 'parent_id', 'INTEGER');
+  addColumn(db, 'inbound_parcels', 'source_box', 'TEXT');
+  addColumn(db, 'inbound_parcels', 'original_attachment_id', 'TEXT');
+  addColumn(db, 'inbound_parcels', 'original_quantity', 'INTEGER');
+
   // What each shop is called over in Airtable.
   addColumn(db, 'etsy_accounts', 'airtable_name', "TEXT DEFAULT ''");
 

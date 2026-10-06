@@ -1066,7 +1066,17 @@ CREATE TABLE IF NOT EXISTS inbound_parcels (
   matched_at     TEXT,
   packed_at      TEXT,
   suggestions    TEXT,                    -- JSON: what the last AI match run found
+  -- One photo can show products for several customers. Splitting it cuts each
+  -- product out into its own arrival (a child: parent_id, source_box = where it
+  -- sat in the photo, as fractions of its width/height) and takes that part out
+  -- of the parent's photo. The parent keeps the untouched photo and its piece
+  -- count in original_* so the split can be undone.
+  parent_id      INTEGER,
+  source_box     TEXT,
+  original_attachment_id TEXT,
+  original_quantity      INTEGER,
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_parcels_match ON inbound_parcels(match_channel, match_item_id);
+CREATE INDEX IF NOT EXISTS idx_parcels_parent ON inbound_parcels(parent_id);
 CREATE INDEX IF NOT EXISTS idx_parcels_received ON inbound_parcels(received_on);

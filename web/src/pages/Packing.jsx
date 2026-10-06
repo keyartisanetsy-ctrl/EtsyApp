@@ -4,6 +4,8 @@ import Page from '../components/Page.jsx';
 import {
   Spinner, Empty, Stat, Thumb, Modal, Checkbox, useAsync, useToast, useErrorToast,
 } from '../components/ui.jsx';
+import SplitPhoto from '../components/SplitPhoto.jsx';
+import { normalizePhoto } from '../lib/photo.js';
 
 const FILTER_KEY = 'packing.filters';
 
@@ -65,7 +67,7 @@ function AddParcel({ warehouse, onWarehouse, onAdded }) {
     setBusy(true);
     try {
       const form = new FormData();
-      if (file) form.append('photo', file);
+      if (file) form.append('photo', await normalizePhoto(file));
       form.append('text', text);
       form.append('warehouse', warehouse);
       form.append('receivedOn', localDay(new Date()));
@@ -82,6 +84,7 @@ function AddParcel({ warehouse, onWarehouse, onAdded }) {
       <div className="card-sub">
         Paste the photo from WeChat (Ctrl+V), then the line under it - carrier, last 4 digits and piece count, like 中通 3324 1件.
         Adding an arrival only saves it; the AI looks for its order when you press Find match.
+        One photo with products for several customers? Use ✂ Split on its row to cut each product out.
       </div>
       <div className="flex" style={{ alignItems: 'flex-start', flexWrap: 'wrap', gap: 14 }}>
         <label
@@ -189,8 +192,9 @@ function AssignPicker({ parcel, range, onClose, onAssign }) {
 
 // ----------------------------------------------------------------- arrivals
 
-function Suggestions({ parcel, onAssign, busy }) {
+function Suggestions({ parcel, onAssign, onSplit, busy }) {
   const s = parcel.suggestions;
+  const strong = s.items.filter((i) => i.score >= 0.6);
   return (
     <div className="flex" style={{ alignItems: 'flex-start', gap: 16, flexWrap: 'wrap', padding: '6px 4px' }}>
       <a href={parcel.photoUrl ? withBase(parcel.photoUrl) : undefined} target="_blank" rel="noreferrer">
@@ -204,6 +208,13 @@ function Suggestions({ parcel, onAssign, busy }) {
           {s.truncated && <span className="badge grey" style={{ marginLeft: 6 }}>only the oldest {s.considered} compared</span>}
           {s.skipped > 0 && <span className="badge grey" style={{ marginLeft: 6 }}>{s.skipped} listing photo{s.skipped === 1 ? '' : 's'} could not be loaded</span>}
         </div>
+        {strong.length >= 2 && (
+          <div className="flex gap8 mb8" style={{ flexWrap: 'wrap' }}>
+            <span className="badge amber">{strong.length} of the products look like they are in this photo</span>
+            <button className="btn xs primary" disabled={busy} onClick={onSplit}>✂ Split photo</button>
+            <span className="small muted">so each customer's product gets its own photo</span>
+          </div>
+        )}
         <div className="flex col" style={{ gap: 8 }}>
           {s.items.map((it) => (
             <div key={it.imageUrl} className="card" style={{ padding: 10, margin: 0 }}>
@@ -233,7 +244,7 @@ function Suggestions({ parcel, onAssign, busy }) {
   );
 }
 
-function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, onDelete, onPicker }) {
+function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit }) {
   const [open, setOpen] = useState(false);
   const s = parcel.suggestions;
   const top = s?.items?.[0];
@@ -242,10 +253,16 @@ function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, 
 
   return (
     <>
-      <tr>
-        <td>
-          <div className="mono"><strong>{parcel.label}</strong></div>
-          <div className="small muted">{parcel.receivedOn}{parcel.note ? ` · ${parcel.note}` : ''}</div>
+      <tr style={parcel.status === 'split' ? { opacity: 0.65 } : undefined}>
+        <td style={parcel.parentId ? { paddingLeft: 26 } : undefined}>
+          <div className="mono">
+            {parcel.parentId && <span className="muted" title="Cut out of a photo that showed several products">↳ </span>}
+            <strong>{parcel.label}</strong>
+          </div>
+          <div className="small muted">
+            {parcel.receivedOn}{parcel.note ? ` · ${parcel.note}` : ''}
+            {parcel.children > 0 && parcel.status !== 'split' ? ` · ${parcel.children} split off` : ''}
+          </div>
         </td>
         <td>
           {parcel.code
@@ -257,9 +274,15 @@ function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, 
             <a href={parcel.photoUrl ? withBase(parcel.photoUrl) : undefined} target="_blank" rel="noreferrer"><Thumb src={parcel.photoUrl} size="lg" /></a>
             {m?.item?.imageUrl && <Thumb src={m.item.imageUrl} size="lg" alt="Listing" />}
           </div>
+          {parcel.originalPhotoUrl && (
+            <a className="small" href={withBase(parcel.originalPhotoUrl)} target="_blank" rel="noreferrer" title="The photo as the warehouse sent it">original ↗</a>
+          )}
         </td>
         <td>{parcel.warehouse || <span className="muted">—</span>}</td>
         <td>
+          {parcel.status === 'split' && (
+            <span className="small muted">All pieces were split into {parcel.children} arrival{parcel.children === 1 ? '' : 's'} below</span>
+          )}
           {parcel.status === 'packed' && <span className="badge green">Packed</span>}
           {m && (
             <div className="small" style={{ marginTop: parcel.status === 'packed' ? 4 : 0 }}>
@@ -275,15 +298,28 @@ function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, 
               <span className={`badge ${scoreKind(top.score)}`}>{Math.round(top.score * 100)}%</span> {top.title.slice(0, 40)} {open ? '▴' : '▾'}
             </button>
           )}
-          {!m && s && !top && <span className="small muted">No likely match in range</span>}
-          {!m && !s && <span className="small muted">Not matched yet</span>}
+          {!m && s && !top && parcel.status !== 'split' && <span className="small muted">No likely match in range</span>}
+          {!m && !s && parcel.status !== 'split' && <span className="small muted">Not matched yet</span>}
         </td>
         <td>
           <div className="flex gap4" style={{ flexWrap: 'wrap' }}>
-            {!m && <button className="btn xs primary" disabled={busy || !parcel.photoUrl} onClick={() => onMatch(parcel.id)}
-                            title={parcel.photoUrl ? 'Compare the photo with the unshipped orders in the date range' : 'Add a photo first'}>{busy ? <Spinner /> : s ? 'Re-match' : 'Find match'}</button>}
-            {!m && <button className="btn xs" disabled={busy} onClick={() => onPicker(parcel)}>Assign…</button>}
-            {m && <button className="btn xs" disabled={busy} onClick={() => onUnmatch(parcel.id)}>Unmatch</button>}
+            {parcel.status === 'split' ? (
+              <button className="btn xs" disabled={busy} onClick={() => onUnsplit(parcel)} title="Put the original photo back and remove the arrivals cut out of it">Restore original</button>
+            ) : (
+              <>
+                {!m && <button className="btn xs primary" disabled={busy || !parcel.photoUrl} onClick={() => onMatch(parcel.id)}
+                                title={parcel.photoUrl ? 'Compare the photo with the unshipped orders in the date range' : 'Add a photo first'}>{busy ? <Spinner /> : s ? 'Re-match' : 'Find match'}</button>}
+                {!m && <button className="btn xs" disabled={busy} onClick={() => onPicker(parcel)}>Assign…</button>}
+                {!m && parcel.photoUrl && (
+                  <button className="btn xs" disabled={busy} onClick={() => onSplit(parcel)}
+                          title="This photo shows products for more than one customer - cut each one out into its own arrival">✂ Split</button>
+                )}
+                {m && <button className="btn xs" disabled={busy} onClick={() => onUnmatch(parcel.id)}>Unmatch</button>}
+                {(parcel.canRestore || parcel.parentId) && (
+                  <button className="btn xs ghost" disabled={busy} onClick={() => onUnsplit(parcel)} title="Put the original photo back and remove the arrivals cut out of it">Undo split</button>
+                )}
+              </>
+            )}
             <button className="btn xs ghost" onClick={() => onEdit(parcel)}>Edit</button>
             <button className="btn xs danger" disabled={busy} onClick={() => onDelete(parcel)}>Delete</button>
           </div>
@@ -291,7 +327,7 @@ function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, 
       </tr>
       {open && !m && s && (
         <tr><td colSpan={6} style={{ background: 'var(--surface-2)' }}>
-          <Suggestions parcel={parcel} busy={busy} onAssign={(t) => onAssign(parcel.id, t)} />
+          <Suggestions parcel={parcel} busy={busy} onAssign={(t) => onAssign(parcel.id, t)} onSplit={() => onSplit(parcel)} />
         </td></tr>
       )}
     </>
@@ -355,6 +391,7 @@ export default function Packing() {
   const [progress, setProgress] = useState(null);
   const [editing, setEditing] = useState(null);
   const [picking, setPicking] = useState(null);
+  const [splitting, setSplitting] = useState(null);
   const cancelRef = useRef(false);
 
   const channels = useMemo(() => [filters.etsy && 'etsy', filters.shopify && 'shopify'].filter(Boolean), [filters.etsy, filters.shopify]);
@@ -430,6 +467,16 @@ export default function Packing() {
     flag(parcel.id, true);
     try { await api.del(`/packing/parcels/${parcel.id}`); refresh(); }
     catch (err) { showError(err, 'Could not delete'); } finally { flag(parcel.id, false); }
+  };
+
+  const unsplit = async (parcel) => {
+    if (!window.confirm('Put the original photo back? The arrivals cut out of it are removed, and any order they were matched to is released.')) return;
+    flag(parcel.id, true);
+    try {
+      await api.post(`/packing/parcels/${parcel.id}/unsplit`, {});
+      toast({ kind: 'ok', title: 'Original photo restored' });
+      refresh();
+    } catch (err) { showError(err, 'Could not restore that photo'); } finally { flag(parcel.id, false); }
   };
 
   const pack = async (order, packed) => {
@@ -520,7 +567,8 @@ export default function Packing() {
                   {parcels.data.rows.map((p) => (
                     <ParcelRow key={p.id} parcel={p} range={range} busy={!!working[p.id]}
                                onMatch={matchOne} onAssign={confirm} onUnmatch={unmatch}
-                               onEdit={setEditing} onDelete={remove} onPicker={setPicking} />
+                               onEdit={setEditing} onDelete={remove} onPicker={setPicking}
+                               onSplit={setSplitting} onUnsplit={unsplit} />
                   ))}
                 </tbody>
               </table>
@@ -549,6 +597,7 @@ export default function Packing() {
       )}
 
       {editing && <EditParcel parcel={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} />}
+      {splitting && <SplitPhoto parcel={splitting} onClose={() => setSplitting(null)} onDone={() => { setSplitting(null); refresh(); }} />}
       {picking && (
         <AssignPicker parcel={picking} range={range} onClose={() => setPicking(null)}
                       onAssign={async (t) => { const id = picking.id; setPicking(null); await confirm(id, { ...t, source: 'manual' }); }} />

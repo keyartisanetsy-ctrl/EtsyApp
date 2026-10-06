@@ -59,6 +59,36 @@ router.post('/parcels/:id/unmatch', asyncRoute(async (req, res) => {
   res.json(packing.unmatchParcel(req.params.id));
 }));
 
+// ------------------------------------------------- one photo, several customers
+
+/** Ask the AI where each product sits in the photo. Boxes only - nothing is cut or saved. */
+router.post('/parcels/:id/detect', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(await packing.detectRegions(req.params.id, { provider: b.provider, model: b.model }));
+}));
+
+/**
+ * Cut the photo into one arrival per box. The browser sends the boxes, one
+ * cropped photo per box (`crops`, same order) and what is left of the photo
+ * (`remainder`) - it is the browser that does the cutting.
+ */
+router.post('/parcels/:id/split', upload.fields([{ name: 'crops', maxCount: 12 }, { name: 'remainder', maxCount: 1 }]),
+  asyncRoute(async (req, res) => {
+    let regions;
+    try { regions = JSON.parse(req.body?.regions ?? '[]'); } catch { throw badRequest('The boxes could not be read.'); }
+    res.status(201).json(packing.splitParcel(req.params.id, {
+      regions,
+      crops: req.files?.crops ?? [],
+      remainder: req.files?.remainder?.[0] ?? null,
+      done: /^(1|true|yes)$/i.test(String(req.body?.done ?? '')),
+    }));
+  }));
+
+/** Put a split photo back together as it arrived. */
+router.post('/parcels/:id/unsplit', asyncRoute(async (req, res) => {
+  res.json(packing.unsplitParcel(req.params.id));
+}));
+
 // ------------------------------------------------------ orders & the queue
 
 router.get('/queue', asyncRoute(async (req, res) => {
