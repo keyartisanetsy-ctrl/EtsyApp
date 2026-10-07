@@ -1,5 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { Thumb } from './ui.jsx';
 
 /**
  * An order's code (26-0710-01) - the same one the packing desk, the supplier
@@ -30,5 +31,30 @@ export function ArrivalChip({ arrival }) {
         {arrival.packed ? '📦 packed' : `📦 ${arrival.received}${arrival.needed ? `/${arrival.needed}` : ''} here`}
       </span>
     </Link>
+  );
+}
+
+/**
+ * The parcels the warehouse delivered for an order, as the packing list shows them: the
+ * photo, the carrier line (中通 3324) and the warehouse (仓库) it came through.
+ */
+export function ArrivalParcels({ arrival, max = 3 }) {
+  if (!arrival?.parcels?.length) return null;
+  const shown = arrival.parcels.slice(0, max);
+  return (
+    <div className="arrival-parcels" style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 3 }}>
+      {shown.map((p) => (
+        <Link key={p.id} to="/packing" style={{ textDecoration: 'none', color: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}
+              title={`Warehouse arrival ${p.label || ''}${p.warehouse ? ` · ${p.warehouse}` : ''}${p.code ? ` · ${p.code}` : ''} - open the packing list`}>
+          <Thumb src={p.photoUrl} alt="Warehouse photo" fallback="📦" />
+          <span className="small">
+            <span className="mono">{p.label || 'parcel'}</span>
+            {p.quantity > 1 ? <span className="muted"> ×{p.quantity}</span> : null}
+            {p.warehouse ? <span className="muted"> · {p.warehouse}</span> : null}
+          </span>
+        </Link>
+      ))}
+      {arrival.parcels.length > max && <span className="small muted">+{arrival.parcels.length - max} more</span>}
+    </div>
   );
 }

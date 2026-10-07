@@ -10,14 +10,19 @@ export function arrivalsFor(channel, orderIds = []) {
   const map = new Map();
   if (!orderIds.length) return map;
   const rows = getDb().prepare(`
-    SELECT id, carrier, last4, quantity, match_order_id AS orderId, packed_at
+    SELECT id, carrier, last4, quantity, match_order_id AS orderId, packed_at, attachment_id, warehouse, match_code
     FROM inbound_parcels
     WHERE match_channel = ? AND match_order_id IN (${orderIds.map(() => '?').join(',')})
     ORDER BY id`).all(channel, ...orderIds.map(String));
   for (const r of rows) {
     const entry = map.get(r.orderId) ?? { received: 0, parcels: [], packed: true };
     entry.received += r.quantity || 1;
-    entry.parcels.push({ id: r.id, label: [r.carrier, r.last4].filter(Boolean).join(' ') });
+    entry.parcels.push({
+      id: r.id, label: [r.carrier, r.last4].filter(Boolean).join(' '),
+      // what the packing list shows for it, so the order row can show the same
+      photoUrl: r.attachment_id ? `/api/ai/attachments/${r.attachment_id}` : null, warehouse: r.warehouse || '', code: r.match_code || null,
+      quantity: r.quantity || 1, packed: !!r.packed_at,
+    });
     if (!r.packed_at) entry.packed = false;
     map.set(r.orderId, entry);
   }
