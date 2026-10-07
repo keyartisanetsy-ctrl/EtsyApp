@@ -39,6 +39,7 @@ function UnitRow({ unit, ticked, onTick, open, onOpen }) {
           {unit.products.length > shown.length && <span className="small muted">+{unit.products.length - shown.length} more</span>}
         </div>
         <div style={{ minWidth: 190 }}>
+          {unit.type && <span className="badge grey" style={{ marginRight: 4 }} title={`Product type: ${unit.type.label} - its SKUs start with ${unit.type.prefix}`} data-testid="unit-type">{unit.type.label} · {unit.type.prefix}</span>}
           <span className={`badge ${kind}`} title={kindHelp}>{kindText}</span>
           {unit.score != null && <span className="badge grey" style={{ marginLeft: 4 }} title="How alike the weakest pair is">{Math.round(unit.score * 100)}%</span>}
           <div className="mono small" style={{ marginTop: 4 }}>{skuRange(unit)}</div>
@@ -72,6 +73,65 @@ function UnitRow({ unit, ticked, onTick, open, onOpen }) {
   );
 }
 
+
+/** The product types and the letters each one's SKUs start with - edited here, kept in the settings. */
+function TypesEditor({ onClose, onSaved }) {
+  const toast = useToast();
+  const showError = useErrorToast();
+  const [rows, setRows] = useState(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { api.get('/catalog/auto-sku/types').then((r) => setRows(r.types)).catch((err) => { showError(err, 'Could not load the product types'); onClose(); }); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const edit = (i, patch) => setRows((r) => r.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+  const move = (i, d) => setRows((r) => { const n = [...r]; const j = i + d; if (j < 0 || j >= n.length) return r; [n[i], n[j]] = [n[j], n[i]]; return n; });
+  const save = async () => {
+    setBusy(true);
+    try { await api.put('/catalog/auto-sku/types', { types: rows }); toast({ kind: 'ok', title: 'Product types saved' }); onSaved(); }
+    catch (err) { showError(err, 'Could not save'); } finally { setBusy(false); }
+  };
+  const reset = async () => {
+    if (!window.confirm('Go back to the standard list of product types?')) return;
+    setBusy(true);
+    try { await api.del('/catalog/auto-sku/types'); toast({ kind: 'ok', title: 'Standard product types restored' }); onSaved(); }
+    catch (err) { showError(err, 'Could not reset'); } finally { setBusy(false); }
+  };
+  return (
+    <Modal open lg onClose={onClose} title="Product types and SKU letters"
+           footer={(
+             <>
+               <button className="btn ghost" disabled={busy} onClick={reset}>Standard list</button>
+               <button className="btn" onClick={onClose}>Cancel</button>
+               <button className="btn primary" disabled={busy || !rows} onClick={save}>{busy ? <Spinner /> : 'Save'}</button>
+             </>
+           )}>
+      <div className="small muted mb8">
+        A product gets the letters of the first type (top to bottom) whose words appear in its title - so keep the narrow ones above the wide ones
+        (a keycap <em>puller</em> is a tool, not a keycap). Words are separated by commas and match whole words, plural too; an entry between slashes, like /keycaps?\s+set/, is a pattern.
+        Products that fit no type use the one prefix you set on the previous screen.
+      </div>
+      {!rows ? <div className="empty"><Spinner /></div> : (
+        <table className="data">
+          <thead><tr><th style={{ width: 70 }} /><th>Type</th><th style={{ width: 90 }}>SKU starts</th><th>Title contains</th><th style={{ width: 40 }} /></tr></thead>
+          <tbody>
+            {rows.map((t, i) => (
+              <tr key={i}>
+                <td>
+                  <button className="btn xs ghost" disabled={i === 0} onClick={() => move(i, -1)} aria-label="Move up">↑</button>
+                  <button className="btn xs ghost" disabled={i === rows.length - 1} onClick={() => move(i, 1)} aria-label="Move down">↓</button>
+                </td>
+                <td><input className="input sm" value={t.label} aria-label={`Type ${i + 1}`} onChange={(e) => edit(i, { label: e.target.value })} /></td>
+                <td><input className="input sm mono" value={t.prefix} aria-label={`Letters of ${t.label}`} onChange={(e) => edit(i, { prefix: e.target.value.toUpperCase() })} /></td>
+                <td><input className="input sm" style={{ width: '100%' }} value={t.words} aria-label={`Words of ${t.label}`} onChange={(e) => edit(i, { words: e.target.value })} /></td>
+                <td><button className="btn xs ghost danger" onClick={() => setRows((r) => r.filter((_, j) => j !== i))} aria-label={`Remove ${t.label}`}>×</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {rows && <button className="btn xs mt8" onClick={() => setRows((r) => [...r, { key: '', label: '', prefix: '', words: '' }])}>+ Add a type</button>}
+    </Modal>
+  );
+}
+
 /**
  * Automatic SKUs for every variant that has none. The server works out the plan -
  * who gets which SKU - and nothing is written until the ticked products are
@@ -80,7 +140,9 @@ function UnitRow({ unit, ticked, onTick, open, onOpen }) {
 export default function AutoSkuModal({ shops, selectedProducts = [], matchSets = null, onClose, onDone }) {
   const toast = useToast();
   const showError = useErrorToast();
-  const [opts, setOpts] = useState({ scope: 'shown', prefix: '', numbering: 'auto', includeInactive: false, linkMatches: true });
+  const [opts, setOpts] = useState({ scope: 'shown', prefix: '', prefixMode: 'type', numbering: 'auto', includeInactive: false, linkMatches: true });
+  const [editTypes, setEditTypes] = useState(false);
+  const [typeFilter, setTypeFilter] = useState('all');
   const [prefixDraft, setPrefixDraft] = useState('');
   const [plan, setPlan] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -95,11 +157,11 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
     setLoading(true);
     try {
       const body = matchSets ? {
-        matchSets, prefix: o.prefix || undefined, numbering: o.numbering, linkMatches: true,
+        matchSets, prefix: o.prefix || undefined, prefixMode: o.prefixMode, numbering: o.numbering, linkMatches: true,
       } : {
         shops: shops && shops.length ? shops : undefined,
         productKeys: o.scope === 'selected' ? selectedProducts : undefined,
-        prefix: o.prefix || undefined, numbering: o.numbering, includeInactive: o.includeInactive, linkMatches: o.linkMatches,
+        prefix: o.prefix || undefined, prefixMode: o.prefixMode, numbering: o.numbering, includeInactive: o.includeInactive, linkMatches: o.linkMatches,
       };
       const p = await api.post('/catalog/auto-sku/plan', body);
       setPlan(p);
@@ -113,7 +175,7 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
 
   const set = (patch) => setOpts((o) => ({ ...o, ...patch }));
   const units = plan?.units ?? [];
-  const visible = useMemo(() => units.filter((u) => kindFilter === 'all' || u.kind === kindFilter), [units, kindFilter]);
+  const visible = useMemo(() => units.filter((u) => (kindFilter === 'all' || u.kind === kindFilter) && (typeFilter === 'all' || (u.type?.label ?? 'Other') === typeFilter)), [units, kindFilter, typeFilter]);
   const pageUnits = visible.slice(page * PAGE, page * PAGE + PAGE);
   const chosen = units.filter((u) => ticked.has(u.id));
   const chosenSkus = chosen.reduce((n, u) => n + u.edits.length, 0);
@@ -181,15 +243,22 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
             <option value="selected" disabled={!selectedProducts.length}>Only the {selectedProducts.length} selected</option>
           </select>
         </label>}
-        <label className="small">SKU starts with
+        <label className="small">SKU letters
+          <select className="select sm" style={{ display: 'block' }} value={opts.prefixMode} disabled={busy} aria-label="SKU letters" onChange={(e) => set({ prefixMode: e.target.value })}>
+            <option value="type">by product type (KC, KCS, BAG, DM …)</option>
+            <option value="single">the same letters for everything</option>
+          </select>
+        </label>
+        <label className="small">{opts.prefixMode === 'type' ? 'Other products start with' : 'SKU starts with'}
           <input className="input sm mono" style={{ display: 'block', width: 90 }} value={prefixDraft} disabled={busy} aria-label="SKU prefix"
                  onChange={(e) => setPrefixDraft(e.target.value.toUpperCase())}
                  onBlur={() => { if (prefixDraft && prefixDraft !== (opts.prefix || plan?.prefix)) set({ prefix: prefixDraft }); }}
                  onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
         </label>
+        {opts.prefixMode === 'type' && <button className="btn xs" disabled={busy} onClick={() => setEditTypes(true)} title="Change which words make a product a keycap, a keycap set, a bag … and the letters each one gets">Product types…</button>}
         <label className="small">Variants numbered
           <select className="select sm" style={{ display: 'block' }} value={opts.numbering} disabled={busy} onChange={(e) => set({ numbering: e.target.value })}>
-            <option value="auto">like the catalogue{plan ? ` (${plan.prefix}001${plan.style.sep}${'1'.padStart(plan.style.width, '0')})` : ''}</option>
+            <option value="auto">like the catalogue{plan ? ` (${plan.style.sep}${'1'.padStart(plan.style.width, '0')})` : ''}</option>
             <option value="1">-1, -2, -3</option>
             <option value="01">-01, -02, -03</option>
           </select>
@@ -217,8 +286,8 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
           <Banner kind="info">
             <strong>{plan.counts.variants.toLocaleString()} SKUs</strong> for {plan.counts.products.toLocaleString()} products:{' '}
             {matchSets ? `${plan.counts.matches} confirmed match${plan.counts.matches === 1 ? '' : 'es'}.` : `${plan.counts.single} single, ${plan.counts.matches} same-product match${plan.counts.matches === 1 ? '' : 'es'}, ${plan.counts.groups} linked group${plan.counts.groups === 1 ? '' : 's'}.`}
-            {' '}Next free number: <span className="mono">{plan.prefix}{String(plan.nextNumber).padStart(3, '0')}</span>
-            {' '}({plan.prefixSource === 'catalogue' ? 'prefix taken from your existing SKUs' : plan.prefixSource === 'typed' ? 'prefix typed by you' : 'prefix from the settings'}).
+            {' '}{plan.prefixMode === 'type' ? <>By type: {Object.entries(plan.counts.byType ?? {}).map(([k, n]) => `${k} ${n}`).join(' · ')}. Products of no type start with <span className="mono">{plan.prefix}</span> ({plan.prefixSource === 'catalogue' ? 'taken from your existing SKUs' : plan.prefixSource === 'typed' ? 'typed by you' : 'from the settings'}), next <span className="mono">{plan.prefix}{String(plan.nextNumber).padStart(3, '0')}</span>.</>
+              : <>Next free number: <span className="mono">{plan.prefix}{String(plan.nextNumber).padStart(3, '0')}</span> ({plan.prefixSource === 'catalogue' ? 'prefix taken from your existing SKUs' : plan.prefixSource === 'typed' ? 'prefix typed by you' : 'prefix from the settings'}).</>}
             {' '}{plan.counts.ticked} of {plan.counts.units} ticked.
           </Banner>
           <div className="flex gap8 mb8" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
@@ -228,6 +297,12 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
               <option value="group">Linked products ({plan.counts.groups})</option>
               <option value="product">Single products ({plan.counts.single})</option>
             </select>
+            {plan.prefixMode === 'type' && (
+              <select className="select sm" value={typeFilter} onChange={(e) => { setTypeFilter(e.target.value); setPage(0); }} aria-label="Product type">
+                <option value="all">Every type</option>
+                {Object.entries(plan.counts.byType ?? {}).map(([k, n]) => <option key={k} value={k}>{k} ({n})</option>)}
+              </select>
+            )}
             <button className="btn xs ghost" disabled={busy} onClick={() => tickMany(visible, true)}>Tick all shown</button>
             <button className="btn xs ghost" disabled={busy} onClick={() => tickMany(visible, false)}>Untick all shown</button>
             <div style={{ flex: 1 }} />
@@ -243,6 +318,8 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
           </div>
         </>
       )}
+
+      {editTypes && <TypesEditor onClose={() => setEditTypes(false)} onSaved={() => { setEditTypes(false); load(opts); }} />}
 
       {plan && plan.skipped.length > 0 && (
         <details className="mt16">
