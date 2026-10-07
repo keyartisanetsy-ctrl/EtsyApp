@@ -9,6 +9,7 @@ import {
   useAsync, useDebounced, useToast, useErrorToast, fmtMoney, STATE_BADGE, DecimalInput,
 } from '../components/ui.jsx';
 import StockCheckCell from '../components/StockCheck.jsx';
+import { RealStockCell, useRealStock } from '../components/RealStock.jsx';
 
 const LIMIT = 100;
 
@@ -51,6 +52,7 @@ export default function Skus() {
   const { data: dups, reload: reloadDups } = useAsync(() => api.get('/skus/duplicates'), []);
 
   const rows = data?.rows ?? [];
+  const { real, reload: reloadReal } = useRealStock(rows.map((r) => r.sku));
   const pct = data?.discountPercent ?? 30;
 
   const setFilter = (key, value, setter) => {
@@ -288,6 +290,7 @@ export default function Skus() {
               <SortTh label="Price" field="price" sort={sort} dir={dir} onSort={onSort} className="right" />
               <th className="right">−{pct}%</th>
               <SortTh label="Qty" field="quantity" sort={sort} dir={dir} onSort={onSort} className="right" />
+              <th className="right" title="What is really on the shelf, per SKU - Qty is what Etsy shows">Real</th>
               <th>Supply link</th>
               <th>Stock</th>
               <SortTh label="State" field="state" sort={sort} dir={dir} onSort={onSort} />
@@ -333,6 +336,7 @@ export default function Skus() {
                     <input className="input sm right" style={{ width: 62 }} type="number" value={edit.quantity ?? r.quantity ?? ''}
                            onChange={(e) => stage(r.productId, 'quantity', e.target.value)} />
                   </td>
+                  <td className="num"><RealStockCell sku={sku} counted={real[sku]?.qty} onSaved={reloadReal} /></td>
                   <td>
                     <div className="flex gap4">
                       <input className="input sm" style={{ width: 176 }} placeholder="main supplier URL (private)"

@@ -6,6 +6,7 @@ import {
   useAsync, useToast, useErrorToast, fmtMoney, fmtDateTime, DecimalInput,
 } from '../components/ui.jsx';
 import { SendToAirtable } from './Airtable.jsx';
+import { RealStockCell, useRealStock } from '../components/RealStock.jsx';
 import StockCheckCell from '../components/StockCheck.jsx';
 import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
 import { OrderCode, ArrivalChip } from '../components/OrderCode.jsx';
@@ -226,6 +227,7 @@ function ProductsPanel() {
 
   const { data, loading, reload } = useAsync(() => api.get('/shopify/products', { search }), [search]);
   const rows = data?.rows ?? [];
+  const { real, reload: reloadReal } = useRealStock(rows.map((r) => r.sku));
 
   const sync = async () => {
     setSyncing(true);
@@ -286,7 +288,8 @@ function ProductsPanel() {
               <th className="num">Price</th>
               <th className="num">Compare-at</th>
               <th className="num">Cost</th>
-              <th className="num">Qty</th>
+              <th className="num" title="The quantity the store shows - type the number you want it to show">Qty (shop)</th>
+              <th className="num" title="What is really on the shelf, per SKU - the same count for this SKU in every shop">Real</th>
               <th>Supply link</th>
               <th>Stock <Help text="Live per-variant stock and price from OneBound. A variant with 0 or unreported stock - or a nonsense repeating-digit price like 333/9999/99999, a common sold-out placeholder - is flagged as out of stock. Only checked when you press ↻, since each check is a paid call." /></th>
               <th className="col-tight" />
@@ -317,7 +320,9 @@ function ProductsPanel() {
                               onChange={(v) => stage(r.variantId, 'compareAtPrice', v)} /></td>
                   <td className="num"><DecimalInput className="input sm right" style={{ width: 76 }} value={cost ?? ''}
                               onChange={(v) => stage(r.variantId, 'cost', v)} /></td>
-                  <td className="num small dim">{r.inventoryQuantity ?? '—'}</td>
+                  <td className="num"><input className="input sm right mono" type="number" min="0" style={{ width: 70 }} value={edit.quantity ?? r.inventoryQuantity ?? ''} placeholder="–"
+                              aria-label={`Quantity shown by the store for ${r.productTitle} ${r.variantTitle}`} onChange={(e) => stage(r.variantId, 'quantity', e.target.value)} /></td>
+                  <td className="num"><RealStockCell sku={r.sku} counted={real[r.sku]?.qty} onSaved={reloadReal} /></td>
                   <td>
                     <input className="input sm" style={{ width: 180 }} placeholder="supplier link"
                            value={supplyLink} onChange={(e) => stageSupply(r.sku, 'supplyLink', e.target.value)} disabled={!r.sku} />

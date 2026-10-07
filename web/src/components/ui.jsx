@@ -66,6 +66,7 @@ export function Banner({ kind = 'info', children, onClose }) {
  */
 export function StockBadge({ stock, quantity }) {
   if (!stock) return null;
+  if (stock.restocked) return <span className="badge grey" title="The order was cancelled - its pieces were put back on the shelf">cancelled · {stock.taken} put back</span>;
   if (stock.taken != null && stock.ordered != null) {
     if (stock.short > 0 && stock.taken === 0) return <span className="badge red" title={`Nothing was on the shelf - order ${stock.short} from the supplier`}>no stock · order {stock.short}</span>;
     if (stock.short > 0) return <span className="badge amber" title={`${stock.taken} came off the shelf, ${stock.short} are short - order them from the supplier`}>{stock.taken} from stock · order {stock.short}</span>;
