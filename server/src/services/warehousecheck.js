@@ -67,10 +67,12 @@ export async function cachedProductImageId(url) {
   const existing = db.prepare("SELECT id FROM attachments WHERE purpose = 'product-image-cache' AND filename = ?").get(url);
   if (existing) return existing.id;
 
+  // A photo host that stalls must not stall a whole match: give up after 12 seconds.
+  const get = (u) => outboundFetch(u, { headers: { Accept: 'image/*' }, signal: AbortSignal.timeout(12_000) });
   const small = smallRendition(url);
-  let res = await outboundFetch(small, { headers: { Accept: 'image/*' } });
+  let res = await get(small);
   // The smaller copy is a courtesy: if the CDN will not serve it, take the original.
-  if (!res.ok && small !== url) res = await outboundFetch(url, { headers: { Accept: 'image/*' } });
+  if (!res.ok && small !== url) res = await get(url);
   if (!res.ok) throw badRequest(`Could not download the product photo (HTTP ${res.status}).`);
   const buf = Buffer.from(await res.arrayBuffer());
   const mime = res.headers.get('content-type') || 'image/jpeg';

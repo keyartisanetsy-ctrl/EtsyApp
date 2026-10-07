@@ -13,6 +13,8 @@ import { feeFor } from './offsiteads.js';
 import { reportingCurrency } from './reporting.js';
 import { resolveForTransaction } from './productimages.js';
 import { convert } from './fx.js';
+import { codesFor } from './ordercode.js';
+import { arrivalsFor, arrivalFor } from './arrivals.js';
 
 const asMoney = (amount, divisor, currency) =>
   amount == null ? null : { value: amount / (divisor || 100), currency };
@@ -128,13 +130,18 @@ export function listOrders({
   const supplyPreview = loadSupplyPreview(db, activeShopId(), rows.map((r) => r.receipt_id));
   const ledgerSummaries = loadLedgerSummaries(db, activeShopId(), rows.map((r) => r.receipt_id));
   const orderCosts = loadOrderCosts(db, activeShopId(), rows.map((r) => r.receipt_id));
+  const codes = codesFor(rows.map((r) => r.receipt_id), activeShopId());
+  const arrivals = arrivalsFor('etsy', rows.map((r) => r.receipt_id));
 
   return {
     total, limit, offset,
     // The currency the shop reports in, so the list can put a converted figure
     // under a lira total without every row asking the server what it is.
     reportingCurrency: reportingCurrency(),
-    rows: rows.map((r) => orderSummary(r, supplyPreview.get(r.receipt_id), ledgerSummaries.get(r.receipt_id), orderCosts.get(r.receipt_id))),
+    rows: rows.map((r) => orderSummary(r, supplyPreview.get(r.receipt_id), ledgerSummaries.get(r.receipt_id), orderCosts.get(r.receipt_id), {
+      code: codes[r.receipt_id] ?? null,
+      arrival: arrivalFor(arrivals, r.receipt_id, supplyPreview.get(r.receipt_id)?.items),
+    })),
   };
 }
 
@@ -155,7 +162,7 @@ function loadSupplyPreview(db, shopId, receiptIds) {
   if (!receiptIds.length) return map;
   const holes = receiptIds.map(() => '?').join(',');
   const items = db.prepare(`
-    SELECT x.receipt_id, x.transaction_id, x.sku, x.warehouse_photo_id, x.image_url,
+    SELECT x.receipt_id, x.transaction_id, x.sku, x.quantity, x.warehouse_photo_id, x.image_url,
            x.listing_id, x.product_id, x.variations, m.variant_image_url,
            COALESCE(NULLIF(m.variant_supply_link,''), NULLIF(m.supply_link,'')) AS supply_link
     FROM receipt_transactions x
@@ -173,11 +180,15 @@ function loadSupplyPreview(db, shopId, receiptIds) {
   return map;
 }
 
-function orderSummary(r, preview, ledger, costs) {
+function orderSummary(r, preview, ledger, costs, extra = {}) {
   const linkItem = preview?.linkItem ?? preview?.firstItem ?? null;
   const photoItem = preview?.photoItem ?? preview?.firstItem ?? null;
   return {
     receiptId: r.receipt_id,
+    // The short code the packing sheet and Airtable carry for this order
+    // (26-0710-01), and what the warehouse has delivered against it so far.
+    code: extra.code ?? null,
+    arrival: extra.arrival ?? null,
     name: r.name,
     buyerEmail: r.buyer_email,
     country: r.country_iso,
@@ -350,7 +361,10 @@ export function getOrder(receiptId) {
   const costs = loadOrderCosts(db, activeShopId(), [receiptId]).get(receiptId);
   return {
     ...orderSummary({ ...r, item_count: items.length }, null,
-      ledger ? { netAmount: ledger.netAmount, currency: ledger.currency, lineCount: ledger.lines.length } : null, costs),
+      ledger ? { netAmount: ledger.netAmount, currency: ledger.currency, lineCount: ledger.lines.length } : null, costs, {
+        code: codesFor([receiptId], activeShopId())[receiptId] ?? null,
+        arrival: arrivalFor(arrivalsFor('etsy', [receiptId]), receiptId, items.map((i) => ({ quantity: i.quantity }))),
+      }),
     ledgerLines: ledger?.lines ?? [],
     address: {
       name: r.name,

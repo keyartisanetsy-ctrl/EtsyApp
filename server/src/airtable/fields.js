@@ -12,7 +12,7 @@ import { activeShopId, currentShop } from '../etsy/shop.js';
 import { activeShopifyShopId, currentShopifyShop } from '../shopify/shop.js';
 import { readSetting } from '../services/settings.js';
 import { rateOn, convert } from '../services/fx.js';
-import { codeFor, monthLabelTr, monthLabelEn } from '../services/ordercode.js';
+import { codeFor, shopifyCodeFor, monthLabelTr, monthLabelEn } from '../services/ordercode.js';
 import { imageForTransaction } from '../services/variantimages.js';
 import { resolveForTransaction, variantUrlForTransaction, listingImages } from '../services/productimages.js';
 import { feeFor as offsiteFeeFor } from '../services/offsiteads.js';
@@ -434,6 +434,9 @@ const SHOPIFY_ONLY_FIELDS = [
   { key: 'order.id', group: 'Order', label: 'Order ID (Shopify order number, #2385)',
     hint: 'Shopify’s own order number exactly as it shows it, e.g. #2385',
     get: ({ order }) => clean(order.order_name) || `#${numericIdFrom(order.receipt_id)}` },
+  { key: 'order.code', group: 'Order', label: 'Short order code (26-0709-01)',
+    hint: 'The same code the Orders list and the packing desk show: the order date and its position that day, shared with Etsy orders so no two orders of a day have the same one.',
+    get: ({ order }) => shopifyCodeFor(order.receipt_id, { shopId: order.shop_id ?? undefined }) },
   { key: 'order.id_numeric', group: 'Order', label: 'Order ID (numeric, no #)',
     hint: 'Just the digits, for a sheet that wants a plain number instead of "#2385"',
     get: ({ order }) => numericIdFrom(order.receipt_id) },

@@ -9,6 +9,7 @@ import {
 } from '../components/ui.jsx';
 import { SendToAirtable } from './Airtable.jsx';
 import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
+import { OrderCode, ArrivalChip } from '../components/OrderCode.jsx';
 import { SupplyCell, WarehouseCell, ProductImageCell } from '../components/OrderSupplyPreview.jsx';
 import MessagePreviewModal from '../components/MessagePreview.jsx';
 import MessageTemplatesModal from '../components/MessageTemplates.jsx';
@@ -304,8 +305,10 @@ export default function Orders() {
                   <td><StatusChips order={o} /></td>
                   <td>{o.isNew ? <span className="badge orange">new</span> : <span className="muted small">·</span>}</td>
                   <td>
-                    <div className="mono">#{o.receiptId}</div>
+                    {o.code && <div><OrderCode code={o.code} /></div>}
+                    <div className={o.code ? 'mono small muted' : 'mono'}>#{o.receiptId}</div>
                     <div className="small muted">{fmtDate(o.createdTs)}</div>
+                    {o.arrival && <div style={{ marginTop: 3 }}><ArrivalChip arrival={o.arrival} /></div>}
                   </td>
                   <td>
                     <div>
@@ -1010,7 +1013,7 @@ function OrderDetail({ id, onClose, onChanged }) {
   return (
     <Drawer
       open onClose={onClose} wide
-      title={order ? `Order #${order.receiptId}` : 'Order'}
+      title={order ? `Order #${order.receiptId}${order.code ? ` · ${order.code}` : ''}` : 'Order'}
       footer={order && (
         <>
           <Checkbox checked={order.isDone} onChange={(v) => setFlag({ done: v })} label="Done" />

@@ -1075,8 +1075,34 @@ CREATE TABLE IF NOT EXISTS inbound_parcels (
   source_box     TEXT,
   original_attachment_id TEXT,
   original_quantity      INTEGER,
+  -- What the browser read off the photo (OCR), and what the free matcher found
+  -- the last time it looked (JSON), so the page can show it without asking again.
+  ocr_text       TEXT,
+  quick          TEXT,
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_parcels_match ON inbound_parcels(match_channel, match_item_id);
 CREATE INDEX IF NOT EXISTS idx_parcels_parent ON inbound_parcels(parent_id);
 CREATE INDEX IF NOT EXISTS idx_parcels_received ON inbound_parcels(received_on);
+
+-- Shopify orders get the same short code Etsy orders carry (26-0710-01), drawn
+-- from the same per-day numbering, so one sheet can list both without two
+-- different orders ever sharing a code.
+CREATE TABLE IF NOT EXISTS shopify_order_codes (
+  shop_id    INTEGER,
+  order_id   TEXT NOT NULL,
+  code       TEXT NOT NULL,
+  day        TEXT NOT NULL,
+  seq        INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (shop_id, order_id)
+);
+CREATE INDEX IF NOT EXISTS idx_shopify_ordercodes_day ON shopify_order_codes(day, seq);
+
+-- A compact fingerprint of one stored picture (its colours), so the free
+-- matcher never has to decode the same listing photo twice.
+CREATE TABLE IF NOT EXISTS image_signatures (
+  attachment_id TEXT PRIMARY KEY,
+  signature     TEXT NOT NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);

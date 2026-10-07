@@ -8,6 +8,7 @@ import {
 import { SendToAirtable } from './Airtable.jsx';
 import StockCheckCell from '../components/StockCheck.jsx';
 import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
+import { OrderCode, ArrivalChip } from '../components/OrderCode.jsx';
 import { SupplyCell, WarehouseCell, ProductImageCell } from '../components/OrderSupplyPreview.jsx';
 
 // Shopify only auto-builds a tracking link (and shows one in the shipping
@@ -505,6 +506,8 @@ function OrdersPanel() {
                       Shop ads
                     </span>
                   )}
+                  {o.code && <div><OrderCode code={o.code} /></div>}
+                  {o.arrival && <div style={{ marginTop: 3 }}><ArrivalChip arrival={o.arrival} /></div>}
                 </td>
                 <td className="small">
                   {o.customerName || '—'}
@@ -1100,7 +1103,7 @@ function OrderDetail({ orderId, onClose, onChanged }) {
   };
 
   return (
-    <Drawer open onClose={onClose} wide title={data?.name ?? orderId}
+    <Drawer open onClose={onClose} wide title={data ? `${data.name}${data.code ? ` · ${data.code}` : ''}` : orderId}
       footer={data && (
         data.isLocallyCanceled ? (
           <button className="btn ghost" onClick={restoreOrder}>Restore this order</button>

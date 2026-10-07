@@ -19,6 +19,27 @@ function loadFilters() {
 }
 
 const scoreKind = (s) => (s >= 0.8 ? 'green' : s >= 0.55 ? 'amber' : 'grey');
+
+/** Whichever look for an order ran last - the AI's or the free matcher's. */
+const latestSuggestions = (p) => {
+  const ai = p.suggestions;
+  const free = p.quick;
+  if (!ai) return free;
+  if (!free) return ai;
+  return String(free.ranAt) > String(ai.ranAt) ? free : ai;
+};
+
+const SOURCE_BADGE = { ai: ['violet', 'AI'], quick: ['blue', 'Free'], manual: ['grey', 'Manual'] };
+function EvidenceChips({ items }) {
+  if (!items?.length) return null;
+  return (
+    <>
+      {items.map((e, i) => (
+        <span key={`${e.kind}${i}`} className={`badge ${e.strong ? 'green' : e.kind === 'warn' ? 'red' : e.kind === 'state' ? 'blue' : 'grey'}`}>{e.label}</span>
+      ))}
+    </>
+  );
+}
 const CHANNEL_BADGE = { etsy: 'orange', shopify: 'green' };
 
 function ChannelBadge({ channel }) {
@@ -32,11 +53,12 @@ function ChannelBadge({ channel }) {
  * "中通 3324 1件". Paste a screenshot straight from WeChat (Ctrl+V anywhere on
  * the page), drop a file on the box, or pick one.
  */
-function AddParcel({ warehouse, onWarehouse, onAdded }) {
+function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
   const showError = useErrorToast();
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
   const [text, setText] = useState('');
+  const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [over, setOver] = useState(false);
   const textRef = useRef(null);
@@ -71,9 +93,14 @@ function AddParcel({ warehouse, onWarehouse, onAdded }) {
       form.append('text', text);
       form.append('warehouse', warehouse);
       form.append('receivedOn', localDay(new Date()));
+      form.append('code', code.trim());
+      form.append('channels', range.channels.join(','));
+      form.append('from', range.from);
+      form.append('to', range.to);
       const parcel = await api.upload('/packing/parcels', form);
       setFile(null);
       setText('');
+      setCode('');
       onAdded(parcel);
     } catch (err) { showError(err, 'Could not add that parcel'); } finally { setBusy(false); }
   };
@@ -83,8 +110,9 @@ function AddParcel({ warehouse, onWarehouse, onAdded }) {
       <div className="card-head"><h3>New arrival</h3></div>
       <div className="card-sub">
         Paste the photo from WeChat (Ctrl+V), then the line under it - carrier, last 4 digits and piece count, like 中通 3324 1件.
-        Adding an arrival only saves it; the AI looks for its order when you press Find match.
-        One photo with products for several customers? Use ✂ Split on its row to cut each product out.
+        Know the order already? Type its code (like 26-0710-01) and the arrival goes straight onto that order.
+        Otherwise the free matcher looks for the order the moment you add it - tracking number, order state, text read off the photo and colours, no AI credits.
+        The AI only runs when you press Find match. One photo with products for several customers? Use ✂ Split on its row.
       </div>
       <div className="flex" style={{ alignItems: 'flex-start', flexWrap: 'wrap', gap: 14 }}>
         <label
@@ -105,6 +133,9 @@ function AddParcel({ warehouse, onWarehouse, onAdded }) {
         <div className="flex col" style={{ flex: 1, minWidth: 260, gap: 8 }}>
           <input ref={textRef} className="input" value={text} placeholder="中通 3324 1件"
                  onChange={(e) => setText(e.target.value)}
+                 onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
+          <input className="input mono" value={code} placeholder="Order code (optional) - 26-0710-01"
+                 onChange={(e) => setCode(e.target.value)}
                  onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
           <input className="input" value={warehouse} placeholder="Warehouse (仓库) - optional, remembered"
                  onChange={(e) => onWarehouse(e.target.value)}
@@ -192,8 +223,8 @@ function AssignPicker({ parcel, range, onClose, onAssign }) {
 
 // ----------------------------------------------------------------- arrivals
 
-function Suggestions({ parcel, onAssign, onSplit, busy }) {
-  const s = parcel.suggestions;
+function Suggestions({ parcel, s, onAssign, onSplit, onChoose, busy }) {
+  const free = s.engine === 'quick';
   const strong = s.items.filter((i) => i.score >= 0.6);
   return (
     <div className="flex" style={{ alignItems: 'flex-start', gap: 16, flexWrap: 'wrap', padding: '6px 4px' }}>
@@ -203,7 +234,15 @@ function Suggestions({ parcel, onAssign, onSplit, busy }) {
       </a>
       <div style={{ flex: 1, minWidth: 300 }}>
         <div className="small muted mb8">
-          {s.items.length ? `Best guesses among ${s.considered} product${s.considered === 1 ? '' : 's'} (${s.from} → ${s.to})` : 'Nothing in this range looks like it'}
+          {free && <span className="badge blue" style={{ marginRight: 6 }} title="No AI was used: tracking number, order state, text read off the photo and colours">Free match</span>}
+          {s.items.length ? `Best guesses among ${s.considered} ${free ? 'item' : 'product'}${s.considered === 1 ? '' : 's'} (${s.from} → ${s.to})` : 'Nothing in this range looks like it'}
+          {free && (
+            <>
+              <span className={`badge ${s.signals?.tracking ? 'green' : 'grey'}`} style={{ marginLeft: 6 }}>{s.signals?.tracking ? 'tracking matched' : 'no tracking match'}</span>
+              <span className={`badge ${s.signals?.text ? 'green' : 'grey'}`} style={{ marginLeft: 6 }}>{s.signals?.text ? 'text read' : parcel.hasText ? 'text had no usable words' : 'no text read'}</span>
+              <span className={`badge ${s.signals?.colours ? 'green' : 'grey'}`} style={{ marginLeft: 6 }}>{s.signals?.colours ? 'colours compared' : 'colours not compared'}</span>
+            </>
+          )}
           {s.unreadable && <span className="badge amber" style={{ marginLeft: 6 }}>photo hard to read</span>}
           {s.truncated && <span className="badge grey" style={{ marginLeft: 6 }}>only the oldest {s.considered} compared</span>}
           {s.skipped > 0 && <span className="badge grey" style={{ marginLeft: 6 }}>{s.skipped} listing photo{s.skipped === 1 ? '' : 's'} could not be loaded</span>}
@@ -214,6 +253,12 @@ function Suggestions({ parcel, onAssign, onSplit, busy }) {
             </span>
           )}
         </div>
+        {free && s.needsItem && (
+          <div className="flex gap8 mb8" style={{ flexWrap: 'wrap' }}>
+            <span className="badge amber">Order {s.needsItem.code}: {s.needsItem.reason}</span>
+            <button className="btn xs primary" disabled={busy} onClick={() => onChoose(parcel, s.needsItem)}>Choose the item</button>
+          </div>
+        )}
         {strong.length >= 2 && (
           <div className="flex gap8 mb8" style={{ flexWrap: 'wrap' }}>
             <span className="badge amber">{strong.length} of the products look like they are in this photo</span>
@@ -227,7 +272,7 @@ function Suggestions({ parcel, onAssign, onSplit, busy }) {
               <div className="flex" style={{ alignItems: 'flex-start', gap: 12 }}>
                 <img src={it.imageUrl} alt={it.title} style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--border)' }} />
                 <div style={{ flex: 1 }}>
-                  <div><strong>{it.title}</strong> <span className={`badge ${scoreKind(it.score)}`}>{Math.round(it.score * 100)}%</span></div>
+                  <div><strong>{it.title}</strong> <span className={`badge ${scoreKind(it.score)}`}>{Math.round(it.score * 100)}%</span> <EvidenceChips items={it.evidence} /></div>
                   {it.reason && <div className="small muted mb4">{it.reason}</div>}
                   <div className="flex col" style={{ gap: 4 }}>
                     {it.demands.map((d) => (
@@ -235,8 +280,9 @@ function Suggestions({ parcel, onAssign, onSplit, busy }) {
                         <ChannelBadge channel={d.channel} />
                         <span className="mono"><strong>{d.orderRef}</strong></span>
                         <span className="muted">{d.buyer} · {shortDay(d.orderedAt)} · needs {d.remaining}{d.sku ? ` · ${d.sku}` : ''}</span>
+                        <EvidenceChips items={d.evidence} />
                         <button className="btn xs primary" disabled={busy}
-                                onClick={() => onAssign({ channel: d.channel, orderId: d.orderId, itemId: d.itemId, source: 'ai', score: it.score })}>Assign</button>
+                                onClick={() => onAssign({ channel: d.channel, orderId: d.orderId, itemId: d.itemId, source: free ? 'quick' : 'ai', score: d.score ?? it.score })}>Assign</button>
                       </div>
                     ))}
                   </div>
@@ -250,12 +296,81 @@ function Suggestions({ parcel, onAssign, onSplit, busy }) {
   );
 }
 
-function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit }) {
+/**
+ * The order code of an arrival, always editable: type 26-0710-01 and press
+ * Enter (or leave the box) to put the arrival on that order; clear it to
+ * release the arrival. A code only names an order - when the order has several
+ * items and the parcel does not clearly look like one of them, you are asked
+ * which.
+ */
+function CodeCell({ parcel, busy, onCode }) {
+  const [value, setValue] = useState(parcel.code ?? '');
+  const [bad, setBad] = useState(false);
+  const sent = useRef(parcel.code ?? '');
+  useEffect(() => { setValue(parcel.code ?? ''); sent.current = parcel.code ?? ''; setBad(false); }, [parcel.code]);
+
+  const commit = async () => {
+    const next = value.trim();
+    if (next === (parcel.code ?? '') || next === sent.current) return;
+    sent.current = next;
+    const ok = await onCode(parcel, next);
+    setBad(!ok);
+    if (!ok) sent.current = parcel.code ?? '';
+  };
+  const m = parcel.match;
+  return (
+    <div>
+      <input className="input sm mono" style={{ width: 118, fontWeight: parcel.code ? 700 : 400, borderColor: bad ? 'var(--bad)' : undefined }}
+             value={value} placeholder="26-0710-01" disabled={busy} aria-label={`Order code for ${parcel.label}`}
+             title="Type the order code and press Enter. Clear it to release this arrival."
+             onChange={(e) => { setValue(e.target.value); setBad(false); }}
+             onKeyDown={(e) => {
+               if (e.key === 'Enter') { e.preventDefault(); commit(); }
+               if (e.key === 'Escape') { setValue(parcel.code ?? ''); setBad(false); }
+             }}
+             onBlur={commit} />
+      {m && <div style={{ marginTop: 3 }}><ChannelBadge channel={m.channel} /></div>}
+    </div>
+  );
+}
+
+/** An order with several items: say which one this parcel is. */
+function ItemChooser({ parcel, needsItem, busy, onChoose, onClose }) {
+  return (
+    <Modal open lg onClose={onClose} title={`Which item is ${parcel.label}?`}>
+      <div className="flex gap12 mb12" style={{ alignItems: 'flex-start' }}>
+        <Thumb src={parcel.photoUrl} size="lg" />
+        <div>
+          <div>Order <strong className="mono">{needsItem.code}</strong>{needsItem.buyer ? ` · ${needsItem.buyer}` : ''} has more than one item.</div>
+          <div className="small muted">{needsItem.reason}</div>
+        </div>
+      </div>
+      <table className="data">
+        <tbody>
+          {needsItem.items.map((i) => (
+            <tr key={i.itemId}>
+              <td style={{ width: 70 }}><Thumb src={i.imageUrl} size="lg" /></td>
+              <td>
+                <div><strong>{i.title}</strong>{i.variant && <span className="muted"> · {i.variant}</span>}</div>
+                <div className="small muted">{i.sku}{i.sku ? ' · ' : ''}{i.received} of {i.quantity} here{i.remaining <= 0 ? ' (complete)' : ''} <EvidenceChips items={i.evidence} /></div>
+              </td>
+              <td className="right"><button className="btn sm primary" disabled={busy} onClick={() => onChoose(i)}>This one</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Modal>
+  );
+}
+
+function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit, onCode, onChoose }) {
   const [open, setOpen] = useState(false);
-  const s = parcel.suggestions;
+  const s = latestSuggestions(parcel);
   const top = s?.items?.[0];
   const m = parcel.match;
-  useEffect(() => { if (s && parcel.status === 'unmatched') setOpen(true); }, [s?.ranAt, parcel.status]); // eslint-disable-line
+  // Open the guesses when a look for an order finishes while you watch - not for every old arrival each time the page loads.
+  const seenAt = useRef(s?.ranAt);
+  useEffect(() => { if (s && parcel.status === 'unmatched' && s.ranAt !== seenAt.current) setOpen(true); }, [s?.ranAt, parcel.status]); // eslint-disable-line
 
   return (
     <>
@@ -271,9 +386,10 @@ function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, 
           </div>
         </td>
         <td>
-          {parcel.code
-            ? <div><div className="mono"><strong>{parcel.code}</strong></div>{m && <ChannelBadge channel={m.channel} />}</div>
-            : <span className="muted">—</span>}
+          {parcel.status === 'split' ? <span className="muted">—</span>
+            : parcel.status === 'packed'
+              ? <div><div className="mono"><strong>{parcel.code}</strong></div>{m && <ChannelBadge channel={m.channel} />}</div>
+              : <CodeCell parcel={parcel} busy={busy} onCode={onCode} />}
         </td>
         <td>
           <div className="flex gap4">
@@ -295,7 +411,9 @@ function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, 
               <div><strong>{m.item?.title ?? m.itemId}</strong>{m.item?.variant && <span className="muted"> · {m.item.variant}</span>}</div>
               <div className="muted">
                 {m.item?.buyer}{m.item?.orderedAt ? ` · ${shortDay(m.item.orderedAt)}` : ''}{' '}
-                <span className={`badge ${m.source === 'ai' ? 'violet' : 'grey'}`}>{m.source === 'ai' ? `AI${m.score ? ` ${Math.round(m.score * 100)}%` : ''}` : 'Manual'}</span>
+                <span className={`badge ${(SOURCE_BADGE[m.source] ?? SOURCE_BADGE.manual)[0]}`}>
+                  {(SOURCE_BADGE[m.source] ?? SOURCE_BADGE.manual)[1]}{m.source !== 'manual' && m.score ? ` ${Math.round(m.score * 100)}%` : ''}
+                </span>
               </div>
             </div>
           )}
@@ -306,6 +424,10 @@ function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, 
           )}
           {!m && s && !top && parcel.status !== 'split' && <span className="small muted">No likely match in range</span>}
           {!m && !s && parcel.status !== 'split' && <span className="small muted">Not matched yet</span>}
+          {!m && s?.needsItem && <div><button className="btn xs" disabled={busy} onClick={() => onChoose(parcel, s.needsItem)}>Which item of {s.needsItem.code}? ▸</button></div>}
+          {!m && parcel.photoUrl && parcel.status !== 'split' && (reading || parcel.hasText) && (
+            <div className="small muted" style={{ marginTop: 2 }}>{reading ? 'reading the text on the photo…' : '✓ text read from photo'}</div>
+          )}
         </td>
         <td>
           <div className="flex gap4" style={{ flexWrap: 'wrap' }}>
@@ -313,8 +435,10 @@ function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, 
               <button className="btn xs" disabled={busy} onClick={() => onUnsplit(parcel)} title="Put the original photo back and remove the arrivals cut out of it">Restore original</button>
             ) : (
               <>
+                {!m && <button className="btn xs" disabled={busy} onClick={() => onFree(parcel)}
+                                title="Free, no AI: tracking number, order state, text read off the photo and colours. Assigns by itself only when the tracking number settles it.">{busy ? <Spinner /> : '⚡'} Free match</button>}
                 {!m && <button className="btn xs primary" disabled={busy || !parcel.photoUrl} onClick={() => onMatch(parcel.id)}
-                                title={parcel.photoUrl ? 'Compare the photo with the unshipped orders in the date range' : 'Add a photo first'}>{busy ? <Spinner /> : s ? 'Re-match' : 'Find match'}</button>}
+                                title={parcel.photoUrl ? 'Uses AI credits: compare the photo with the unshipped orders in the date range' : 'Add a photo first'}>{busy ? <Spinner /> : parcel.suggestions ? 'Re-match' : 'Find match'}</button>}
                 {!m && <button className="btn xs" disabled={busy} onClick={() => onPicker(parcel)}>Assign…</button>}
                 {!m && parcel.photoUrl && (
                   <button className="btn xs" disabled={busy} onClick={() => onSplit(parcel)}
@@ -333,7 +457,7 @@ function ParcelRow({ parcel, range, busy, onMatch, onAssign, onUnmatch, onEdit, 
       </tr>
       {open && !m && s && (
         <tr><td colSpan={6} style={{ background: 'var(--surface-2)' }}>
-          <Suggestions parcel={parcel} busy={busy} onAssign={(t) => onAssign(parcel.id, t)} onSplit={() => onSplit(parcel)} />
+          <Suggestions parcel={parcel} s={s} busy={busy} onAssign={(t) => onAssign(parcel.id, t)} onSplit={() => onSplit(parcel)} onChoose={onChoose} />
         </td></tr>
       )}
     </>
@@ -398,6 +522,8 @@ export default function Packing() {
   const [editing, setEditing] = useState(null);
   const [picking, setPicking] = useState(null);
   const [splitting, setSplitting] = useState(null);
+  const [choosing, setChoosing] = useState(null);
+  const [reading, setReading] = useState({});
   const cancelRef = useRef(false);
 
   const channels = useMemo(() => [filters.etsy && 'etsy', filters.shopify && 'shopify'].filter(Boolean), [filters.etsy, filters.shopify]);
@@ -423,6 +549,80 @@ export default function Packing() {
       refresh();
     } catch (err) { showError(err, 'Could not match that'); } finally { flag(id, false); }
   };
+
+  /** What the browser reads off a parcel's photo (OCR, free), kept on the parcel for the free matcher. */
+  const readText = useCallback(async (parcel) => {
+    if (!parcel.photoUrl) return null;
+    setReading((r) => ({ ...r, [parcel.id]: true }));
+    try {
+      const { readPhotoText } = await import('../lib/ocr.js');
+      const text = await readPhotoText(withBase(parcel.photoUrl));
+      await api.post(`/packing/parcels/${parcel.id}/text`, { text });
+      return text;
+    } catch (err) {
+      toast({ kind: 'info', title: 'Could not read the text on that photo', body: `${err?.message ?? err} - the free match still uses tracking and colours.` });
+      return null;
+    } finally { setReading((r) => ({ ...r, [parcel.id]: false })); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** The free matcher once. Resolves to the parcel, or null when it failed (an error is shown unless `silent`). */
+  const quickOne = useCallback(async (id, { silent = false } = {}) => {
+    try {
+      const p = await api.post(`/packing/parcels/${id}/quick`, { ...range, assign: filters.autoAssign ? 'sure' : 'tracking' });
+      if (p.status === 'matched') toast({ kind: 'ok', title: `${p.label} → ${p.code}`, body: p.quick?.auto?.reason });
+      return p;
+    } catch (err) { if (!silent) showError(err, 'Free match failed'); return null; }
+  }, [range, filters.autoAssign]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * The whole free routine for one arrival: tracking / order state / colours
+   * right away (that alone settles it when the tracking number is on the order),
+   * then - if it is still open - read the words off the photo and look again.
+   */
+  const freeOne = useCallback(async (parcel, { quiet = false } = {}) => {
+    flag(parcel.id, true);
+    try {
+      let p = await quickOne(parcel.id, { silent: quiet });
+      if (!p || p.status === 'matched') return p;
+      if (parcel.photoUrl && !p.hasText) {
+        const text = await readText(parcel);
+        if (text) p = (await quickOne(parcel.id, { silent: true })) ?? p;
+      }
+      if (p.status !== 'matched') {
+        if (p.quick?.needsItem && !quiet) setChoosing({ parcel: p, needsItem: p.quick.needsItem });
+        else if (!quiet && !p.quick?.items?.length) toast({ kind: 'info', title: 'No likely match', body: 'Nothing in this date range looks like it. Type its order code, or try Find match (AI).' });
+      }
+      return p;
+    } finally { flag(parcel.id, false); parcels.reload(); queue.reload(); }
+  }, [quickOne, readText]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const freeAll = async () => {
+    const todo = (parcels.data?.rows ?? []).filter((p) => p.status === 'unmatched');
+    if (!todo.length) return;
+    cancelRef.current = false;
+    for (let i = 0; i < todo.length; i += 1) {
+      if (cancelRef.current) break;
+      setProgress({ done: i, total: todo.length, free: true });
+      // eslint-disable-next-line no-await-in-loop
+      await freeOne(todo[i], { quiet: true });
+    }
+    setProgress(null);
+    refresh();
+  };
+
+  /** Put an arrival on the order with this code. Resolves to true when it went through (or needs the item chosen). */
+  const assignCode = useCallback(async (parcel, code, itemId = null) => {
+    flag(parcel.id, true);
+    try {
+      const r = await api.post(`/packing/parcels/${parcel.id}/assign-code`, { code, itemId, ...range });
+      if (r.needsItem) setChoosing({ parcel, needsItem: r.needsItem });
+      else {
+        setChoosing(null);
+        toast(code ? { kind: 'ok', title: `${parcel.label} → ${r.parcel.code}`, body: r.parcel.match?.item?.title } : { kind: 'ok', title: `${parcel.label} released` });
+      }
+      return true;
+    } catch (err) { showError(err, 'That code did not work'); return false; } finally { flag(parcel.id, false); parcels.reload(); queue.reload(); }
+  }, [range]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** One parcel: ask the AI, and - if it is sure - assign it to the oldest order waiting for that product. */
   const matchOne = useCallback(async (id, { quiet = false } = {}) => {
@@ -456,10 +656,22 @@ export default function Packing() {
     refresh();
   };
 
-  // Adding an arrival only records it. The AI is never asked until "Find match" or "Match all" is pressed.
+  // A new arrival gets its order code at once: the one typed with it, or - free, no AI - whatever the
+  // tracking number, order state, photo text and colours settle. The AI is never asked until "Find match" or "Match all" is pressed.
   const onAdded = (parcel) => {
-    toast({ kind: 'ok', title: `Added ${parcel.label}` });
     if (status !== 'all' && status !== 'unmatched') setStatus('all'); else parcels.reload();
+    if (parcel.codeError) {
+      toast({ kind: 'err', title: `Added ${parcel.label}, but its code did not fit`, body: parcel.codeError, duration: 9000 });
+      return;
+    }
+    if (parcel.needsItem) {
+      toast({ kind: 'info', title: `Added ${parcel.label}`, body: 'That order has several items - say which one this is.' });
+      setChoosing({ parcel, needsItem: parcel.needsItem });
+      return;
+    }
+    if (parcel.code) { toast({ kind: 'ok', title: `Added ${parcel.label} → ${parcel.code}`, body: parcel.match?.item?.title }); return; }
+    toast({ kind: 'ok', title: `Added ${parcel.label}` });
+    if (channels.length) freeOne(parcel, { quiet: true });
   };
 
   const unmatch = async (id) => {
@@ -521,8 +733,8 @@ export default function Packing() {
             <button key={n} className="btn xs ghost" onClick={() => setFilter({ from: daysAgo(n), to: localDay(new Date()) })}>{n}d</button>
           ))}
           <div style={{ flex: 1 }} />
-          <span title="Off by default: after Find match, the AI's best guesses are shown and nothing is assigned until you press Assign. Turn on to have a very confident match assigned straight away.">
-            <Checkbox checked={filters.autoAssign} onChange={(v) => setFilter({ autoAssign: v })} label="Assign automatically when the AI is sure" />
+          <span title="A tracking number that names one order is always assigned straight away. Off by default for everything else: the AI's and the free matcher's best guesses are shown and nothing is assigned until you press Assign. Turn on to also assign when text and colours both clearly agree, or the AI is very confident.">
+            <Checkbox checked={filters.autoAssign} onChange={(v) => setFilter({ autoAssign: v })} label="Also assign when the match is very sure" />
           </span>
         </div>
         <div className="small muted mt4">
@@ -547,7 +759,7 @@ export default function Packing() {
 
       {tab === 'arrivals' && (
         <>
-          <AddParcel warehouse={filters.warehouse} onWarehouse={(v) => setFilter({ warehouse: v })} onAdded={onAdded} />
+          <AddParcel warehouse={filters.warehouse} onWarehouse={(v) => setFilter({ warehouse: v })} range={range} onAdded={onAdded} />
           <div className="flex gap8 mb12" style={{ flexWrap: 'wrap' }}>
             {['all', 'unmatched', 'matched', 'packed'].map((s) => (
               <button key={s} className={`btn xs ${status === s ? 'primary' : 'ghost'}`} onClick={() => setStatus(s)}>
@@ -555,10 +767,17 @@ export default function Packing() {
               </button>
             ))}
             <div style={{ flex: 1 }} />
-            {progress && <span className="small muted">Matching {progress.done + 1} of {progress.total}…</span>}
+            {progress && <span className="small muted">{progress.free ? 'Free match' : 'Matching'} {progress.done + 1} of {progress.total}…</span>}
             {progress
               ? <button className="btn sm" onClick={() => { cancelRef.current = true; }}>Stop</button>
-              : <button className="btn sm primary" disabled={!unmatchedWithPhoto || !channels.length} onClick={matchAll}>Match all unmatched ({unmatchedWithPhoto})</button>}
+              : (
+                <>
+                  <button className="btn sm" disabled={!counts?.unmatched || !channels.length} onClick={freeAll}
+                          title="Free, no AI: tracking, order state, text read off the photo, colours">⚡ Free match all ({counts?.unmatched ?? 0})</button>
+                  <button className="btn sm primary" disabled={!unmatchedWithPhoto || !channels.length} onClick={matchAll}
+                          title="Uses AI credits">Match all with AI ({unmatchedWithPhoto})</button>
+                </>
+              )}
           </div>
           {parcels.loading && !parcels.data ? <Spinner /> : !parcels.data?.rows.length ? (
             <Empty icon="📦" title="No arrivals yet" />
@@ -571,8 +790,9 @@ export default function Packing() {
                 </thead>
                 <tbody>
                   {parcels.data.rows.map((p) => (
-                    <ParcelRow key={p.id} parcel={p} range={range} busy={!!working[p.id]}
-                               onMatch={matchOne} onAssign={confirm} onUnmatch={unmatch}
+                    <ParcelRow key={p.id} parcel={p} range={range} busy={!!working[p.id]} reading={!!reading[p.id]}
+                               onMatch={matchOne} onFree={freeOne} onAssign={confirm} onUnmatch={unmatch}
+                               onCode={assignCode} onChoose={(parcel, needsItem) => setChoosing({ parcel, needsItem })}
                                onEdit={setEditing} onDelete={remove} onPicker={setPicking}
                                onSplit={setSplitting} onUnsplit={unsplit} />
                   ))}
@@ -604,6 +824,11 @@ export default function Packing() {
 
       {editing && <EditParcel parcel={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} />}
       {splitting && <SplitPhoto parcel={splitting} onClose={() => setSplitting(null)} onDone={() => { setSplitting(null); refresh(); }} />}
+      {choosing && (
+        <ItemChooser parcel={choosing.parcel} needsItem={choosing.needsItem} busy={!!working[choosing.parcel.id]}
+                     onClose={() => setChoosing(null)}
+                     onChoose={(item) => assignCode(choosing.parcel, choosing.needsItem.code, item.itemId)} />
+      )}
       {picking && (
         <AssignPicker parcel={picking} range={range} onClose={() => setPicking(null)}
                       onAssign={async (t) => { const id = picking.id; setPicking(null); await confirm(id, { ...t, source: 'manual' }); }} />

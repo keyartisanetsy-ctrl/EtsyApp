@@ -10,6 +10,8 @@ import { requireShopifyShopId } from '../shopify/shop.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 import { convert } from './fx.js';
+import { shopifyCodesFor } from './ordercode.js';
+import { arrivalsFor, arrivalFor } from './arrivals.js';
 
 const log = createLogger('shopify-svc');
 export { syncProducts, syncOrders, syncBalanceTransactions };
@@ -218,10 +220,15 @@ export function listOrders({ search = '', canceled = null, limit = 100, offset =
   const txnSummary = loadTransactionSummary(db, rows.map((r) => r.order_id));
   const ledgerSummary = loadBalanceLedgerSummary(db, rows.map((r) => r.order_id));
   const orderCosts = loadOrderCosts(db, rows.map((r) => r.order_id));
+  const codes = shopifyCodesFor(rows.map((r) => r.order_id), shopId);
+  const arrivals = arrivalsFor('shopify', rows.map((r) => r.order_id));
 
   return {
     total, limit, offset,
-    rows: rows.map((r) => shapeOrder(r, supplyPreview.get(r.order_id), txnSummary.get(r.order_id), orderCosts.get(r.order_id), ledgerSummary.get(r.order_id))),
+    rows: rows.map((r) => shapeOrder(r, supplyPreview.get(r.order_id), txnSummary.get(r.order_id), orderCosts.get(r.order_id), ledgerSummary.get(r.order_id), {
+      code: codes[r.order_id] ?? null,
+      arrival: arrivalFor(arrivals, r.order_id, supplyPreview.get(r.order_id)?.items),
+    })),
   };
 }
 
@@ -489,7 +496,7 @@ function loadSupplyPreview(db, shopId, orderIds) {
   if (!orderIds.length) return map;
   const holes = orderIds.map(() => '?').join(',');
   const items = db.prepare(`
-    SELECT x.order_id, x.line_item_id, x.sku, x.warehouse_photo_id, x.image_url, m.supply_link
+    SELECT x.order_id, x.line_item_id, x.sku, x.quantity, x.warehouse_photo_id, x.image_url, m.supply_link
     FROM shopify_order_line_items x
     LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND m.shop_id = ? AND x.sku <> ''
     WHERE x.order_id IN (${holes})
@@ -523,7 +530,7 @@ function looksLikeShopAds(sourceName, attributionSource, tags) {
   return /^shop$/i.test((sourceName || '').trim()) && (tags || []).length > 0;
 }
 
-function shapeOrder(r, preview, txn, costs, ledger) {
+function shapeOrder(r, preview, txn, costs, ledger, extra = {}) {
   const linkItem = preview?.linkItem ?? preview?.firstItem ?? null;
   const photoItem = preview?.photoItem ?? preview?.firstItem ?? null;
   const fin = financialsFor(txn, ledger);
@@ -536,6 +543,9 @@ function shapeOrder(r, preview, txn, costs, ledger) {
   const isShopAdsAttributed = r.shop_ads_override != null ? !!r.shop_ads_override : (ledgerSaysShopAds || heuristicShopAds);
   const adSpend = adSpendFor(ledger, isShopAdsAttributed, r.total_amount, r.currency);
   return {
+    // The short code the packing sheet carries for this order, and what the warehouse has delivered so far.
+    code: extra.code ?? null,
+    arrival: extra.arrival ?? null,
     orderId: r.order_id, name: r.name, email: r.email, phone: r.phone,
     financialStatus: r.financial_status, fulfillmentStatus: r.fulfillment_status, currency: r.currency,
     subtotal: r.subtotal_amount, tax: r.total_tax_amount, shipping: r.total_shipping_amount,
@@ -693,7 +703,10 @@ export function getOrder(orderId) {
   const ledgerSummary = loadBalanceLedgerSummary(db, [orderId]).get(orderId);
   const ledgerLines = loadBalanceLedgerLines(db, orderId);
   return {
-    ...shapeOrder(o, null, txnSummary, costs, ledgerSummary),
+    ...shapeOrder(o, null, txnSummary, costs, ledgerSummary, {
+      code: shopifyCodesFor([orderId])[orderId] ?? null,
+      arrival: arrivalFor(arrivalsFor('shopify', [orderId]), orderId, items.map((i) => ({ quantity: i.quantity }))),
+    }),
     trackingUrl: o.tracking_url || null, items, transactions,
     // The real Shopify Payments ledger for this order - empty until
     // syncBalanceTransactions() has run for this store (or on a store still

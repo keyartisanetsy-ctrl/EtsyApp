@@ -3,6 +3,7 @@ import multer from 'multer';
 import { asyncRoute, int, bool } from '../lib/http.js';
 import { badRequest } from '../lib/errors.js';
 import * as packing from '../services/packing.js';
+import * as quick from '../services/quickmatch.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -19,7 +20,7 @@ router.get('/parcels', asyncRoute(async (req, res) => {
 router.post('/parcels', upload.single('photo'), asyncRoute(async (req, res) => {
   const b = req.body ?? {};
   const attachmentId = req.file ? packing.saveParcelPhoto(req.file) : null;
-  res.status(201).json(packing.createParcel({
+  const parcel = packing.createParcel({
     text: b.text ?? '',
     carrier: b.carrier === undefined || b.carrier === '' ? undefined : b.carrier,
     last4: b.last4 === undefined || b.last4 === '' ? undefined : b.last4,
@@ -28,7 +29,18 @@ router.post('/parcels', upload.single('photo'), asyncRoute(async (req, res) => {
     warehouse: b.warehouse ?? '',
     note: b.note ?? '',
     receivedOn: b.receivedOn,
-  }));
+  });
+  // An order code typed with the arrival is applied at once. The arrival is kept
+  // whatever happens: a code that fits nothing, or an order with several items,
+  // comes back as a message / a choice next to it, not as a lost photo.
+  const code = String(b.code ?? '').trim();
+  if (!code) { res.status(201).json(parcel); return; }
+  try {
+    const out = await quick.assignByCode(parcel.id, { code, channels: channelsOf(b.channels), from: b.from, to: b.to });
+    res.status(201).json(out.needsItem ? { ...packing.getParcel(parcel.id), needsItem: out.needsItem } : out.parcel);
+  } catch (err) {
+    res.status(201).json({ ...packing.getParcel(parcel.id), codeError: err.message });
+  }
 }));
 
 router.patch('/parcels/:id', asyncRoute(async (req, res) => {
@@ -44,6 +56,32 @@ router.post('/parcels/:id/match', asyncRoute(async (req, res) => {
   const b = req.body ?? {};
   res.json(await packing.matchParcel(req.params.id, {
     channels: channelsOf(b.channels), from: b.from, to: b.to, provider: b.provider, model: b.model,
+  }));
+}));
+
+/** The free matcher: tracking, order state, text read off the photo, and colours. No AI, no credits. */
+router.post('/parcels/:id/quick', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(await quick.quickMatch(req.params.id, {
+    channels: channelsOf(b.channels), from: b.from, to: b.to,
+    assign: ['tracking', 'sure', 'never'].includes(b.assign) ? b.assign : 'tracking',
+  }));
+}));
+
+/** What the browser's OCR read off the photo, kept for the free matcher. */
+router.post('/parcels/:id/text', asyncRoute(async (req, res) => {
+  res.json(packing.setParcelText(req.params.id, req.body?.text ?? ''));
+}));
+
+/**
+ * Put the arrival on the order with this code (26-0710-01). Replies with the
+ * parcel, or - when the order has several items and it cannot tell which this
+ * is - `needsItem`, the items to choose from. An empty code releases the arrival.
+ */
+router.post('/parcels/:id/assign-code', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(await quick.assignByCode(req.params.id, {
+    code: b.code, itemId: b.itemId ?? null, channels: channelsOf(b.channels), from: b.from, to: b.to,
   }));
 }));
 

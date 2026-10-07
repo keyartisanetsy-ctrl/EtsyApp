@@ -15,7 +15,7 @@
  * Etsy and Shopify each have their own field catalogue (see fields.js) - a
  * key like "order.id" or "shop.name" means something different, and resolves
  * differently, on each. The synonym table mirrors that split, so a Shopify
- * destination is never matched against an Etsy-only field like order.code or
+ * destination is never matched against an Etsy-only field like order.id_hash or
  * item.etsy_link.
  */
 import { sourceFieldsFor, sampleValues } from './fields.js';
@@ -288,6 +288,12 @@ const ETSY_SYNONYMS = {
 const SHOPIFY_SYNONYMS = {
   'order name': 'order.id',
   'shopify order number': 'order.id',
+
+  kod: 'order.code',
+  code: 'order.code',
+  'siparis kodu': 'order.code',
+  'paket kodu': 'order.code',
+  'order code': 'order.code',
 
   email: 'buyer.email',
   'e mail': 'buyer.email',

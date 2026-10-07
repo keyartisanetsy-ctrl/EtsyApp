@@ -13,6 +13,7 @@
  */
 import { getDb } from '../db/index.js';
 import { activeShopId } from '../etsy/shop.js';
+import { activeShopifyShopId } from '../shopify/shop.js';
 import { readSetting } from './settings.js';
 
 // Matches the codes already in these sheets: 26-0316-25, 25-1216-01,
@@ -68,9 +69,11 @@ export function codeFor(receiptId, { shopId = activeShopId(), createdTs = null }
 
   // A code already in a sheet must never be reused, so if an older order turns
   // up after its neighbours were numbered, it takes the next free slot instead
-  // of colliding.
-  const used = new Set(db.prepare('SELECT seq FROM order_codes WHERE shop_id IS ? AND day = ?')
-    .all(shopId, day).map((r) => r.seq));
+  // of colliding. Shopify orders draw from the same day's numbers.
+  const used = new Set([
+    ...db.prepare('SELECT seq FROM order_codes WHERE shop_id IS ? AND day = ?').all(shopId, day).map((r) => r.seq),
+    ...shopifySeqsOn(db, day),
+  ]);
   let seq = position;
   while (used.has(seq)) seq += 1;
 
@@ -81,6 +84,68 @@ export function codeFor(receiptId, { shopId = activeShopId(), createdTs = null }
 
   return db.prepare('SELECT code FROM order_codes WHERE shop_id IS ? AND receipt_id = ?')
     .get(shopId, receiptId)?.code ?? code;
+}
+
+const shopifySeqsOn = (db, day) => db.prepare('SELECT seq FROM shopify_order_codes WHERE day = ?').all(day).map((r) => r.seq);
+
+/**
+ * The same short code for a Shopify order. It is numbered from the same day's
+ * sequence as Etsy's (an Etsy order and a Shopify order of one day never share
+ * a code), by the order's own timestamp, and assigned once.
+ */
+export function shopifyCodeFor(orderId, { shopId = activeShopifyShopId() } = {}) {
+  const db = getDb();
+  const existing = db.prepare('SELECT code FROM shopify_order_codes WHERE shop_id IS ? AND order_id = ?').get(shopId, orderId);
+  if (existing) return existing.code;
+
+  const order = db.prepare('SELECT created_at_shopify AS at FROM shopify_orders WHERE order_id = ?').get(orderId);
+  if (!order?.at || !Number.isFinite(Date.parse(order.at))) return null;
+  const day = new Date(Date.parse(order.at)).toISOString().slice(0, 10);
+
+  const position = db.prepare(`
+    SELECT COUNT(*) AS c FROM shopify_orders
+    WHERE shop_id IS ? AND substr(created_at_shopify, 1, 10) = ?
+      AND (created_at_shopify < ? OR (created_at_shopify = ? AND order_id < ?))`)
+    .get(shopId, day, order.at, order.at, orderId).c + 1;
+  const used = new Set([
+    ...db.prepare('SELECT seq FROM order_codes WHERE day = ?').all(day).map((r) => r.seq),
+    ...shopifySeqsOn(db, day),
+  ]);
+  let seq = position;
+  while (used.has(seq)) seq += 1;
+
+  const code = formatCode(day, seq);
+  db.prepare(`INSERT INTO shopify_order_codes (shop_id, order_id, code, day, seq) VALUES (?,?,?,?,?)
+              ON CONFLICT(shop_id, order_id) DO NOTHING`).run(shopId, orderId, code, day, seq);
+  return db.prepare('SELECT code FROM shopify_order_codes WHERE shop_id IS ? AND order_id = ?').get(shopId, orderId)?.code ?? code;
+}
+
+export function shopifyCodesFor(orderIds = [], shopId = activeShopifyShopId()) {
+  const out = {};
+  if (!orderIds.length) return out;
+  const ordered = getDb().prepare(`
+    SELECT order_id FROM shopify_orders
+    WHERE shop_id IS ? AND order_id IN (${orderIds.map(() => '?').join(',')})
+    ORDER BY created_at_shopify ASC`).all(shopId, ...orderIds);
+  for (const o of ordered) out[o.order_id] = shopifyCodeFor(o.order_id, { shopId });
+  return out;
+}
+
+/**
+ * Whichever order of the active shops carries this code, typed by hand from a
+ * sheet. Matches the code as written (any letter case, stray spaces ignored).
+ */
+export function findOrderByCode(code) {
+  const wanted = String(code ?? '').replace(/\s+/g, '').toLowerCase();
+  if (!wanted) return null;
+  const db = getDb();
+  const etsy = activeShopId() != null
+    ? db.prepare('SELECT receipt_id FROM order_codes WHERE shop_id IS ? AND lower(code) = ?').get(activeShopId(), wanted) : null;
+  if (etsy) return { channel: 'etsy', orderId: String(etsy.receipt_id) };
+  const shop = activeShopifyShopId();
+  const shopify = shop != null
+    ? db.prepare('SELECT order_id FROM shopify_order_codes WHERE shop_id IS ? AND lower(code) = ?').get(shop, wanted) : null;
+  return shopify ? { channel: 'shopify', orderId: shopify.order_id } : null;
 }
 
 /** Codes for many orders at once, assigning any that are missing. */

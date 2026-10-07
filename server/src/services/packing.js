@@ -25,7 +25,7 @@ import { activeShopifyShopId } from '../shopify/shop.js';
 import { readSetting } from './settings.js';
 import { run, parseJsonish } from './ai/index.js';
 import { resolveForTransaction } from './productimages.js';
-import { codesFor } from './ordercode.js';
+import { codesFor, shopifyCodesFor } from './ordercode.js';
 import { cachedProductImageId } from './warehousecheck.js';
 import * as etsyOrders from './orders.js';
 import * as shopifyOrders from './shopify.js';
@@ -64,7 +64,7 @@ const parcelLabel = (p) => [p.carrier, p.last4, `${p.quantity || 1}件`].filter(
 
 // ------------------------------------------------------------------ parcels
 
-function getRow(id) {
+export function getRow(id) {
   const row = getDb().prepare('SELECT * FROM inbound_parcels WHERE id = ?').get(Number(id));
   if (!row) throw notFound(`Parcel ${id} not found.`);
   return row;
@@ -106,7 +106,7 @@ function loadItemInfo(db, rows) {
       WHERE x.transaction_id IN (${etsyIds.map(() => '?').join(',')})`).all(...etsyIds);
     for (const x of found) {
       info.set(`etsy:${x.transaction_id}`, {
-        title: x.title, sku: x.sku || '', variant: '', quantity: x.quantity, buyer: x.buyer,
+        title: x.title, sku: x.sku || '', variant: variationText(x.variations), quantity: x.quantity, buyer: x.buyer,
         orderedAt: x.created_ts ? new Date(x.created_ts * 1000).toISOString() : null,
         imageUrl: resolveForTransaction(x)?.best?.url || x.image_url || null,
       });
@@ -154,6 +154,8 @@ function shapeParcel(r, item = null, children = 0) {
       source: r.match_source, score: r.match_score, matchedAt: r.matched_at, item,
     } : null,
     suggestions: parse(r.suggestions, null),
+    quick: parse(r.quick, null),
+    hasText: !!(r.ocr_text && r.ocr_text.trim()),
   };
 }
 
@@ -206,6 +208,13 @@ export function createParcel({ text = '', carrier, last4, quantity, attachmentId
     .run(fields.carrier, fields.last4, fields.quantity, attachmentId, String(warehouse).trim(), String(note).trim(), day);
   audit('packing.parcel_add', { entity: 'parcel', entityId: info.lastInsertRowid, detail: { ...fields, attachmentId } });
   return getParcel(info.lastInsertRowid);
+}
+
+/** What the browser read off the photo. Kept for the free matcher; capped so a noisy read cannot bloat the row. */
+export function setParcelText(id, text) {
+  const row = getRow(id);
+  getDb().prepare('UPDATE inbound_parcels SET ocr_text = ? WHERE id = ?').run(String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 3000), row.id);
+  return getParcel(row.id);
 }
 
 export function updateParcel(id, patch = {}) {
@@ -272,60 +281,93 @@ function receivedByItem(db) {
  * the things a parcel could be for. Oldest order first, because the oldest
  * order is the one that has been waiting longest.
  */
-export function loadDemand(range) {
+/** "Colour: Blue / Size: M" from Etsy's per-line variation list. */
+function variationText(json) {
+  const list = parse(json, []) ?? [];
+  return list.map((v) => [v.formatted_name, v.formatted_value].filter(Boolean).join(': ')).filter(Boolean).join(' / ');
+}
+
+/**
+ * Every item that has not gone out yet on the orders placed in the window -
+ * the things a parcel could be for. Oldest order first, because the oldest
+ * order is the one that has been waiting longest.
+ *
+ * `only` ({ channel, orderId }) asks for one particular order instead,
+ * whatever its state or age - for when someone names an order by its code.
+ */
+export function loadDemand(range, only = null) {
   const db = getDb();
   const received = receivedByItem(db);
   const out = [];
 
   const etsyShop = activeShopId();
-  if (range.channels.includes('etsy') && etsyShop != null) {
+  if ((only ? only.channel === 'etsy' : range.channels.includes('etsy')) && etsyShop != null) {
+    const where = only
+      ? 'r.shop_id IS ? AND r.receipt_id = ?'
+      : `r.shop_id IS ? AND COALESCE(r.was_shipped,0) = 0 AND COALESCE(r.was_canceled,0) = 0
+         AND COALESCE(r.was_paid,1) = 1 AND COALESCE(f.is_canceled,0) = 0 AND COALESCE(x.is_digital,0) = 0
+         AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.receipt_id = r.receipt_id
+                         AND s.tracking_code IS NOT NULL AND s.tracking_code <> '')
+         AND r.created_ts BETWEEN ? AND ?`;
+    const params = only ? [etsyShop, Number(only.orderId)] : [etsyShop, range.fromTs, range.toTs];
     const rows = db.prepare(`
-      SELECT r.receipt_id, r.created_ts, r.name AS buyer,
-             x.transaction_id, x.sku, x.title, x.quantity, x.image_url, x.listing_id, x.product_id, x.variations
+      SELECT r.receipt_id, r.created_ts, r.name AS buyer, r.message_from_buyer,
+             x.transaction_id, x.sku, x.title, x.quantity, x.image_url, x.listing_id, x.product_id, x.variations,
+             COALESCE(f.supplier_ordered,0) AS supplier_ordered, f.supplier_order_ref, f.supply_tracking_number,
+             sup.title AS supply_title, sup.variant_label AS supply_variant, sup.images AS supply_images
       FROM receipts r
       JOIN receipt_transactions x ON x.receipt_id = r.receipt_id
       LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
-      WHERE r.shop_id IS ? AND COALESCE(r.was_shipped,0) = 0 AND COALESCE(r.was_canceled,0) = 0
-        AND COALESCE(r.was_paid,1) = 1 AND COALESCE(f.is_canceled,0) = 0 AND COALESCE(x.is_digital,0) = 0
-        AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.receipt_id = r.receipt_id
-                        AND s.tracking_code IS NOT NULL AND s.tracking_code <> '')
-        AND r.created_ts BETWEEN ? AND ?
-      ORDER BY r.created_ts ASC, x.transaction_id ASC`).all(etsyShop, range.fromTs, range.toTs);
+      LEFT JOIN supply_items sup ON sup.sku = x.sku AND sup.shop_id IS r.shop_id AND x.sku <> ''
+      WHERE ${where}
+      ORDER BY r.created_ts ASC, x.transaction_id ASC`).all(...params);
     const codes = codesFor([...new Set(rows.map((r) => r.receipt_id))], etsyShop);
     for (const r of rows) {
       const got = received.get(`etsy:${r.transaction_id}`) || 0;
       out.push({
         channel: 'etsy', orderId: String(r.receipt_id), orderRef: codes[r.receipt_id] || String(r.receipt_id),
         orderedTs: r.created_ts, orderedAt: new Date(r.created_ts * 1000).toISOString(), buyer: r.buyer || '',
-        itemId: String(r.transaction_id), sku: r.sku || '', title: r.title || '', variant: '',
+        itemId: String(r.transaction_id), sku: r.sku || '', title: r.title || '', variant: variationText(r.variations),
         quantity: r.quantity || 1, received: got, remaining: (r.quantity || 1) - got,
         imageUrl: resolveForTransaction(r)?.best?.url || r.image_url || null,
+        purchased: !!(r.supplier_ordered || r.supplier_order_ref), supplyTracking: r.supply_tracking_number || '',
+        supplyTitle: [r.supply_title, r.supply_variant].filter(Boolean).join(' '),
+        supplyImages: parse(r.supply_images, []) ?? [],
       });
     }
   }
 
   const shopifyShop = activeShopifyShopId();
-  if (range.channels.includes('shopify') && shopifyShop != null) {
+  if ((only ? only.channel === 'shopify' : range.channels.includes('shopify')) && shopifyShop != null) {
+    const where = only
+      ? 'o.shop_id = ? AND o.order_id = ?'
+      : `o.shop_id = ? AND o.cancelled_at IS NULL AND COALESCE(f.is_canceled,0) = 0
+         AND UPPER(COALESCE(o.fulfillment_status,'')) NOT IN ('FULFILLED','RESTOCKED')
+         AND UPPER(COALESCE(o.financial_status,'')) NOT IN ('VOIDED','REFUNDED')
+         AND COALESCE(f.tracking_number,'') = ''
+         AND substr(o.created_at_shopify,1,10) BETWEEN ? AND ?`;
+    const params = only ? [shopifyShop, String(only.orderId)] : [shopifyShop, range.from, range.to];
     const rows = db.prepare(`
       SELECT o.order_id, o.name, o.created_at_shopify, o.customer_name,
-             x.line_item_id, x.sku, x.title, x.variant_title, x.quantity, x.image_url
+             x.line_item_id, x.sku, x.title, x.variant_title, x.quantity, x.image_url,
+             f.supplier_order_ref, f.supply_tracking_number
       FROM shopify_orders o
       JOIN shopify_order_line_items x ON x.order_id = o.order_id
       LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
-      WHERE o.shop_id = ? AND o.cancelled_at IS NULL AND COALESCE(f.is_canceled,0) = 0
-        AND UPPER(COALESCE(o.fulfillment_status,'')) NOT IN ('FULFILLED','RESTOCKED')
-        AND UPPER(COALESCE(o.financial_status,'')) NOT IN ('VOIDED','REFUNDED')
-        AND COALESCE(f.tracking_number,'') = ''
-        AND substr(o.created_at_shopify,1,10) BETWEEN ? AND ?
-      ORDER BY o.created_at_shopify ASC, x.line_item_id ASC`).all(shopifyShop, range.from, range.to);
+      WHERE ${where}
+      ORDER BY o.created_at_shopify ASC, x.line_item_id ASC`).all(...params);
+    const codes = shopifyCodesFor([...new Set(rows.map((r) => r.order_id))], shopifyShop);
     for (const r of rows) {
       const got = received.get(`shopify:${r.line_item_id}`) || 0;
       out.push({
-        channel: 'shopify', orderId: r.order_id, orderRef: r.name || r.order_id,
+        channel: 'shopify', orderId: r.order_id, orderRef: codes[r.order_id] || r.name || r.order_id,
+        orderName: r.name || '',
         orderedTs: Math.floor(Date.parse(r.created_at_shopify) / 1000) || 0, orderedAt: r.created_at_shopify,
         buyer: r.customer_name || '', itemId: r.line_item_id, sku: r.sku || '', title: r.title || '',
         variant: r.variant_title || '', quantity: r.quantity || 1, received: got, remaining: (r.quantity || 1) - got,
         imageUrl: r.image_url || null,
+        purchased: !!r.supplier_order_ref, supplyTracking: r.supply_tracking_number || '',
+        supplyTitle: '', supplyImages: [],
       });
     }
   }
@@ -333,7 +375,7 @@ export function loadDemand(range) {
   return out.sort((a, b) => a.orderedTs - b.orderedTs);
 }
 
-const slimDemand = (d) => ({
+export const slimDemand = (d) => ({
   channel: d.channel, orderId: d.orderId, orderRef: d.orderRef, orderedAt: d.orderedAt, buyer: d.buyer,
   itemId: d.itemId, sku: d.sku, variant: d.variant, quantity: d.quantity, received: d.received, remaining: d.remaining,
 });
@@ -377,7 +419,7 @@ const FINALISTS = 4;
 const CONFIDENT_SCORE = 0.8;
 const CONFIDENT_GAP = 0.15;
 
-async function mapLimit(list, limit, fn) {
+export async function mapLimit(list, limit, fn) {
   const out = new Array(list.length);
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(limit, list.length) }, async () => {
@@ -537,7 +579,7 @@ function lookupItem(channel, orderId, itemId) {
       WHERE x.line_item_id = ? AND x.order_id = ? AND o.shop_id = ?`)
       .get(String(itemId), String(orderId), activeShopifyShopId());
     if (!row) throw notFound(`Item ${itemId} is not on Shopify order ${orderId}.`);
-    return { code: row.name || row.order_id, warehousePhotoId: row.warehouse_photo_id };
+    return { code: shopifyCodesFor([row.order_id])[row.order_id] || row.name || row.order_id, warehousePhotoId: row.warehouse_photo_id };
   }
   throw badRequest('channel must be "etsy" or "shopify".');
 }
@@ -611,7 +653,7 @@ export function confirmMatch(id, { channel, orderId, itemId, source = 'manual', 
   db.prepare(`
     UPDATE inbound_parcels SET match_channel = ?, match_order_id = ?, match_item_id = ?, match_code = ?,
       match_source = ?, match_score = ?, matched_at = datetime('now'), packed_at = NULL WHERE id = ?`)
-    .run(channel, String(orderId), String(itemId), target.code, source === 'ai' ? 'ai' : 'manual',
+    .run(channel, String(orderId), String(itemId), target.code, ['ai', 'quick'].includes(source) ? source : 'manual',
       score == null ? null : Number(score), parcel.id);
   applyMatchEffects(parcel, channel, orderId, itemId, existingPhoto);
   audit('packing.match', { entity: 'parcel', entityId: parcel.id, detail: { channel, orderId, itemId, code: target.code, source, score } });
@@ -924,6 +966,7 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
     { header: 'Warehouse\n(仓库)', key: 'warehouse', width: 18 },
     { header: 'Channel', key: 'channel', width: 10 },
     { header: 'Item', key: 'item', width: 44 },
+    { header: 'Customer', key: 'buyer', width: 20 },
     { header: 'Status', key: 'status', width: 12 },
     { header: 'Received', key: 'received', width: 12 },
     { header: 'Note', key: 'note', width: 30 },
@@ -941,7 +984,10 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
     const item = items.get(`${p.match_channel}:${p.match_item_id}`);
     const row = sheet.addRow({
       label: parcelLabel(p), code: p.match_code || '', image: '', warehouse: p.warehouse,
-      channel: p.match_channel || '', item: item ? `${item.title}${item.variant ? ` (${item.variant})` : ''}` : '',
+      // An arrival nobody has matched yet says so, rather than leaving the cells blank.
+      channel: p.match_channel ? (p.match_channel === 'etsy' ? 'Etsy' : 'Shopify') : '-',
+      item: item ? `${item.title}${item.variant ? ` (${item.variant})` : ''}` : p.match_channel ? '(item no longer in the order mirror)' : 'Not matched yet - add its order code',
+      buyer: item?.buyer || '',
       status: p.packed_at ? 'Packed' : p.match_channel ? 'Matched' : 'Unmatched', received: p.received_on, note: p.note,
     });
     row.height = 96;
