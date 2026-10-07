@@ -431,12 +431,12 @@ function nextBase(prefix = readSetting('sku.prefix') || DEFAULT_PREFIX) {
 }
 
 /** How the variants of a family of SKUs are written here: separator and zero padding, so a new one looks like its siblings. */
-function styleOf(skus) {
+export function styleOf(skus, fallback = { sep: '-', width: 1 }) {
   for (const s of skus) {
     const m = /^(.*?)([-_])(\d+)$/.exec(s);
     if (m) return { sep: m[2], width: m[3].length > 1 && m[3].startsWith('0') ? m[3].length : 1 };
   }
-  return { sep: '-', width: 1 };
+  return fallback;
 }
 
 /**
@@ -444,7 +444,7 @@ function styleOf(skus) {
  * variants (at most one per product) that are the same thing, with the SKU they
  * should share.
  */
-export function slotsFor(products, { baseSku = '' } = {}) {
+export function slotsFor(products, { baseSku = '', taken: takenIn = null, style: styleIn = null, newBase = null } = {}) {
   // The product with the most variants frames the slots; the others are fitted onto it.
   const ordered = [...products].sort((a, b) => b.variants.length - a.variants.length);
   const slots = [];
@@ -476,7 +476,7 @@ export function slotsFor(products, { baseSku = '' } = {}) {
   }
 
   // the SKU each slot should carry
-  const taken = catalog.allSkus();
+  const taken = takenIn ?? catalog.allSkus();   // a caller planning many products at once passes the SKUs it has handed out so far
   const familySkus = slots.flatMap((s) => s.members.map((m) => m.sku)).filter(Boolean);
   let base = baseSku || '';
   if (!base) {
@@ -485,7 +485,7 @@ export function slotsFor(products, { baseSku = '' } = {}) {
     const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
     base = top ? familySkus.find((s) => skuBase(s) === top[0]).replace(/[-_]\d{1,3}$/, '') : '';
   }
-  const style = styleOf(familySkus);
+  const style = styleOf(familySkus, styleIn ?? undefined);
   const planned = new Set();
   const pending = [];
   for (const slot of slots) {
@@ -502,7 +502,7 @@ export function slotsFor(products, { baseSku = '' } = {}) {
     slot.onlyIn = slot.missingIn.length && slot.members.length < products.length ? slot.members.map((m) => m.shopName) : [];
   }
   if (pending.length) {
-    if (!base) base = nextBase();
+    if (!base) base = newBase ? newBase() : nextBase();
     let n = 0;
     for (const slot of pending) {
       let sku;

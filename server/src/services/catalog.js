@@ -67,7 +67,7 @@ const shopifyNumericId = (gid) => String(gid ?? '').split('/').pop();
 
 function etsyRows(where, params) {
   return getDb().prepare(`
-    SELECT p.product_id, p.listing_id, p.sku, p.variation_label, p.variation_image_url, p.is_enabled, p.quantity,
+    SELECT p.rowid AS ord, p.product_id, p.listing_id, p.sku, p.variation_label, p.variation_image_url, p.is_enabled, p.quantity,
            l.shop_id, l.title, l.state, l.url, l.first_image_url,
            a.shop_name, a.label,
            m.supply_link, m.variant_supply_link, m.supplier_name, m.variant_image_url
@@ -80,7 +80,7 @@ function etsyRows(where, params) {
     channel: 'etsy', shopKey: shopKey('etsy', r.shop_id), shopId: r.shop_id, shopName: r.label || r.shop_name || `Etsy ${r.shop_id}`,
     productRef: String(r.listing_id), productKey: variantKey('etsy', r.shop_id, `p${r.listing_id}`), variantRef: String(r.product_id),
     productTitle: r.title || '', productUrl: r.url || '', state: r.state || '',
-    variation: norm(r.variation_label), sku: norm(r.sku),
+    variation: norm(r.variation_label), sku: norm(r.sku), ord: r.ord,
     variantImageUrl: r.variant_image_url || r.variation_image_url || '', coverUrl: r.first_image_url || '',
     supplyLink: r.supply_link || '', variantSupplyLink: r.variant_supply_link || '', supplierName: r.supplier_name || '',
   }));
@@ -88,7 +88,7 @@ function etsyRows(where, params) {
 
 function shopifyRows(where, params) {
   return getDb().prepare(`
-    SELECT v.variant_id, v.product_id, v.title AS variant_title, v.sku, v.image_url,
+    SELECT v.position AS ord, v.variant_id, v.product_id, v.title AS variant_title, v.sku, v.image_url,
            p.shop_id, p.title, p.status, p.first_image_url,
            a.shop_name, a.label, a.shop_domain,
            m.supply_link, m.supplier_name
@@ -103,7 +103,7 @@ function shopifyRows(where, params) {
     productTitle: r.title || '',
     productUrl: r.shop_domain ? `https://${r.shop_domain}/admin/products/${shopifyNumericId(r.product_id)}` : '',
     state: String(r.status || '').toLowerCase(),
-    variation: isPlaceholderTitle(r.variant_title) ? '' : norm(r.variant_title), sku: norm(r.sku),
+    variation: isPlaceholderTitle(r.variant_title) ? '' : norm(r.variant_title), sku: norm(r.sku), ord: r.ord,
     variantImageUrl: r.image_url || '', coverUrl: r.first_image_url || '',
     supplyLink: r.supply_link || '', variantSupplyLink: '', supplierName: r.supplier_name || '',
   }));
@@ -207,6 +207,8 @@ export function productsOf(shops = null) {
     }
     byProduct.get(r.productKey).variants.push(r);
   }
+  // a product's variants in the order its shop lists them (not alphabetically) - the order SKUs are numbered in
+  for (const p of byProduct.values()) p.variants.sort((a, b) => (a.ord ?? 0) - (b.ord ?? 0));
   return [...byProduct.values()];
 }
 

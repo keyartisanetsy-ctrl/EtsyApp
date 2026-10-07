@@ -200,12 +200,12 @@ export function SortTh({ label, field, sort, dir, onSort, className = '' }) {
   );
 }
 
-export function Checkbox({ checked, onChange, label, indeterminate }) {
+export function Checkbox({ checked, onChange, label, indeterminate, disabled = false }) {
   const ref = useRef();
   useEffect(() => { if (ref.current) ref.current.indeterminate = !!indeterminate; }, [indeterminate]);
   return (
     <label className="checkbox" onClick={(e) => e.stopPropagation()}>
-      <input ref={ref} type="checkbox" checked={!!checked} onChange={(e) => onChange(e.target.checked)} />
+      <input ref={ref} type="checkbox" checked={!!checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       {label && <span>{label}</span>}
     </label>
   );

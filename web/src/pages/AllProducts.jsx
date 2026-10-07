@@ -6,6 +6,7 @@ import {
 } from '../components/ui.jsx';
 import CatalogStock from '../components/CatalogStock.jsx';
 import MatchesTab, { LinkModal, ShopBadge } from '../components/LinkProducts.jsx';
+import AutoSkuModal from '../components/AutoSku.jsx';
 
 const LIMIT = 100;
 const PREF = 'allproducts.shops';
@@ -35,6 +36,7 @@ export default function AllProducts() {
   const [preview, setPreview] = useState(null);
   const [saving, setSaving] = useState(false);
   const [linking, setLinking] = useState(null);
+  const [auto, setAuto] = useState(false);
   const [checks, setChecks] = useState({});
 
   const shops = useAsync(() => api.get('/catalog/shops'), []);
@@ -119,6 +121,7 @@ export default function AllProducts() {
       actions={(
         <>
           <button className="btn sm" onClick={() => { reload(); shops.reload(); }} disabled={loading}>{loading ? <Spinner /> : '↻'} Refresh</button>
+          <button className="btn sm" onClick={() => setAuto(true)} title="Give a SKU to every variant that has none - the same product in several shops gets the same SKUs">✨ Auto SKUs…</button>
           <button className="btn sm primary" disabled={!dirty || saving} onClick={review}>{saving ? <Spinner /> : '✓'} Review {dirty || ''} change{dirty === 1 ? '' : 's'}</button>
         </>
       )}
@@ -259,6 +262,8 @@ export default function AllProducts() {
           </table>
         </Modal>
       )}
+
+      {auto && <AutoSkuModal shops={picked} selectedProducts={selectedProducts} onClose={() => setAuto(false)} onDone={() => { reload(); shops.reload(); }} />}
 
       {linking && <LinkModal productKeys={linking} onClose={() => setLinking(null)} onDone={() => { setLinking(null); setSelected(new Set()); reload(); }} />}
     </TablePage>

@@ -1,0 +1,240 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import api from '../lib/api.js';
+import { Spinner, Banner, Thumb, Modal, Checkbox, useToast, useErrorToast } from './ui.jsx';
+import { ShopBadge } from './LinkProducts.jsx';
+
+const KIND = {
+  product: ['grey', 'single product', 'A product on its own - its variants are numbered in the order the shop lists them'],
+  group: ['blue', 'linked products', 'Products you linked earlier - they keep carrying the same SKUs'],
+  match: ['amber', 'same product in several shops', 'These look like the same product in different shops (same supplier item, SKU, or matching photos and words). They get the same SKUs and are linked.'],
+};
+const CHUNK = 10;
+const PAGE = 25;
+
+/** The SKUs of a unit in a few words: KEY022-1 … KEY022-3. */
+function skuRange(unit) {
+  const skus = [...new Set(unit.edits.map((e) => e.sku))];
+  if (skus.length <= 3) return skus.join(', ');
+  return `${skus[0]} … ${skus[skus.length - 1]} (${skus.length})`;
+}
+
+function UnitRow({ unit, ticked, onTick, open, onOpen }) {
+  const [kind, kindText, kindHelp] = KIND[unit.kind];
+  const shown = unit.products.slice(0, 3);
+  return (
+    <div className="card" style={{ margin: 0, padding: 10, opacity: ticked ? 1 : 0.6 }} data-testid="auto-unit" data-kind={unit.kind}>
+      <div className="flex gap8" style={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <input type="checkbox" aria-label={`Give SKUs to ${unit.title}`} checked={ticked} onChange={(e) => onTick(e.target.checked)} style={{ marginTop: 10 }} />
+        <div className="flex gap12" style={{ flex: '1 1 380px', flexWrap: 'wrap' }}>
+          {shown.map((p) => (
+            <div key={p.key} className="flex gap8" style={{ alignItems: 'flex-start', minWidth: 200, flex: '1 1 200px' }}>
+              <Thumb src={p.imageUrl} size="lg" />
+              <div style={{ minWidth: 0 }}>
+                <ShopBadge channel={p.channel} name={p.shopName} />
+                <div className="small" style={{ marginTop: 2 }}><a href={p.url} target="_blank" rel="noreferrer">{p.title}</a></div>
+                <div className="small muted">{p.variantCount} variant{p.variantCount === 1 ? '' : 's'}</div>
+              </div>
+            </div>
+          ))}
+          {unit.products.length > shown.length && <span className="small muted">+{unit.products.length - shown.length} more</span>}
+        </div>
+        <div style={{ minWidth: 190 }}>
+          <span className={`badge ${kind}`} title={kindHelp}>{kindText}</span>
+          {unit.score != null && <span className="badge grey" style={{ marginLeft: 4 }} title="How alike the weakest pair is">{Math.round(unit.score * 100)}%</span>}
+          <div className="mono small" style={{ marginTop: 4 }}>{skuRange(unit)}</div>
+          <div className="small muted">{unit.edits.length} SKU{unit.edits.length === 1 ? '' : 's'} to give</div>
+          {unit.partial > 0 && <div className="small" style={{ color: 'var(--warn, #fbbf24)' }} title="Some variants exist in only some of the shops. They get a SKU of the same family.">{unit.partial} variant{unit.partial === 1 ? '' : 's'} not in every shop</div>}
+          <button className="btn xs ghost" style={{ marginTop: 2 }} onClick={onOpen}>{open ? 'Hide variants' : 'Show variants'}</button>
+        </div>
+      </div>
+      {unit.kind === 'match' && !unit.ticked && (
+        <div className="small muted" style={{ marginTop: 4 }}>
+          Not ticked on its own: {unit.partial > 0 ? 'the shops do not have the same variants' : unit.score < 0.85 ? 'the match is not certain' : 'it needs a look'} - compare the photos, then tick it if it is the same product.
+        </div>
+      )}
+      {unit.notes.map((n) => <div key={n} className="small" style={{ color: 'var(--bad)', marginTop: 2 }}>{n}</div>)}
+      {open && (
+        <table className="data" style={{ marginTop: 8 }}>
+          <thead><tr><th>Shop</th><th>Variant</th><th>SKU it gets</th></tr></thead>
+          <tbody>
+            {unit.edits.map((e) => (
+              <tr key={e.key}><td><ShopBadge channel={e.channel} name={e.shopName} /></td><td className="small">{e.variation || '(single variant)'}</td><td className="mono small"><strong>{e.sku}</strong></td></tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Automatic SKUs for every variant that has none. The server works out the plan -
+ * who gets which SKU - and nothing is written until the ticked products are
+ * approved here. Existing SKUs are never changed.
+ */
+export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone }) {
+  const toast = useToast();
+  const showError = useErrorToast();
+  const [opts, setOpts] = useState({ scope: 'shown', prefix: '', numbering: 'auto', includeInactive: false, linkMatches: true });
+  const [prefixDraft, setPrefixDraft] = useState('');
+  const [plan, setPlan] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [ticked, setTicked] = useState(new Set());
+  const [open, setOpen] = useState(new Set());
+  const [kindFilter, setKindFilter] = useState('all');
+  const [page, setPage] = useState(0);
+  const [run, setRun] = useState(null);      // { done, total, written, failed: [{title, errors}], stopped, finished }
+  const stopRef = useRef(false);
+
+  const load = useCallback(async (o) => {
+    setLoading(true);
+    try {
+      const body = {
+        shops: shops && shops.length ? shops : undefined,
+        productKeys: o.scope === 'selected' ? selectedProducts : undefined,
+        prefix: o.prefix || undefined, numbering: o.numbering, includeInactive: o.includeInactive, linkMatches: o.linkMatches,
+      };
+      const p = await api.post('/catalog/auto-sku/plan', body);
+      setPlan(p);
+      setTicked(new Set(p.units.filter((u) => u.ticked).map((u) => u.id)));
+      setOpen(new Set()); setPage(0);
+      if (!o.prefix) setPrefixDraft(p.prefix);
+    } catch (err) { showError(err, 'Could not work out the SKUs'); } finally { setLoading(false); }
+  }, [shops, selectedProducts]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => { load(opts); }, [opts]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const set = (patch) => setOpts((o) => ({ ...o, ...patch }));
+  const units = plan?.units ?? [];
+  const visible = useMemo(() => units.filter((u) => kindFilter === 'all' || u.kind === kindFilter), [units, kindFilter]);
+  const pageUnits = visible.slice(page * PAGE, page * PAGE + PAGE);
+  const chosen = units.filter((u) => ticked.has(u.id));
+  const chosenSkus = chosen.reduce((n, u) => n + u.edits.length, 0);
+  const busy = !!run && !run.finished;
+
+  const tickMany = (list, on) => setTicked((prev) => { const next = new Set(prev); for (const u of list) { if (on) next.add(u.id); else next.delete(u.id); } return next; });
+
+  const write = async () => {
+    const perShop = {};
+    for (const u of chosen) for (const e of u.edits) perShop[e.shopName] = (perShop[e.shopName] ?? 0) + 1;
+    const lines = Object.entries(perShop).map(([shop, n]) => `${shop}: ${n}`).join('\n');
+    const matches = chosen.filter((u) => u.link).length;
+    if (!window.confirm(`Write ${chosenSkus} SKUs for ${chosen.length} products?\n\n${lines}\n\n${matches ? `${matches} group${matches === 1 ? '' : 's'} of the same product will also be linked.\n` : ''}Only empty SKUs are filled - no existing SKU is changed.`)) return;
+    stopRef.current = false;
+    const state = { done: 0, total: chosen.length, written: 0, failed: [], stopped: false, finished: false };
+    setRun({ ...state });
+    try {
+      for (let i = 0; i < chosen.length; i += CHUNK) {
+        if (stopRef.current) { state.stopped = true; break; }
+        const part = chosen.slice(i, i + CHUNK);
+        // eslint-disable-next-line no-await-in-loop
+        const r = await api.post('/catalog/auto-sku/apply', { units: part.map((u) => ({ id: u.id, edits: u.edits.map(({ key, sku }) => ({ key, sku })), link: u.link })) });
+        state.done += part.length; state.written += r.written;
+        for (const u of r.units.filter((x) => !x.ok)) state.failed.push({ title: part.find((p) => p.id === u.id)?.title, errors: u.errors });
+        setRun({ ...state });
+      }
+    } catch (err) { state.stopped = true; showError(err, 'Writing stopped'); }
+    state.finished = true;
+    setRun({ ...state });
+    toast({ kind: state.failed.length ? 'err' : 'ok', title: `${state.written} SKU${state.written === 1 ? '' : 's'} written`, body: state.failed.length ? `${state.failed.length} product${state.failed.length === 1 ? '' : 's'} had problems - see the list.` : undefined, duration: 8000 });
+    onDone?.();
+    load(opts);
+  };
+
+  return (
+    <Modal open lg onClose={busy ? () => {} : onClose} title="Automatic SKUs"
+           footer={(
+             <>
+               {busy ? <button className="btn" onClick={() => { stopRef.current = true; }}>Stop after this batch</button> : <button className="btn" onClick={onClose}>Close</button>}
+               <button className="btn primary" disabled={busy || loading || !chosen.length} onClick={write}>
+                 {busy ? <Spinner /> : `Write ${chosenSkus} SKU${chosenSkus === 1 ? '' : 's'} (${chosen.length} product${chosen.length === 1 ? '' : 's'})`}
+               </button>
+             </>
+           )}>
+      <div className="small muted mb8">
+        Gives a SKU to every variant that has none. A SKU that exists is never changed, a SKU is never used twice, and the same product in several shops gets the same SKUs.
+        Nothing is written until you press the button below - untick any product you want to leave out.
+      </div>
+
+      <div className="flex gap12 mb8" style={{ flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <label className="small">Which products
+          <select className="select sm" style={{ display: 'block' }} value={opts.scope} disabled={busy} onChange={(e) => set({ scope: e.target.value })}>
+            <option value="shown">All in the shops shown{shops?.length ? ` (${shops.length})` : ''}</option>
+            <option value="selected" disabled={!selectedProducts.length}>Only the {selectedProducts.length} selected</option>
+          </select>
+        </label>
+        <label className="small">SKU starts with
+          <input className="input sm mono" style={{ display: 'block', width: 90 }} value={prefixDraft} disabled={busy} aria-label="SKU prefix"
+                 onChange={(e) => setPrefixDraft(e.target.value.toUpperCase())}
+                 onBlur={() => { if (prefixDraft && prefixDraft !== (opts.prefix || plan?.prefix)) set({ prefix: prefixDraft }); }}
+                 onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
+        </label>
+        <label className="small">Variants numbered
+          <select className="select sm" style={{ display: 'block' }} value={opts.numbering} disabled={busy} onChange={(e) => set({ numbering: e.target.value })}>
+            <option value="auto">like the catalogue{plan ? ` (${plan.prefix}001${plan.style.sep}${'1'.padStart(plan.style.width, '0')})` : ''}</option>
+            <option value="1">-1, -2, -3</option>
+            <option value="01">-01, -02, -03</option>
+          </select>
+        </label>
+        <Checkbox checked={opts.linkMatches} disabled={busy} onChange={(v) => set({ linkMatches: v })} label="Link products that are the same" />
+        <Checkbox checked={opts.includeInactive} disabled={busy} onChange={(v) => set({ includeInactive: v })} label="Include drafts and expired listings" />
+      </div>
+
+      {loading ? (
+        <div className="empty"><Spinner /><p className="small muted">Working out the SKUs and looking at the photos of look-alike products…</p></div>
+      ) : !plan ? null : !units.length ? (
+        <Banner kind="ok">Nothing to give: every variant here already has a SKU{plan.skipped.length ? `, apart from ${plan.skipped.length} left out below` : ''}.</Banner>
+      ) : (
+        <>
+          <Banner kind="info">
+            <strong>{plan.counts.variants.toLocaleString()} SKUs</strong> for {plan.counts.products.toLocaleString()} products:{' '}
+            {plan.counts.single} single, {plan.counts.matches} same-product match{plan.counts.matches === 1 ? '' : 'es'}, {plan.counts.groups} linked group{plan.counts.groups === 1 ? '' : 's'}.
+            Next free number: <span className="mono">{plan.prefix}{String(plan.nextNumber).padStart(3, '0')}</span>
+            {' '}({plan.prefixSource === 'catalogue' ? 'prefix taken from your existing SKUs' : plan.prefixSource === 'typed' ? 'prefix typed by you' : 'prefix from the settings'}).
+            {' '}{plan.counts.ticked} of {plan.counts.units} ticked.
+          </Banner>
+          {run && (
+            <div className="mb8" data-testid="auto-progress">
+              <div className="small">{run.finished ? (run.stopped ? 'Stopped' : 'Done') : 'Writing'}: {run.done} of {run.total} products · {run.written} SKUs written{run.failed.length ? ` · ${run.failed.length} with problems` : ''}</div>
+              <div style={{ height: 6, background: 'var(--line, #223)', borderRadius: 3, marginTop: 4 }}>
+                <div style={{ height: 6, width: `${run.total ? Math.round((run.done / run.total) * 100) : 0}%`, background: 'var(--brand)', borderRadius: 3 }} />
+              </div>
+              {run.failed.slice(0, 8).map((f, i) => <div key={i} className="small" style={{ color: 'var(--bad)' }}>{f.title}: {f.errors[0]}</div>)}
+            </div>
+          )}
+          <div className="flex gap8 mb8" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
+            <select className="select sm" value={kindFilter} onChange={(e) => { setKindFilter(e.target.value); setPage(0); }} aria-label="Show">
+              <option value="all">All ({units.length})</option>
+              <option value="match">Same product in several shops ({plan.counts.matches})</option>
+              <option value="group">Linked products ({plan.counts.groups})</option>
+              <option value="product">Single products ({plan.counts.single})</option>
+            </select>
+            <button className="btn xs ghost" disabled={busy} onClick={() => tickMany(visible, true)}>Tick all shown</button>
+            <button className="btn xs ghost" disabled={busy} onClick={() => tickMany(visible, false)}>Untick all shown</button>
+            <div style={{ flex: 1 }} />
+            <span className="small muted">{visible.length ? `${page * PAGE + 1}–${Math.min(visible.length, page * PAGE + PAGE)} of ${visible.length}` : ''}</span>
+            <button className="btn xs ghost" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>Prev</button>
+            <button className="btn xs ghost" disabled={(page + 1) * PAGE >= visible.length} onClick={() => setPage((p) => p + 1)}>Next</button>
+          </div>
+          <div className="flex col" style={{ gap: 8 }}>
+            {pageUnits.map((u) => (
+              <UnitRow key={u.id} unit={u} ticked={ticked.has(u.id)} onTick={(on) => tickMany([u], on)}
+                       open={open.has(u.id)} onOpen={() => setOpen((s) => { const n = new Set(s); if (n.has(u.id)) n.delete(u.id); else n.add(u.id); return n; })} />
+            ))}
+          </div>
+        </>
+      )}
+
+      {plan && plan.skipped.length > 0 && (
+        <details className="mt16">
+          <summary className="small muted" style={{ cursor: 'pointer' }}>{plan.skipped.length} left out</summary>
+          <div className="flex col" style={{ gap: 3, marginTop: 6 }}>
+            {plan.skipped.slice(0, 60).map((s, i) => (
+              <div key={i} className="small muted">{s.products.map((p) => `${p.title} (${p.shopName})`).join(' / ')} - {s.reason}</div>
+            ))}
+          </div>
+        </details>
+      )}
+    </Modal>
+  );
+}

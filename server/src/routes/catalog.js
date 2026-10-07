@@ -4,6 +4,7 @@ import { badRequest } from '../lib/errors.js';
 import * as catalog from '../services/catalog.js';
 import * as links from '../services/productlinks.js';
 import * as supplycheck from '../services/supplycheck.js';
+import * as autosku from '../services/autosku.js';
 
 const router = Router();
 
@@ -114,6 +115,28 @@ router.post('/reject', asyncRoute(async (req, res) => {
   if (Array.isArray(req.body?.keys)) return res.json(links.rejectPairs(req.body.keys));   // every pair among the picked products
   required(req.body ?? {}, ['a', 'b']);
   res.json(links.rejectPair(req.body.a, req.body.b));
+}));
+
+// ----------------------------------------------------------- automatic SKUs
+
+/** What automatic SKUs would be handed out (nothing is written): the plan, product by product. */
+router.post('/auto-sku/plan', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(await autosku.plan({
+    shops: shopsOf(b.shops),
+    productKeys: Array.isArray(b.productKeys) ? b.productKeys.slice(0, 5000) : null,
+    prefix: String(b.prefix ?? ''),
+    numbering: ['1', '01'].includes(String(b.numbering)) ? String(b.numbering) : 'auto',
+    includeInactive: bool(b.includeInactive),
+    linkMatches: b.linkMatches === undefined ? true : bool(b.linkMatches),
+    imageBudget: Math.min(600, int(b.imageBudget, 300)),
+  }));
+}));
+
+/** Write the approved part of a plan, a few products at a time: { units: [{ id, edits: [{ key, sku }], link }], dryRun }. */
+router.post('/auto-sku/apply', asyncRoute(async (req, res) => {
+  required(req.body ?? {}, ['units']);
+  res.json(await autosku.applyUnits(req.body.units, { dryRun: bool(req.body.dryRun) }));
 }));
 
 export default router;
