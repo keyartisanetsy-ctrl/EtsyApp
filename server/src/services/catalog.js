@@ -110,6 +110,13 @@ function shopifyRows(where, params) {
   }));
 }
 
+/** Every variant of every shop that carries this SKU (case-insensitive) - the same product wherever it is sold. */
+export function variantsBySku(sku) {
+  const s = norm(sku);
+  if (!s) return [];
+  return [...etsyRows(' AND p.sku = ? COLLATE NOCASE', [s]), ...shopifyRows(' AND v.sku = ? COLLATE NOCASE', [s])];
+}
+
 /** The groups products have been linked into, as Map("channel:shop:p<ref>" -> groupId). */
 function groupIndex() {
   const out = new Map();

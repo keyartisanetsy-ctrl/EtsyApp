@@ -113,6 +113,8 @@ export function migrateSchema(db) {
   addColumn(db, 'stock_movements', 'restocked', 'INTEGER NOT NULL DEFAULT 0');
   addColumn(db, 'order_codes', 'source', 'TEXT');
   addColumn(db, 'shopify_order_codes', 'source', 'TEXT');
+  // what the supplier asks for the item (in supply_currency) - the figure typed from the Packing page; Shopify's own cost per item is derived from it
+  addColumn(db, 'shopify_variant_meta', 'supply_cost', 'REAL');
   // Inbound supplier-to-warehouse tracking, alongside the existing
   // supplier_order_ref - both surfaced next to the order's own images.
   addColumn(db, 'order_flags', 'supply_tracking_number', "TEXT DEFAULT ''");

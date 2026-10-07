@@ -222,14 +222,15 @@ export function saveVariantMeta(sku, meta = {}) {
     supply_link: meta.supplyLink ?? existing.supply_link ?? '',
     supplier_name: meta.supplierName ?? existing.supplier_name ?? '',
     supply_currency: meta.supplyCurrency ?? existing.supply_currency ?? 'CNY',
+    supply_cost: meta.supplyCost === '' || meta.supplyCost === null ? null : meta.supplyCost ?? existing.supply_cost ?? null,
     notes: meta.notes ?? existing.notes ?? '',
   };
   db.prepare(`
-    INSERT INTO shopify_variant_meta (shop_id, sku, supply_link, supplier_name, supply_currency, notes, updated_at)
-    VALUES (?,?,?,?,?,?, datetime('now'))
+    INSERT INTO shopify_variant_meta (shop_id, sku, supply_link, supplier_name, supply_currency, supply_cost, notes, updated_at)
+    VALUES (?,?,?,?,?,?,?, datetime('now'))
     ON CONFLICT(shop_id, sku) DO UPDATE SET supply_link=excluded.supply_link, supplier_name=excluded.supplier_name,
-      supply_currency=excluded.supply_currency, notes=excluded.notes, updated_at=excluded.updated_at`)
-    .run(shopId, sku, merged.supply_link, merged.supplier_name, merged.supply_currency, merged.notes);
+      supply_currency=excluded.supply_currency, supply_cost=excluded.supply_cost, notes=excluded.notes, updated_at=excluded.updated_at`)
+    .run(shopId, sku, merged.supply_link, merged.supplier_name, merged.supply_currency, merged.supply_cost, merged.notes);
   return db.prepare('SELECT * FROM shopify_variant_meta WHERE shop_id = ? AND sku = ?').get(shopId, sku);
 }
 
