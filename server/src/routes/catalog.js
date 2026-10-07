@@ -76,6 +76,12 @@ router.get('/suggestions', asyncRoute(async (req, res) => {
 
 router.get('/groups', asyncRoute(async (req, res) => res.json({ groups: links.listGroups() })));
 
+/** Optional AI look at whether pairs of suggested products are the same thing - only when asked for. */
+router.post('/ai-compare', asyncRoute(async (req, res) => {
+  required(req.body ?? {}, ['pairs']);
+  res.json(await links.compareWithAi(req.body.pairs, { provider: req.body.provider, model: req.body.model }));
+}));
+
 /** The proposal for these products: paired variants, the SKU each pair would share, and what would change. */
 router.post('/matrix', asyncRoute(async (req, res) => {
   required(req.body ?? {}, ['productKeys']);

@@ -25,6 +25,7 @@ import { signatureFor, similarity } from './imagesig.js';
 import { cachedProductImageId } from './warehousecheck.js';
 import { readSetting } from './settings.js';
 import { DEFAULT_PREFIX } from './skugen.js';
+import { run, parseJsonish } from './ai/index.js';
 
 const clamp = (n, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, n));
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -223,11 +224,82 @@ export async function suggest({ shops = null, minScore = 0.5, imageBudget = 40, 
       members: members.map(publicProduct),
       evidence: c.edges.sort((x, y) => y.score - x.score).slice(0, 8).map((e) => ({
         a: e.a.key, b: e.b.key, score: round2(e.score), ...e.ev,
+        ai: storedAiCheck(e.a.key, e.b.key, e.a.imageUrl, e.b.imageUrl),   // only when someone asked for it
       })),
     });
   }
   out.sort((x, y) => y.score - x.score || y.members.length - x.members.length);
   return { suggestions: out.slice(0, limit), products: products.length, imagesCompared: needImage.length };
+}
+
+// ----------------------------------------------------------- optional AI look
+
+const pairKey = (x, y) => (x < y ? [x, y] : [y, x]);
+
+function storedAiCheck(aKey, bKey, aUrl, bUrl) {
+  const [lo, hi] = pairKey(aKey, bKey);
+  const [loUrl, hiUrl] = lo === aKey ? [aUrl, bUrl] : [bUrl, aUrl];
+  const r = getDb().prepare('SELECT * FROM product_ai_checks WHERE a_key = ? AND b_key = ? AND a_url = ? AND b_url = ?').get(lo, hi, loUrl ?? '', hiUrl ?? '');
+  return r ? { verdict: r.verdict, confidence: r.confidence, summary: r.summary, checkedAt: r.checked_at } : null;
+}
+
+const AI_SYSTEM = `You help an online seller decide whether two shop listings are the SAME product.
+
+You get two product photos and the two listing titles. The listings come from different shops, so the
+photos, titles and wording will differ. Look at the product itself: its design, character, colours,
+shape, printed artwork and how many pieces it has. The same product in another colour is still the
+same product; a different design, character or model from the same maker is NOT.
+
+Reply with JSON only:
+{"verdict":"same"|"different"|"unsure","confidence":0.0-1.0,"summary":"one short line: what matches or what differs"}
+Say "unsure" when the photos do not show enough to tell.`;
+
+/**
+ * Optional, on request only: one small AI look at pairs of products that the
+ * free evidence (supplier item, SKU, title, photo colours) could not settle.
+ * The answer is shown next to the evidence and remembered; it never links or
+ * changes anything by itself.
+ */
+export async function compareWithAi(pairs, { provider, model, runner = run } = {}) {
+  const wanted = (pairs ?? []).slice(0, 6);
+  if (!wanted.length) throw badRequest('No product pairs to look at.');
+  const results = [];
+  for (const { a, b } of wanted) {
+    const pa = productByKey(a); const pb = productByKey(b);
+    if (pa.shopKey === pb.shopKey) throw badRequest('Both products are in the same shop.');
+    const ua = pa.coverUrl || pa.variants.find((v) => v.variantImageUrl)?.variantImageUrl || '';
+    const ub = pb.coverUrl || pb.variants.find((v) => v.variantImageUrl)?.variantImageUrl || '';
+    if (!ua || !ub) { results.push({ a, b, error: 'One of the two products has no photo to look at.' }); continue; }
+    try {
+      const ids = [await cachedProductImageId(ua), await cachedProductImageId(ub)];
+      const ai = await runner({
+        kind: 'custom',
+        provider: provider || readSetting('ai.warehouse.provider') || undefined,
+        model: model || readSetting('ai.warehouse.model') || undefined,
+        promptOverride: AI_SYSTEM,
+        attachmentIds: ids.map((id) => ({ id, detail: 'low' })),
+        effort: 'fast',
+        userInput: `Photo 1 is the listing "${String(pa.title).slice(0, 160)}" (${pa.shopName}).\nPhoto 2 is the listing "${String(pb.title).slice(0, 160)}" (${pb.shopName}).\nJSON only.`,
+        maxTokens: 300,
+      });
+      const parsed = parseJsonish(ai.text);
+      if (!parsed) throw new Error('The AI did not return a usable answer.');
+      const verdict = ['same', 'different', 'unsure'].includes(parsed.verdict) ? parsed.verdict : 'unsure';
+      const confidence = Number.isFinite(Number(parsed.confidence)) ? Math.min(1, Math.max(0, Number(parsed.confidence))) : null;
+      const summary = String(parsed.summary ?? '').slice(0, 300);
+      const [lo, hi] = pairKey(a, b);
+      const [loUrl, hiUrl] = lo === a ? [ua, ub] : [ub, ua];
+      getDb().prepare(`
+        INSERT INTO product_ai_checks (a_key, b_key, a_url, b_url, verdict, confidence, summary, provider, model, checked_at)
+        VALUES (?,?,?,?,?,?,?,?,?, datetime('now'))
+        ON CONFLICT(a_key, b_key, a_url, b_url) DO UPDATE SET verdict = excluded.verdict, confidence = excluded.confidence,
+          summary = excluded.summary, provider = excluded.provider, model = excluded.model, checked_at = datetime('now')`)
+        .run(lo, hi, loUrl, hiUrl, verdict, confidence, summary, ai.provider ?? null, ai.model ?? null);
+      results.push({ a, b, ai: storedAiCheck(a, b, ua, ub) });
+    } catch (err) { results.push({ a, b, error: err.message }); }
+  }
+  audit('catalog.product_ai_check', { entity: 'product_link', entityId: wanted.map((p) => `${p.a}~${p.b}`).join(',').slice(0, 200), detail: { pairs: wanted.length } });
+  return { results };
 }
 
 const publicProduct = (p) => ({

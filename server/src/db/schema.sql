@@ -1178,3 +1178,18 @@ CREATE TABLE IF NOT EXISTS supplier_image_checks (
   checked_at  TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (supplier, item_id, ours_url)
 );
+
+-- An optional AI look at whether two products of different shops are the same thing (only when asked for).
+CREATE TABLE IF NOT EXISTS product_ai_checks (
+  a_key       TEXT NOT NULL,       -- the lower product key of the pair
+  b_key       TEXT NOT NULL,
+  a_url       TEXT NOT NULL,       -- the photos looked at: a new photo means a new question
+  b_url       TEXT NOT NULL,
+  verdict     TEXT NOT NULL,       -- same | different | unsure
+  confidence  REAL,
+  summary     TEXT,
+  provider    TEXT,
+  model       TEXT,
+  checked_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (a_key, b_key, a_url, b_url)
+);

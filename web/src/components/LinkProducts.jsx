@@ -5,6 +5,7 @@ import { Spinner, Empty, Banner, Thumb, Modal, useAsync, useToast, useErrorToast
 const CHANNEL_BADGE = { etsy: 'orange', shopify: 'green' };
 export const ShopBadge = ({ channel, name }) => <span className={`badge ${CHANNEL_BADGE[channel] ?? 'grey'}`}>{name}</span>;
 
+const AI_VERDICT = { same: ['green', 'same product'], different: ['red', 'different'], unsure: ['amber', 'unsure'] };
 const TIER = { sure: ['green', 'sure'], likely: ['amber', 'likely'], maybe: ['grey', 'maybe'] };
 
 /** Why two products are thought to be the same, in a few chips. */
@@ -16,6 +17,12 @@ function Evidence({ edge }) {
       {edge.supplier && <span className="badge green" title="Their supplier links point at the same item">same supplier item</span>}
       {edge.title != null && <span className="badge grey" title="How much of the titles' wording is shared (rare words count more)">titles {Math.round(edge.title * 100)}%</span>}
       {edge.image?.sim != null && <span className={`badge ${edge.image.sim >= 0.8 ? 'green' : edge.image.sim >= 0.62 ? 'amber' : 'red'}`} title="Colour likeness of the first photos">photos {Math.round(edge.image.sim * 100)}%</span>}
+      {edge.ai && (
+        <span className={`badge ${AI_VERDICT[edge.ai.verdict]?.[0] ?? 'grey'}`} title={edge.ai.summary || 'The AI looked at both photos'}>
+          AI: {AI_VERDICT[edge.ai.verdict]?.[1] ?? edge.ai.verdict}{edge.ai.confidence != null ? ` ${Math.round(edge.ai.confidence * 100)}%` : ''}
+        </span>
+      )}
+      {edge.aiError && <span className="badge red" title={edge.aiError}>AI failed</span>}
     </span>
   );
 }
@@ -187,8 +194,22 @@ export default function MatchesTab({ onChanged }) {
   const [linking, setLinking] = useState(null); // product keys
   const suggestions = useAsync(() => api.get('/catalog/suggestions'), []);
   const groups = useAsync(() => api.get('/catalog/groups'), []);
+  const [aiResults, setAiResults] = useState({});   // "a|b" -> what the AI said just now (saved answers come with the suggestions)
   const reloadAll = useCallback(() => { suggestions.reload(); groups.reload(); onChanged?.(); }, [suggestions, groups, onChanged]);
 
+  const [aiBusy, setAiBusy] = useState(null);
+  /** Optional: one small AI look at the photos of the pairs shown on this card. Nothing runs unless this is pressed. */
+  const askAi = async (s, id) => {
+    setAiBusy(id);
+    try {
+      const shown = s.evidence.slice(0, 3);
+      const r = await api.post('/catalog/ai-compare', { pairs: shown.map((e) => ({ a: e.a, b: e.b })) });
+      const byPair = new Map(r.results.map((x) => [`${x.a}|${x.b}`, x]));
+      setAiResults((prev) => ({ ...prev, ...Object.fromEntries(shown.map((e) => [`${e.a}|${e.b}`, byPair.get(`${e.a}|${e.b}`)])) }));
+      const failed = r.results.filter((x) => x.error);
+      if (failed.length) toast({ kind: 'err', title: `${failed.length} of ${r.results.length} could not be checked`, body: failed[0].error, duration: 8000 });
+    } catch (err) { showError(err, 'AI check failed'); } finally { setAiBusy(null); }
+  };
   const notSame = async (s) => {
     try {
       for (const e of s.evidence) await api.post('/catalog/reject', { a: e.a, b: e.b }); // eslint-disable-line no-await-in-loop
@@ -212,30 +233,45 @@ export default function MatchesTab({ onChanged }) {
         <div className="card-head"><h3>Looks like the same product</h3></div>
         <div className="card-sub">
           Products of different shops that point at the same supplier item, already share a SKU, or have matching titles and photos.
+          This matching is free - no AI is used. Press "Check with AI" on a card only when you are unsure.
           Nothing is linked or changed until you press a button - pick "Line up SKUs" to see how their variants pair up first.
         </div>
         {suggestions.loading && !suggestions.data ? <Spinner /> : !list.length ? (
           <Empty icon="⧉" title="No unlinked matches found">Products already linked, or marked "not the same", are left out.</Empty>
         ) : (
           <div className="flex col" style={{ gap: 10 }}>
-            {list.map((s) => (
-              <div key={s.members.map((m) => m.key).join('|')} className="card" style={{ margin: 0, padding: 10 }}>
+            {list.map((s) => {
+              const cardId = s.members.map((m) => m.key).join('|');
+              const evidence = s.evidence.map((e) => {
+                const fresh = aiResults[`${e.a}|${e.b}`];
+                return { ...e, ai: fresh?.ai ?? e.ai, aiError: fresh?.error };
+              });
+              const unchecked = evidence.slice(0, 3).some((e) => !e.ai);
+              return (
+              <div key={cardId} className="card" style={{ margin: 0, padding: 10 }}>
                 <div className="flex gap8" style={{ flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 }}>
                   <span className={`badge ${TIER[s.tier][0]}`}>{TIER[s.tier][1]} · {Math.round(s.score * 100)}%</span>
                   {s.joinsGroup != null && <span className="badge blue">adds to group #{s.joinsGroup}</span>}
                   <div style={{ flex: 1 }} />
+                  {unchecked && (
+                    <button className="btn xs" disabled={aiBusy === cardId} onClick={() => askAi(s, cardId)}
+                            title="Optional. Matching above is free and uses no AI; this asks one small AI model to look at the photos when you are not sure. Nothing is linked by it.">
+                      {aiBusy === cardId ? <Spinner /> : 'Check with AI'}
+                    </button>
+                  )}
                   <button className="btn xs primary" onClick={() => setLinking(s.members.map((m) => m.key))}>Line up SKUs…</button>
                   <button className="btn xs ghost" onClick={() => notSame(s)}>Not the same</button>
                 </div>
                 <div className="flex gap12" style={{ flexWrap: 'wrap' }}>{s.members.map((m) => <ProductCard key={m.key} p={m} />)}</div>
                 <div className="flex col" style={{ gap: 3, marginTop: 6 }}>
-                  {s.evidence.slice(0, 3).map((e) => {
+                  {evidence.slice(0, 3).map((e) => {
                     const name = (k) => s.members.find((m) => m.key === k)?.shopName;
                     return <div key={`${e.a}${e.b}`} className="small muted">{name(e.a)} ↔ {name(e.b)}: <Evidence edge={e} /></div>;
                   })}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
