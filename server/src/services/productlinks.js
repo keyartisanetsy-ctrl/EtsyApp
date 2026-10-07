@@ -55,6 +55,7 @@ export function optionValues(label) {
     .sort();
 }
 
+const stem = (w) => (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w);
 const wordsOf = (values) => new Set(values.flatMap((v) => v.split(' ')).filter((w) => w.length > 1));
 const jaccard = (a, b) => {
   if (!a.size || !b.size) return 0;
@@ -197,8 +198,23 @@ export async function suggest({ shops = null, minScore = 0.5, imageBudget = 40, 
     .sort((x, y) => (y.ev.title ?? 0) - (x.ev.title ?? 0)).slice(0, imageBudget);
   await mapLimit(needImage, 6, async (e) => {
     const [sa, sb] = await Promise.all([fingerprint(e.a, cache), fingerprint(e.b, cache)]);
-    const sim = sa && sb ? similarity(sa, sb) : null;
-    e.ev.image = sim == null ? { checked: true, sim: null } : { checked: true, sim: round2(sim) };
+    let sim = sa && sb ? similarity(sa, sb) : null;
+    let viaVariant = false;
+    // A product sold on its own is often one variant of a bigger listing elsewhere, and the bigger listing's cover shows
+    // something else. Then its own photo is held against the photos of that listing's variants (a few of them).
+    const [single, many] = e.a.variants.length === 1 && e.b.variants.length > 1 ? [e.a, e.b] : e.b.variants.length === 1 && e.a.variants.length > 1 ? [e.b, e.a] : [null, null];
+    if (single && (sim == null || sim < 0.8)) {
+      const mine = single === e.a ? sa : sb;
+      const urls = [...new Set(many.variants.map((v) => v.variantImageUrl).filter(Boolean))].slice(0, 6);
+      for (const url of urls) {
+        if (!mine) break;
+        let other = cache.get(url);
+        if (other === undefined) { try { other = signatureFor(await cachedProductImageId(url)); } catch { other = null; } cache.set(url, other); }
+        const v = other ? similarity(mine, other) : null;
+        if (v != null && (sim == null || v > sim)) { sim = v; viaVariant = true; }
+      }
+    }
+    e.ev.image = sim == null ? { checked: true, sim: null } : { checked: true, sim: round2(sim), ...(viaVariant ? { viaVariant: true } : {}) };
   });
 
   // connected components of the pairs that are worth showing
@@ -444,14 +460,54 @@ export function styleOf(skus, fallback = { sep: '-', width: 1 }) {
  * variants (at most one per product) that are the same thing, with the SKU they
  * should share.
  */
-export function slotsFor(products, { baseSku = '', taken: takenIn = null, style: styleIn = null, newBase = null } = {}) {
+export function slotsFor(products, { baseSku = '', taken: takenIn = null, style: styleIn = null, newBase = null, hints = null } = {}) {
   // The product with the most variants frames the slots; the others are fitted onto it.
   const ordered = [...products].sort((a, b) => b.variants.length - a.variants.length);
+  const frame = ordered[0];
   const slots = [];
-  const place = (slot, v, product) => { slot.members.push({ key: v.key, productKey: product.key, shopKey: v.shopKey, shopName: v.shopName, channel: v.channel, variation: v.variation, sku: v.sku, hasSupply: !!(v.supplyLink || v.variantSupplyLink), imageUrl: v.variantImageUrl || v.coverUrl }); slot.products.add(product.key); };
+  const place = (slot, v, product) => {
+    const link = parseSupplyUrl(v.variantSupplyLink || v.supplyLink || '');
+    slot.members.push({
+      key: v.key, productKey: product.key, shopKey: v.shopKey, shopName: v.shopName, channel: v.channel, variation: v.variation, sku: v.sku,
+      hasSupply: !!(v.supplyLink || v.variantSupplyLink), imageUrl: v.variantImageUrl || v.coverUrl,
+      supplyItem: link.ok && link.itemId ? `${link.supplier}:${link.itemId}` : '', supplySku: link.ok && link.skuId ? String(link.skuId) : '',
+    });
+    slot.products.add(product.key); slot.shops.add(v.shopKey);
+  };
   const newSlot = (v, product) => {
-    const slot = { id: slots.length, label: v.variation || '(single variant)', values: optionValues(v.variation), words: wordsOf(optionValues(v.variation)), members: [], products: new Set() };
+    const slot = { id: slots.length, label: v.variation || '(single variant)', values: optionValues(v.variation), words: wordsOf(optionValues(v.variation)), members: [], products: new Set(), shops: new Set() };
     place(slot, v, product); slots.push(slot);
+  };
+  /**
+   * A product with just one variant against a product that has several: it is
+   * usually ONE of those variants listed on its own ("MOA profile" as its own
+   * listing). Find which one - by the supplier's own variant id, by the words of
+   * its title, or by the photo - and only when exactly one fits.
+   */
+  const pairSingle = (v, product, open) => {
+    if (!open.length || slots.length < 2) return null;
+    const mine = parseSupplyUrl(v.variantSupplyLink || v.supplyLink || '');
+    if (mine.ok && mine.itemId && mine.skuId) {
+      const hit = open.filter((sl) => sl.members.some((m) => m.supplyItem === `${mine.supplier}:${mine.itemId}` && m.supplySku === String(mine.skuId)));
+      if (hit.length === 1) return hit[0];
+    }
+    const text = new Set([...titleTokens(product.title), ...titleTokens(v.variation)].map(stem));
+    // words every variant of the framing product shares ("profile" in Cherry / MOA / OEM Profile) say nothing about which one this is
+    const common = new Set([...slots[0].words].map(stem));
+    for (const sl of slots) for (const w of [...common]) if (![...sl.words].map(stem).includes(w)) common.delete(w);
+    const fits = open.map((sl) => {
+      const distinct = [...sl.words].map(stem).filter((w) => !common.has(w));
+      return { sl, distinct, hit: distinct.filter((w) => text.has(w)).length };
+    }).filter((x) => x.distinct.length && x.hit === x.distinct.length);
+    if (fits.length === 1) return fits[0].sl;
+    if (fits.length > 1) {
+      const most = Math.max(...fits.map((x) => x.distinct.length));
+      const top = fits.filter((x) => x.distinct.length === most);
+      if (top.length === 1) return top[0].sl;
+    }
+    const target = hints?.get?.(v.key);
+    if (target) return open.find((sl) => sl.members.some((m) => m.key === target)) ?? null;
+    return null;
   };
 
   for (const product of ordered) {
@@ -459,7 +515,8 @@ export function slotsFor(products, { baseSku = '', taken: takenIn = null, style:
     for (const v of product.variants) {
       const values = optionValues(v.variation);
       const sig = values.join('|');
-      const free = (s) => !s.products.has(product.key) && !used.has(s.id);
+      // a slot never holds two variants of one shop: they would end up with the same SKU in that shop
+      const free = (s) => !s.products.has(product.key) && !used.has(s.id) && !s.shops.has(v.shopKey);
       let slot = null;
       // 1. a SKU they already share
       if (v.sku) slot = slots.find((s) => free(s) && s.members.some((m) => m.sku && m.sku.toLowerCase() === v.sku.toLowerCase())) ?? null;
@@ -471,6 +528,8 @@ export function slotsFor(products, { baseSku = '', taken: takenIn = null, style:
         const scored = slots.filter(free).map((s) => ({ s, j: jaccard(words, s.words) })).filter((x) => x.j >= 0.6).sort((a, b) => b.j - a.j);
         if (scored.length && (scored.length === 1 || scored[0].j - scored[1].j >= 0.15)) slot = scored[0].s;
       }
+      // 4. a product that is really one variant of the framing product, sold on its own
+      if (!slot && !values.length && product !== frame && product.variants.length === 1 && frame.variants.length >= 2) slot = pairSingle(v, product, slots.filter(free));
       if (slot) { place(slot, v, product); used.add(slot.id); } else { newSlot(v, product); used.add(slots[slots.length - 1].id); }
     }
   }
@@ -518,12 +577,44 @@ export function slotsFor(products, { baseSku = '', taken: takenIn = null, style:
   }));
 }
 
+/**
+ * For a product that is one variant of another product, sold on its own: which
+ * variant, by the photo. The product's picture is held against the picture of
+ * each variant of the framing product; it counts only when one variant clearly
+ * wins. The title and the supplier's variant id are tried first, in slotsFor -
+ * this is for what they could not settle.
+ */
+export async function variantHints(products, { budget = { left: 24 } } = {}) {
+  const hints = new Map();
+  const frame = [...products].sort((a, b) => b.variants.length - a.variants.length)[0];
+  if (!frame || frame.variants.length < 2) return hints;
+  const withImage = frame.variants.filter((v) => v.variantImageUrl);
+  if (withImage.length < 2 || new Set(withImage.map((v) => v.variantImageUrl)).size < 2) return hints;
+  for (const product of products) {
+    if (product === frame || product.variants.length !== 1) continue;
+    const mine = product.coverUrl || product.variants[0].variantImageUrl;
+    if (!mine || budget.left < withImage.length + 1) continue;
+    try {
+      budget.left -= withImage.length + 1;
+      const sig = signatureFor(await cachedProductImageId(mine));
+      if (!sig) continue;
+      const scored = [];
+      for (const v of withImage) {
+        try { const other = signatureFor(await cachedProductImageId(v.variantImageUrl)); if (other) scored.push({ v, sim: similarity(sig, other) }); } catch { /* skipped */ }
+      }
+      scored.sort((a, b) => b.sim - a.sim);
+      if (scored.length >= 2 && scored[0].sim >= 0.85 && scored[0].sim - scored[1].sim >= 0.08) hints.set(product.variants[0].key, scored[0].v.key);
+    } catch { /* a photo that will not load has no say */ }
+  }
+  return hints;
+}
+
 /** The proposal for these products: slots with their SKUs, and what each change would be - checked, nothing sent. */
 export async function matrix(productKeys, { baseSku = '' } = {}) {
   const keys = [...new Set(productKeys)];
   if (keys.length < 2) throw badRequest('Pick at least two products.');
   const products = keys.map(productByKey);
-  const slots = slotsFor(products, { baseSku });
+  const slots = slotsFor(products, { baseSku, hints: await variantHints(products) });
   const edits = slots.flatMap((s) => s.members.filter((m) => m.sku.toLowerCase() !== s.sku.toLowerCase()).map((m) => ({ key: m.key, sku: s.sku })));
   const check = edits.length ? await catalog.applyChanges(edits, { dryRun: true }) : { results: [], changed: 0, failed: 0 };
   const problems = Object.fromEntries(check.results.filter((r) => !r.ok).map((r) => [r.key, r.error]));

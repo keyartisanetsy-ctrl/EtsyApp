@@ -86,7 +86,15 @@ function splitCluster(members, edges) {
         const inA = picked.has(e.a); const inB = picked.has(e.b);
         if (inA === inB) continue;
         const other = left.get(inA ? e.b : e.a);
-        if (!other || shopsIn.has(other.shopKey)) continue;
+        if (!other) continue;
+        if (shopsIn.has(other.shopKey)) {
+          // Two products of one shop may sit in one set only when each is ONE variant of the same bigger product elsewhere
+          // ("Desk mat - Small" and "Desk mat - Large" next to a single "Desk mat" with both sizes).
+          const anchor = picked.get(inA ? e.a : e.b);
+          const sameShop = [...picked.values()].filter((m) => m.shopKey === other.shopKey);
+          const bigger = anchor.shopKey !== other.shopKey && anchor.variantCount >= 2;
+          if (!(bigger && other.variantCount === 1 && sameShop.every((m) => m.variantCount === 1))) continue;
+        }
         picked.set(other.key, other); shopsIn.add(other.shopKey); weakest = Math.min(weakest, e.score); grew = true;
         break;
       }
@@ -184,8 +192,8 @@ export async function plan({
     for (const keys of sets) {
       const products = [...new Set(keys)].map((k) => byKey.get(k)).filter(Boolean);
       if (products.length < 2) { skipped.push({ kind: 'note', products: products.map(publicProduct), reason: 'Pick at least two products that are in the shops.' }); continue; }
-      if (new Set(products.map((p) => p.shopKey)).size !== products.length) {
-        skipped.push({ kind: 'note', products: products.map(publicProduct), reason: 'Two of them are in the same shop - a shop cannot carry the same SKU twice.' }); continue;
+      if (new Set(products.map((p) => p.shopKey)).size < 2) {
+        skipped.push({ kind: 'note', products: products.map(publicProduct), reason: 'They are all in the same shop - a shop cannot carry the same SKU twice.' }); continue;
       }
       work.push({ kind: 'match', products, score: null, confirmed: true, sortTitle: lc(products[0].title) });
     }
@@ -227,10 +235,14 @@ export async function plan({
   work.sort((a, b) => (a.sortTitle < b.sortTitle ? -1 : a.sortTitle > b.sortTitle ? 1 : 0));
 
   const units = [];
+  const photoBudget = { left: Math.max(60, imageBudget) };   // photos fetched for variant pairing, all units together
   for (const w of work) {
     const type = typeOf(w.products);
     const unitPrefix = type?.prefix ?? usedPrefix;
-    const slots = links.slotsFor(w.products, { taken, style, newBase: () => allocBase(unitPrefix) });
+    // a product sold on its own next to one with several variants may be one of them: the photo can say which
+    const biggest = Math.max(...w.products.map((p) => p.variants.length));
+    const hints = biggest >= 2 && w.products.some((p) => p.variants.length === 1) ? await links.variantHints(w.products, { budget: photoBudget }) : null;
+    const slots = links.slotsFor(w.products, { taken, style, hints, newBase: () => allocBase(unitPrefix) });
     const notes = [];
     const edits = [];
     for (const slot of slots) {

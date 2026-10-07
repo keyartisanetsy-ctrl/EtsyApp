@@ -223,8 +223,14 @@ function defaultPick(s) {
     const inA = picked.has(e.a); const inB = picked.has(e.b);
     if (inA === inB) continue;
     const other = inA ? e.b : e.a;
-    if (shops.has(shopOf(byKey.get(other)))) continue;
-    picked.add(other); shops.add(shopOf(byKey.get(other)));
+    const o = byKey.get(other);
+    if (shops.has(shopOf(o))) {
+      // two listings of one shop only when each is one variant of the same bigger product elsewhere
+      const anchor = byKey.get(inA ? e.a : e.b);
+      const sameShop = [...picked].map((k) => byKey.get(k)).filter((m) => shopOf(m) === shopOf(o));
+      if (!(shopOf(anchor) !== shopOf(o) && anchor.variantCount >= 2 && o.variantCount === 1 && sameShop.every((m) => m.variantCount === 1))) continue;
+    }
+    picked.add(other); shops.add(shopOf(o));
   }
   return picked;
 }
@@ -245,7 +251,7 @@ function SuggestionCard({ s, picked, onPick, inBulk, onBulk, onLink, onRejected 
   const shopCounts = new Map();
   for (const m of selected) shopCounts.set(m.shopName, (shopCounts.get(m.shopName) ?? 0) + 1);
   const sameShop = [...shopCounts.entries()].filter(([, n]) => n > 1).map(([name]) => name);
-  const canConfirm = selected.length >= 2 && !sameShop.length;
+  const canConfirm = selected.length >= 2 && new Set(selected.map((m) => m.shopKey)).size >= 2;
   const byName = new Map(s.members.map((m) => [m.key, m.shopName]));
 
   const evidenceOf = new Map(s.evidence.map((e) => [pairId(e.a, e.b), e]));
@@ -288,7 +294,7 @@ function SuggestionCard({ s, picked, onPick, inBulk, onBulk, onLink, onRejected 
     <div className="card" style={{ margin: 0, padding: 10 }} data-testid="suggestion">
       <div className="flex gap8" style={{ flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 }}>
         <input type="checkbox" aria-label="Include this match in the bulk action" checked={inBulk && canConfirm} disabled={!canConfirm}
-               title={canConfirm ? 'Tick to confirm / reject many matches at once (see the bar above the list)' : 'Tick at least two products, one per shop, to include this match'}
+               title={canConfirm ? 'Tick to confirm / reject many matches at once (see the bar above the list)' : 'Tick products of at least two shops to include this match'}
                onChange={(e) => onBulk(e.target.checked)} />
         <span className={`badge ${TIER[s.tier][0]}`}>{TIER[s.tier][1]} · {Math.round(s.score * 100)}%</span>
         {s.joinsGroup != null && <span className="badge blue">adds to group #{s.joinsGroup}</span>}
@@ -308,7 +314,7 @@ function SuggestionCard({ s, picked, onPick, inBulk, onBulk, onLink, onRejected 
         <button className="btn xs ghost" disabled={busy || selected.length < 2} onClick={notSame}
                 title="The ticked products are different products - do not suggest them together again">Not the same</button>
         <button className="btn xs primary" disabled={!canConfirm} onClick={() => onLink(selected.map((m) => m.key))}
-                title={canConfirm ? 'Yes, these are the same product - go on to line up their variants (nothing is written yet)' : 'Tick at least two products, one per shop'}>
+                title={canConfirm ? 'Yes, these are the same product - go on to line up their variants (nothing is written yet)' : 'Tick products of at least two shops'}>
           Same product - confirm ({selected.length})…
         </button>
       </div>
@@ -316,8 +322,9 @@ function SuggestionCard({ s, picked, onPick, inBulk, onBulk, onLink, onRejected 
         {s.members.map((m) => <ProductCard key={m.key} p={m} pick={{ checked: picked.has(m.key), onChange: (on) => toggle(m.key, on) }} />)}
       </div>
       {sameShop.length > 0 && (
-        <div className="small" style={{ color: 'var(--bad)', marginTop: 6 }}>
-          More than one ticked product is in {sameShop.join(', ')}. A shop cannot carry the same SKU twice - tick only one of them.
+        <div className="small muted" style={{ marginTop: 6 }} data-testid="same-shop-note">
+          More than one ticked product is in {sameShop.join(', ')}. That is fine when each of them is one variant of the other shop's product
+          ("Desk mat - Small", "Desk mat - Large"): each is lined up with its own variant and gets its own SKU. Two copies of the same thing would not belong together - untick one of them.
         </div>
       )}
       <div className="flex col" style={{ gap: 3, marginTop: 6 }}>
@@ -349,7 +356,7 @@ export default function MatchesTab({ onChanged }) {
   const idOf = (s) => s.members.map((m) => m.key).join('|');
   const pickedOf = (s) => picks[idOf(s)] ?? defaultPick(s);
   const chosenOf = (s) => s.members.filter((m) => pickedOf(s).has(m.key));
-  const validOf = (s) => { const c = chosenOf(s); return c.length >= 2 && new Set(c.map((m) => m.shopKey)).size === c.length; };
+  const validOf = (s) => { const c = chosenOf(s); return c.length >= 2 && new Set(c.map((m) => m.shopKey)).size >= 2; };
 
   const unlink = async (productKey) => {
     if (!window.confirm('Take this product out of the group? Its SKUs stay as they are.')) return;
@@ -398,7 +405,7 @@ export default function MatchesTab({ onChanged }) {
         <div className="card-sub">
           Products of different shops that point at the same supplier item, already share a SKU, or have matching titles and photos.
           This matching is free - no AI is used. Press "Check with AI" on a card only when you are unsure.
-          Tick the products that really are the same one (one per shop), then confirm - only then do their variants get lined up,
+          Tick the products that really are the same one, then confirm - only then do their variants get lined up,
           and nothing is linked or changed until you approve that last step.
         </div>
         {suggestions.loading && !suggestions.data ? <Spinner /> : !list.length ? (
