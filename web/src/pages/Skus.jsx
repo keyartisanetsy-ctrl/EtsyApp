@@ -220,8 +220,8 @@ export default function Skus() {
 
   return (
     <TablePage
-      title="SKUs & variations"
-      subtitle={data ? `${data.total.toLocaleString()} variations · −${pct}% sale column` : ''}
+      title="Store products"
+      subtitle={data ? `${data.total.toLocaleString()} variations of this shop · −${pct}% sale column` : ''}
       actions={
         <>
           {dups?.length > 0 && (

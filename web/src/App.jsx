@@ -8,6 +8,7 @@ import Login from './components/Login.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Listings from './pages/Listings.jsx';
 import Skus from './pages/Skus.jsx';
+import AllProducts from './pages/AllProducts.jsx';
 import Orders from './pages/Orders.jsx';
 import Tracking from './pages/Tracking.jsx';
 import AiStudio from './pages/AiStudio.jsx';
@@ -38,7 +39,8 @@ const NAV = [
     label: 'Catalogue',
     items: [
       { to: '/listings', icon: '▤', label: 'Listings', badge: 'listings' },
-      { to: '/skus', icon: '⧉', label: 'SKUs & variations', badge: 'missingSku', badgeKind: 'muted' },
+      { to: '/skus', icon: '⧉', label: 'Store products', badge: 'missingSku', badgeKind: 'muted' },
+      { to: '/all-products', icon: '🗂', label: 'All products' },
       { to: '/listings/new', icon: '＋', label: 'Create listing' },
       { to: '/drafts', icon: '✎', label: 'Draft desk' },
       { to: '/supply', icon: '🛒', label: 'Supply book' },
@@ -211,6 +213,7 @@ export default function App() {
             <Route path="/listings" element={<Listings />} />
             <Route path="/listings/new" element={<NewListing />} />
             <Route path="/skus" element={<Skus />} />
+            <Route path="/all-products" element={<AllProducts />} />
             <Route path="/orders" element={<Orders />} />
             <Route path="/packing" element={<Packing />} />
             <Route path="/tracking" element={<Tracking />} />
