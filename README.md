@@ -107,6 +107,21 @@ to (each write runs as that shop, never "whichever is active"); a SKU may never 
   numbered per prefix (`KCS012-1`), the same SKUs for the same product in every shop, a SKU that exists
   never changed. Nothing is written until the plan is ticked and approved.
 
+- **Real stock.** The *Real stock* page lists every SKU with its photos, where it is sold (links to each
+  shop's listing), variant names and photos, supplier links, the quantity each shop shows and the real count.
+  *History* shows every change: counts, orders (who, which shop, how many ordered / taken / short),
+  cancellations put back and renames.
+
+### Packing
+- Codes number from `01` each day and carry on after the last code still on the list; an empty list starts
+  again at `01`, and a removed parcel gives its code back.
+- Orders show the packing list's code, parcel photo, carrier line and warehouse.
+- **Product: Taobao item & price** (on every matched parcel): type the Taobao item id or paste the link and
+  the price. It is saved against the product's SKU in every Etsy shop and Shopify store that sells it, and
+  Shopify also gets the price (converted into the store currency) as the variant's *cost per item*. An item
+  without a SKU can be given one there. A shop that already holds something different is asked about first
+  (change / keep).
+
 ### Orders
 - **Done** tick column, so a glance says what is still open, plus a separate
   **new / unseen** badge that distinguishes orders you have not looked at yet.
