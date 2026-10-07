@@ -18,7 +18,7 @@ const LIMIT = 60;
 
 export default function Orders() {
   const [params, setParams] = useSearchParams();
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(params.get('search') ?? '');
   const debounced = useDebounced(search);
   const [done, setDone] = useState(params.get('done') ?? '');
   const [shipped, setShipped] = useState(params.get('shipped') ?? '');

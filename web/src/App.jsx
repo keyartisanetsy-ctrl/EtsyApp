@@ -9,6 +9,7 @@ import Dashboard from './pages/Dashboard.jsx';
 import Listings from './pages/Listings.jsx';
 import Skus from './pages/Skus.jsx';
 import AllProducts from './pages/AllProducts.jsx';
+import RealStock from './pages/RealStock.jsx';
 import Orders from './pages/Orders.jsx';
 import Tracking from './pages/Tracking.jsx';
 import AiStudio from './pages/AiStudio.jsx';
@@ -41,6 +42,7 @@ const NAV = [
       { to: '/listings', icon: '▤', label: 'Listings', badge: 'listings' },
       { to: '/skus', icon: '⧉', label: 'Store products', badge: 'missingSku', badgeKind: 'muted' },
       { to: '/all-products', icon: '🗂', label: 'All products' },
+      { to: '/real-stock', icon: '📦', label: 'Real stock' },
       { to: '/listings/new', icon: '＋', label: 'Create listing' },
       { to: '/drafts', icon: '✎', label: 'Draft desk' },
       { to: '/supply', icon: '🛒', label: 'Supply book' },
@@ -214,6 +216,7 @@ export default function App() {
             <Route path="/listings/new" element={<NewListing />} />
             <Route path="/skus" element={<Skus />} />
             <Route path="/all-products" element={<AllProducts />} />
+            <Route path="/real-stock" element={<RealStock />} />
             <Route path="/orders" element={<Orders />} />
             <Route path="/packing" element={<Packing />} />
             <Route path="/tracking" element={<Tracking />} />
