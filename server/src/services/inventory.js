@@ -58,8 +58,34 @@ export function toWritablePayload(inventory) {
 
 export const fetchInventory = (listingId) => call('getListingInventory', { listing_id: listingId });
 
+/**
+ * Etsy keeps ONE SKU for every product of a listing unless the listing says which
+ * properties the SKU follows (sku_on_property); a payload whose SKUs differ
+ * without that is refused with "sku must be consistent across all products".
+ * So when the SKUs of a payload are not consistent with its sku_on_property,
+ * point it at every property the variations are made of - each variation is then
+ * its own combination and may carry its own SKU. Returns true when it changed it.
+ */
+export function ensureSkuOnProperty(payload) {
+  const products = payload.products ?? [];
+  if (products.length < 2) return false;
+  const propertyIds = [...new Set(products.flatMap((p) => (p.property_values || []).map((pv) => Number(pv.property_id))))];
+  if (!propertyIds.length) return false;
+  const on = Array.isArray(payload.sku_on_property) ? payload.sku_on_property.map(Number) : [];
+  const combination = (p) => on.map((id) => JSON.stringify((p.property_values || []).find((pv) => Number(pv.property_id) === id)?.value_ids ?? [])).join('|');
+  const seen = new Map();
+  for (const p of products) {
+    const k = combination(p);
+    const sku = String(p.sku ?? '');
+    if (seen.has(k) && seen.get(k) !== sku) { payload.sku_on_property = propertyIds; return true; }
+    seen.set(k, sku);
+  }
+  return false;
+}
+
 /** Push a rebuilt inventory payload and refresh the local mirror. */
 export async function writeInventory(listingId, payload) {
+  if (ensureSkuOnProperty(payload)) log.info(`listing ${listingId}: SKUs now follow the variation properties (sku_on_property)`);
   const res = await call('updateListingInventory', { listing_id: listingId }, { body: payload });
   saveInventory(listingId, res);
   try { await syncVariationImages(listingId); } catch { /* variation images are optional */ }
