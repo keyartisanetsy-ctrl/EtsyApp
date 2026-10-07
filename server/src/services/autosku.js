@@ -150,7 +150,16 @@ export async function plan({
       if (!usedBases.has(k) && !taken.has(k)) { usedBases.add(k); return base; }
     }
   };
-  const typeOf = (products) => { for (const p of products) { const t = classify(p.title, typeRules); if (t) return t; } return null; };
+  // the type of a set of products: the narrowest one any of them fits (a keycap SET beats a keycap - the rule list goes narrow to wide)
+  const typeOf = (products) => {
+    let best = null; let bestAt = Infinity;
+    for (const p of products) {
+      const t = classify(p.title, typeRules);
+      const at = t ? typeRules.indexOf(t) : Infinity;
+      if (at < bestAt) { best = t; bestAt = at; }
+    }
+    return best;
+  };
 
   // what each shop already uses, so one shop never gets the same SKU on two variants
   const shopSkus = new Map();
