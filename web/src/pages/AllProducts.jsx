@@ -27,6 +27,7 @@ export default function AllProducts() {
   const [search, setSearch] = useState('');
   const debounced = useDebounced(search);
   const [flags, setFlags] = useState({ missingSku: false, missingSupply: false, ungrouped: false, duplicates: false });
+  const [stockFilter, setStockFilter] = useState('');
   const [sort, setSort] = useState('title');
   const [dir, setDir] = useState('asc');
   const [offset, setOffset] = useState(0);
@@ -37,6 +38,7 @@ export default function AllProducts() {
   const [saving, setSaving] = useState(false);
   const [linking, setLinking] = useState(null);
   const [auto, setAuto] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [checks, setChecks] = useState({});
 
   const shops = useAsync(() => api.get('/catalog/shops'), []);
@@ -48,9 +50,9 @@ export default function AllProducts() {
   const query = useMemo(() => ({
     shops: picked && picked.length ? picked.join(',') : undefined,
     search: debounced, missingSku: flags.missingSku || undefined, missingSupply: flags.missingSupply || undefined,
-    ungrouped: flags.ungrouped || undefined, duplicates: flags.duplicates || undefined,
+    ungrouped: flags.ungrouped || undefined, duplicates: flags.duplicates || undefined, stock: stockFilter || undefined,
     sort, dir, limit: LIMIT, offset,
-  }), [picked, debounced, flags, sort, dir, offset]);
+  }), [picked, debounced, flags, stockFilter, sort, dir, offset]);
   const { data, loading, error, reload } = useAsync(() => api.get('/catalog/variants', query), [query]);
   const rows = data?.rows ?? [];
   const counts = data?.counts;
@@ -74,10 +76,10 @@ export default function AllProducts() {
   const onSort = (field) => { if (sort === field) setDir((d) => (d === 'asc' ? 'desc' : 'asc')); else { setSort(field); setDir('asc'); } };
 
   // ---- staging edits: only what differs from what is stored
-  const stage = (row, field, value) => setEdits((all) => {
+  const stage = (row, field, value, base = row[field]) => setEdits((all) => {
     const next = { ...all };
     const edit = { ...(next[row.key] ?? {}) };
-    if (String(value).trim() === String(row[field] ?? '').trim()) delete edit[field]; else edit[field] = value;
+    if (String(value).trim() === String(base ?? '').trim()) delete edit[field]; else edit[field] = value;
     if (Object.keys(edit).length) next[row.key] = edit; else delete next[row.key];
     return next;
   });
@@ -110,7 +112,36 @@ export default function AllProducts() {
   // ---- selection -> linking
   const toggle = (key) => setSelected((s) => { const n = new Set(s); if (n.has(key)) n.delete(key); else n.add(key); return n; });
   const selectedProducts = useMemo(() => [...new Set(rows.filter((r) => selected.has(r.key)).map((r) => r.productKey))], [rows, selected]);
+  /** One number for the shop quantity of every selected variant. */
+  const setShopShows = () => {
+    const raw = window.prompt(`What should the shop show for the ${selected.size} selected variant${selected.size === 1 ? '' : 's'}?\n(a whole number - Etsy shows 0 to 999)`, '999');
+    if (raw == null) return;
+    const q = Number(raw.trim());
+    if (!Number.isInteger(q) || q < 0) { toast({ kind: 'err', title: 'That is not a quantity', body: 'Use a whole number, 0 or more.' }); return; }
+    for (const r of rows.filter((x) => selected.has(x.key))) stage(r, 'quantity', String(q), r.shopQty);
+  };
   const onResult = useCallback((key, r) => setChecks((c) => ({ ...c, [key]: r })), []);
+
+  /** Every variant that matches the filters (not just this page) as a CSV file. */
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      const all = [];
+      for (let offset2 = 0; offset2 < 100000; offset2 += 1000) {
+        const r = await api.get('/catalog/variants', { ...query, limit: 1000, offset: offset2 }); // eslint-disable-line no-await-in-loop
+        all.push(...r.rows);
+        if (r.rows.length < 1000) break;
+      }
+      const cell = (v) => { const t = String(v ?? ''); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+      const head = ['Shop', 'Product', 'Variation', 'SKU', 'Shop shows', 'Real stock', 'Supplier link', 'Variant supplier link', 'Supplier', 'Linked group', 'Product URL'];
+      const lines = [head.join(',')].concat(all.map((r) => [r.shopName, r.productTitle, r.variation, r.sku, r.shopQty, r.realStock, r.supplyLink, r.variantSupplyLink, r.supplierName, r.groupId != null ? `#${r.groupId}` : '', r.productUrl].map(cell).join(',')));
+      const blob = new Blob([`\uFEFF${lines.join('\r\n')}`], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = `variants-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      toast({ kind: 'ok', title: `${all.length.toLocaleString()} variants exported` });
+    } catch (err) { showError(err, 'Could not export'); } finally { setExporting(false); }
+  };
 
   const allSelected = rows.length > 0 && rows.every((r) => selected.has(r.key));
 
@@ -121,6 +152,7 @@ export default function AllProducts() {
       actions={(
         <>
           <button className="btn sm" onClick={() => { reload(); shops.reload(); }} disabled={loading}>{loading ? <Spinner /> : '↻'} Refresh</button>
+          <button className="btn sm" onClick={exportCsv} disabled={exporting} title="Download the variants that match the filters as a spreadsheet (CSV)">{exporting ? <Spinner /> : '⭳'} Export</button>
           <button className="btn sm" onClick={() => setAuto(true)} title="Give a SKU to every variant that has none - the same product in several shops gets the same SKUs">✨ Auto SKUs…</button>
           <button className="btn sm primary" disabled={!dirty || saving} onClick={review}>{saving ? <Spinner /> : '✓'} Review {dirty || ''} change{dirty === 1 ? '' : 's'}</button>
         </>
@@ -143,8 +175,16 @@ export default function AllProducts() {
               <Checkbox checked={flags.missingSupply} onChange={(v) => setFlag('missingSupply', v)} label={`No supplier${counts ? ` (${counts.missingSupply})` : ''}`} />
               <Checkbox checked={flags.ungrouped} onChange={(v) => setFlag('ungrouped', v)} label="Not linked" />
               <Checkbox checked={flags.duplicates} onChange={(v) => setFlag('duplicates', v)} label={`Duplicate SKU${counts?.duplicates ? ` (${counts.duplicates})` : ''}`} />
+              <select className="select sm" value={stockFilter} aria-label="Stock filter" onChange={(e) => { setStockFilter(e.target.value); setOffset(0); }}
+                      title="Real stock is what is on the shelf; the shop quantity is what the shop shows">
+                <option value="">Any stock</option>
+                <option value="oversell">Shop sells, shelf empty{counts?.oversell ? ` (${counts.oversell})` : ''}</option>
+                <option value="zero">Real stock 0{counts?.realZero ? ` (${counts.realZero})` : ''}</option>
+                <option value="tracked">Real stock counted{counts?.realTracked ? ` (${counts.realTracked})` : ''}</option>
+                <option value="untracked">Real stock not counted</option>
+              </select>
               <div className="spacer" />
-              <span className="small muted">Only SKU and supplier can be changed here</span>
+              <span className="small muted">Only SKU, supplier and stock can be changed here</span>
             </>
           )}
         </>
@@ -154,6 +194,8 @@ export default function AllProducts() {
           <span className="count">{selected.size} selected · {selectedProducts.length} product{selectedProducts.length === 1 ? '' : 's'}</span>
           <button className="btn xs primary" disabled={selectedProducts.length < 2} onClick={() => setLinking(selectedProducts)}
                   title="They are the same product: line up their variants and give matching variants one SKU">Same product - line up SKUs…</button>
+          <button className="btn xs" onClick={setShopShows}
+                  title="The quantity the shop shows for every selected variant (Etsy 0-999) - staged here, written when you review">Shop shows…</button>
           <div className="spacer" />
           <button className="btn xs ghost" onClick={() => setSelected(new Set())}>Clear selection</button>
         </div>
@@ -177,6 +219,7 @@ export default function AllProducts() {
                   <SortTh label="Product / variation" field="title" sort={sort} dir={dir} onSort={onSort} />
                   <SortTh label="SKU" field="sku" sort={sort} dir={dir} onSort={onSort} />
                   <th>Supplier</th>
+                  <SortTh label="Stock: shop / real" field="stock" sort={sort} dir={dir} onSort={onSort} />
                   <th>Stock at the supplier</th>
                 </tr>
               </thead>
@@ -217,6 +260,20 @@ export default function AllProducts() {
                         <input className="input sm" style={{ width: '100%', marginTop: 3 }} value={name} placeholder="supplier name"
                                onChange={(ev) => stage(r, 'supplierName', ev.target.value)} />
                       </td>
+                      <td style={{ minWidth: 150 }}>
+                        <label className="small muted" style={{ display: 'flex', gap: 6, alignItems: 'center' }} title="The quantity the shop shows (written to the shop)">
+                          <span style={{ width: 34 }}>Shop</span>
+                          <input className="input sm mono" type="number" min="0" style={{ width: 78 }} value={e.quantity ?? r.shopQty ?? ''} placeholder="–"
+                                 aria-label={`Quantity shown by the shop for ${r.productTitle} ${r.variation}`} onChange={(ev) => stage(r, 'quantity', ev.target.value, r.shopQty)} />
+                        </label>
+                        <label className="small muted" style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 3 }}
+                               title={sku ? 'What is really on the shelf - one count for this SKU in every shop. Orders take pieces off it, never below 0.' : 'Give this variant a SKU first - the real stock is kept per SKU'}>
+                          <span style={{ width: 34 }}>Real</span>
+                          <input className="input sm mono" type="number" min="0" style={{ width: 78 }} value={e.realStock ?? r.realStock ?? ''} placeholder="not counted" disabled={!sku}
+                                 aria-label={`Real stock of ${r.productTitle} ${r.variation}`} onChange={(ev) => stage(r, 'realStock', ev.target.value, r.realStock)} />
+                        </label>
+                        {r.oversellRisk && <span className="badge red" style={{ marginTop: 3 }} title="The shop shows pieces, but the shelf is empty - it can sell what you do not have">shop sells, shelf empty</span>}
+                      </td>
                       <td>
                         <CatalogStock row={{ ...r, supplyLink: link, variantSupplyLink: variantLink }} info={checks[r.key]} onResult={onResult} />
                       </td>
@@ -240,11 +297,11 @@ export default function AllProducts() {
                  </>
                )}>
           <div className="small muted mb8">
-            Each SKU is written to the shop named on its row - nothing else about those products changes. Supplier details stay in this app.
+            Each SKU and each shop quantity is written to the shop named on its row - nothing else about those products changes. Supplier details and the real stock stay in this app.
             {preview.failed > 0 && ' Rows marked in red are skipped; the others can still be written.'}
           </div>
           <table className="data">
-            <thead><tr><th>Shop</th><th>Product / variation</th><th>SKU</th><th>Supplier</th></tr></thead>
+            <thead><tr><th>Shop</th><th>Product / variation</th><th>SKU</th><th>Stock</th><th>Supplier</th></tr></thead>
             <tbody>
               {preview.results.map((x) => {
                 const row = rowOf[x.key];
@@ -254,6 +311,11 @@ export default function AllProducts() {
                     <td className="small">{row?.productTitle}<div className="muted">{row?.variation}</div></td>
                     <td className="mono small">{!x.ok ? <span style={{ color: 'var(--bad)' }}>{x.error}</span> : x.unchanged ? <span className="muted">no change</span>
                       : x.from !== x.sku ? <><span className="muted">{x.from || '(none)'}</span> → <strong>{x.sku}</strong></> : <span className="muted">{x.sku}</span>}</td>
+                    <td className="small">
+                      {x.quantity ? <div>shop shows {x.quantity.from ?? '–'} → <strong>{x.quantity.to}</strong></div> : null}
+                      {x.real ? <div>real {x.real.from ?? 'not counted'} → <strong>{x.real.to ?? 'stop counting'}</strong></div> : null}
+                      {!x.quantity && !x.real ? <span className="muted">—</span> : null}
+                    </td>
                     <td className="small">{x.supplier ? Object.entries(x.supplier).map(([k, v]) => <div key={k}>{k === 'supplierName' ? 'name' : k === 'variantSupplyLink' ? 'variant link' : 'link'}: {v || '(cleared)'}</div>) : <span className="muted">—</span>}</td>
                   </tr>
                 );
