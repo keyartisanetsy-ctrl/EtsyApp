@@ -38,6 +38,10 @@ export function normalise(text) {
  * same thing on both channels (dates, money, the address block, tracking).
  */
 const COMMON_SYNONYMS = {
+  hold: 'order.hold_code',
+  'hold code': 'order.hold_code',
+  'hold kodu': 'order.hold_code',
+  'bekletme kodu': 'order.hold_code',
   'order id': 'order.id',
   'order no': 'order.id',
   'order number': 'order.id',

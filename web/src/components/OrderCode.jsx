@@ -12,6 +12,15 @@ export function OrderCode({ code }) {
 
 export function ArrivalChip({ arrival }) {
   if (!arrival) return null;
+  // An order whose first parcel is being kept at the warehouse for the rest of it.
+  if (arrival.hold?.state === 'active') {
+    return (
+      <Link to="/packing" style={{ textDecoration: 'none' }}
+            title={`The warehouse is asked to keep the parcel that arrived until the rest of this order is here (${arrival.received}${arrival.needed ? ` of ${arrival.needed}` : ''} pieces so far)`}>
+        <span className="badge amber">⏸ {arrival.hold.code}{arrival.needed ? ` · ${arrival.received}/${arrival.needed} here` : ''}</span>
+      </Link>
+    );
+  }
   const complete = arrival.needed && arrival.received >= arrival.needed;
   const labels = arrival.parcels.map((p) => p.label).filter(Boolean).join(', ');
   return (

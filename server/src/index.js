@@ -34,6 +34,7 @@ import shopifyRoutes from './routes/shopify.js';
 import packingRoutes from './routes/packing.js';
 
 import { startScheduler } from './scheduler.js';
+import { backfillHolds } from './services/holds.js';
 import { openBrowser, shouldOpenBrowser } from './lib/open-browser.js';
 import http from 'node:http';
 
@@ -155,6 +156,8 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 });
 
 await initDb();
+// Orders whose first parcel arrived before holds existed get their hold written now.
+try { backfillHolds(); } catch (err) { log.warn(`holds backfill failed: ${err.message}`); }
 
 // The URL shown to the user, and the one registered with Etsy, uses a
 // hostname ("localhost") because Etsy's app dashboard rejects an IP-literal

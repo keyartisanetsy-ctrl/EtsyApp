@@ -4,6 +4,7 @@ import { asyncRoute, int, bool } from '../lib/http.js';
 import { badRequest } from '../lib/errors.js';
 import * as packing from '../services/packing.js';
 import * as quick from '../services/quickmatch.js';
+import * as holds from '../services/holds.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -142,6 +143,16 @@ router.post('/orders/pack', asyncRoute(async (req, res) => {
   const b = req.body ?? {};
   if (!b.channel || b.orderId == null) throw badRequest('channel and orderId are required.');
   res.json(packing.packOrder({ channel: b.channel, orderId: b.orderId, packed: b.packed === undefined ? true : bool(b.packed) }));
+}));
+
+/**
+ * Let a held order's parcels go although the order is not complete (the missing
+ * piece will not come through the warehouse), or put the hold back.
+ */
+router.post('/orders/hold', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  if (!b.channel || b.orderId == null) throw badRequest('channel and orderId are required.');
+  res.json({ hold: holds.setHoldRelease(b.channel, b.orderId, b.release === undefined ? true : bool(b.release)) });
 }));
 
 router.post('/export', asyncRoute(async (req, res) => {

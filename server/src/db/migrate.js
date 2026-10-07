@@ -21,6 +21,7 @@
 import { createLogger } from '../lib/logger.js';
 import config from '../config.js';
 import { seal, open as unseal } from '../lib/crypto.js';
+import { DEFAULT_TEMPLATE, DEFAULT_TIMEZONE, formatCode, todayInZone } from '../lib/codeformat.js';
 
 const log = createLogger('migrate');
 
@@ -372,6 +373,51 @@ export function migrateData(db) {
     const fixed = db.prepare(`UPDATE settings SET value = 'YunExpress' WHERE key = 'orders.default_carrier' AND value = 'Yunexpress'`).run();
     if (fixed.changes) log.info(`corrected orders.default_carrier to Shopify's exact spelling "YunExpress"`);
   }
+
+  reissueShopifyCodesForToday(db);
+}
+
+/**
+ * Shopify order codes were first handed out stamped with each order's own
+ * (often old) date; a new code is stamped with the day it is given out. The
+ * Shopify codes only existed for a few hours when that changed, so they are
+ * numbered again from today's sequence - oldest order first - and the parcels
+ * already matched to those orders carry the new code. Runs once. Etsy's codes
+ * are left alone: they have been in Airtable sheets for a long time.
+ */
+function reissueShopifyCodesForToday(db) {
+  if (!hasTable(db, 'shopify_order_codes') || !hasTable(db, 'settings')) return;
+  const FLAG = 'migrations.shopify_codes_today';
+  if (db.prepare('SELECT 1 FROM settings WHERE key = ?').get(FLAG)) return;
+
+  const setting = (key, fallback) => db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value || fallback;
+  const day = todayInZone(setting('orders.code_timezone', DEFAULT_TIMEZONE));
+  const pattern = setting('orders.code_template', DEFAULT_TEMPLATE);
+
+  db.transaction(() => {
+    const old = db.prepare(`
+      SELECT c.shop_id, c.order_id FROM shopify_order_codes c
+      LEFT JOIN shopify_orders o ON o.order_id = c.order_id
+      ORDER BY o.created_at_shopify ASC, c.order_id ASC`).all();
+    if (old.length) {
+      db.exec('DELETE FROM shopify_order_codes');
+      const used = [
+        ...(hasTable(db, 'order_codes') ? db.prepare('SELECT seq FROM order_codes WHERE day = ?').all(day) : []),
+      ].map((r) => r.seq);
+      let seq = Math.max(0, ...used);
+      const insert = db.prepare('INSERT INTO shopify_order_codes (shop_id, order_id, code, day, seq) VALUES (?,?,?,?,?)');
+      const relabel = hasTable(db, 'inbound_parcels')
+        ? db.prepare("UPDATE inbound_parcels SET match_code = ? WHERE match_channel = 'shopify' AND match_order_id = ?") : null;
+      for (const o of old) {
+        seq += 1;
+        const code = formatCode(day, seq, pattern);
+        insert.run(o.shop_id, o.order_id, code, day, seq);
+        relabel?.run(code, String(o.order_id));
+      }
+      log.info(`re-issued ${old.length} Shopify order code(s) with today's date`);
+    }
+    db.prepare("INSERT INTO settings (key, value) VALUES (?, '1')").run(FLAG);
+  })();
 }
 
 /** Convenience for callers that do not need the two phases separately. */

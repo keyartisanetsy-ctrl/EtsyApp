@@ -27,6 +27,7 @@ import { run, parseJsonish } from './ai/index.js';
 import { resolveForTransaction } from './productimages.js';
 import { codesFor, shopifyCodesFor } from './ordercode.js';
 import { cachedProductImageId } from './warehousecheck.js';
+import * as holds from './holds.js';
 import * as etsyOrders from './orders.js';
 import * as shopifyOrders from './shopify.js';
 
@@ -127,7 +128,13 @@ function loadItemInfo(db, rows) {
   return info;
 }
 
-function shapeParcel(r, item = null, children = 0) {
+/** Bring an order's hold in line with its parcels after anything about them changed. Never lets a hold problem undo a match. */
+function touchHold(channel, orderId) {
+  if (!channel || orderId == null) return;
+  try { holds.refreshHold(channel, String(orderId)); } catch (err) { console.warn(`[holds] ${channel} ${orderId}: ${err.message}`); }
+}
+
+function shapeParcel(r, item = null, children = 0, hold = null) {
   return {
     id: r.id,
     carrier: r.carrier,
@@ -156,6 +163,8 @@ function shapeParcel(r, item = null, children = 0) {
     suggestions: parse(r.suggestions, null),
     quick: parse(r.quick, null),
     hasText: !!(r.ocr_text && r.ocr_text.trim()),
+    // Set while the order this arrival is matched to is not all here yet (or once it was and has been released).
+    hold: r.match_channel ? hold : null,
   };
 }
 
@@ -163,7 +172,8 @@ export function getParcel(id) {
   const db = getDb();
   const row = getRow(id);
   const kids = db.prepare('SELECT COUNT(*) AS c FROM inbound_parcels WHERE parent_id = ?').get(row.id).c;
-  return shapeParcel(row, loadItemInfo(db, [row]).get(`${row.match_channel}:${row.match_item_id}`) ?? null, kids);
+  return shapeParcel(row, loadItemInfo(db, [row]).get(`${row.match_channel}:${row.match_item_id}`) ?? null, kids,
+    row.match_channel ? holds.holdFor(row.match_channel, row.match_order_id) : null);
 }
 
 export function listParcels({ status = 'all', limit = 300 } = {}) {
@@ -178,6 +188,7 @@ export function listParcels({ status = 'all', limit = 300 } = {}) {
     ORDER BY COALESCE(parent_id, id) DESC, (parent_id IS NOT NULL) ASC, id ASC LIMIT ?`)
     .all(Math.min(1000, Math.max(1, Number(limit) || 300)));
   const items = loadItemInfo(db, rows);
+  const onHold = holds.allHolds();
   const kids = new Map(db.prepare(`SELECT parent_id, COUNT(*) AS c FROM inbound_parcels
                                    WHERE parent_id IS NOT NULL GROUP BY parent_id`).all().map((r) => [r.parent_id, r.c]));
   const counts = db.prepare(`
@@ -187,7 +198,8 @@ export function listParcels({ status = 'all', limit = 300 } = {}) {
     FROM inbound_parcels`).get();
   return {
     counts: { unmatched: counts.unmatched || 0, matched: counts.matched || 0, packed: counts.packed || 0, total: counts.total || 0 },
-    rows: rows.map((r) => shapeParcel(r, items.get(`${r.match_channel}:${r.match_item_id}`) ?? null, kids.get(r.id) ?? 0)),
+    rows: rows.map((r) => shapeParcel(r, items.get(`${r.match_channel}:${r.match_item_id}`) ?? null, kids.get(r.id) ?? 0,
+      onHold.get(`${r.match_channel}:${r.match_order_id}`) ?? null)),
   };
 }
 
@@ -232,6 +244,8 @@ export function updateParcel(id, patch = {}) {
   getDb().prepare(`
     UPDATE inbound_parcels SET carrier = ?, last4 = ?, quantity = ?, warehouse = ?, note = ?, received_on = ? WHERE id = ?`)
     .run(next.carrier, next.last4, next.quantity, next.warehouse, next.note, next.received_on, row.id);
+  // Its tracking digits or piece count may be what a hold was written from.
+  if (row.match_channel) touchHold(row.match_channel, row.match_order_id);
   return getParcel(row.id);
 }
 
@@ -242,6 +256,7 @@ export function deleteParcel(id) {
   // Arrivals that were split out of this photo are real deliveries of their own; they stay.
   db.prepare('UPDATE inbound_parcels SET parent_id = NULL WHERE parent_id = ?').run(row.id);
   db.prepare('DELETE FROM inbound_parcels WHERE id = ?').run(row.id);
+  if (row.match_channel) touchHold(row.match_channel, row.match_order_id);
   for (const att of new Set([row.attachment_id, row.original_attachment_id].filter(Boolean))) removeParcelAttachment(att);
   audit('packing.parcel_delete', { entity: 'parcel', entityId: row.id });
   return { deleted: row.id };
@@ -656,6 +671,10 @@ export function confirmMatch(id, { channel, orderId, itemId, source = 'manual', 
     .run(channel, String(orderId), String(itemId), target.code, ['ai', 'quick'].includes(source) ? source : 'manual',
       score == null ? null : Number(score), parcel.id);
   applyMatchEffects(parcel, channel, orderId, itemId, existingPhoto);
+  // Look at the order this parcel now belongs to (and the one it left): if the rest of it
+  // has not arrived, this parcel is put on hold; if it is the last piece, the hold is released.
+  if (parcel.match_channel) touchHold(parcel.match_channel, parcel.match_order_id);
+  touchHold(channel, orderId);
   audit('packing.match', { entity: 'parcel', entityId: parcel.id, detail: { channel, orderId, itemId, code: target.code, source, score } });
   return getParcel(parcel.id);
 }
@@ -667,6 +686,7 @@ export function unmatchParcel(id) {
   getDb().prepare(`
     UPDATE inbound_parcels SET match_channel = NULL, match_order_id = NULL, match_item_id = NULL, match_code = NULL,
       match_source = NULL, match_score = NULL, matched_at = NULL, packed_at = NULL WHERE id = ?`).run(parcel.id);
+  touchHold(parcel.match_channel, parcel.match_order_id);
   audit('packing.unmatch', { entity: 'parcel', entityId: parcel.id });
   return getParcel(parcel.id);
 }
@@ -763,6 +783,7 @@ export function unsplitParcel(id) {
     if (kid.match_channel) undoMatchEffects(kid);
     db.prepare('DELETE FROM inbound_parcels WHERE id = ?').run(kid.id);
     removeParcelAttachment(kid.attachment_id);
+    if (kid.match_channel) touchHold(kid.match_channel, kid.match_order_id);
   }
 
   const original = parent.original_attachment_id;
@@ -889,11 +910,15 @@ export function packingQueue(params = {}) {
     byItem.get(key).push({ id: p.id, label: parcelLabel(p), photoUrl: photoUrl(p.attachment_id), quantity: p.quantity, packedAt: p.packed_at });
   }
 
+  const onHold = holds.allHolds();
   const orders = new Map();
   for (const d of demand) {
     const key = `${d.channel}:${d.orderId}`;
     if (!orders.has(key)) {
-      orders.set(key, { channel: d.channel, orderId: d.orderId, ref: d.orderRef, orderedAt: d.orderedAt, buyer: d.buyer, items: [] });
+      orders.set(key, {
+        channel: d.channel, orderId: d.orderId, ref: d.orderRef, orderedAt: d.orderedAt, buyer: d.buyer, items: [],
+        hold: onHold.get(key) ?? null,
+      });
     }
     orders.get(key).items.push({
       itemId: d.itemId, sku: d.sku, title: d.title, variant: d.variant, quantity: d.quantity, received: d.received,
@@ -956,6 +981,7 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
   const rows = db.prepare(`SELECT * FROM inbound_parcels ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
                            ORDER BY received_on ASC, id ASC`).all(...params);
   const items = loadItemInfo(db, rows);
+  const onHold = holds.allHolds();
 
   const wb = new ExcelJS.Workbook();
   const sheet = wb.addWorksheet('Packing', { properties: { defaultRowHeight: 18 } });
@@ -970,6 +996,8 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
     { header: 'Status', key: 'status', width: 12 },
     { header: 'Received', key: 'received', width: 12 },
     { header: 'Note', key: 'note', width: 30 },
+    { header: 'Parcel\n(包裹)', key: 'parcel', width: 18 },
+    { header: 'Message to warehouse\n(留言)', key: 'message', width: 64 },
   ];
   const header = sheet.getRow(1);
   header.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
@@ -982,14 +1010,24 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
   for (const p of rows) {
     r += 1;
     const item = items.get(`${p.match_channel}:${p.match_item_id}`);
+    // A parcel of an order that was not all here when it arrived carries that order's HOLD code in
+    // "Tracking Code" - both parcels of the order do, so the warehouse can tell they go together - and in
+    // "Code" for as long as it is to be kept; once the order is complete "Code" is the order's own code again.
+    const hold = p.match_channel ? onHold.get(`${p.match_channel}:${p.match_order_id}`) ?? null : null;
+    const holding = hold?.state === 'active';
     const row = sheet.addRow({
-      label: parcelLabel(p), code: p.match_code || '', image: '', warehouse: p.warehouse,
+      label: hold ? hold.code : parcelLabel(p), code: (holding ? hold.code : p.match_code) || '', image: '', warehouse: p.warehouse,
       // An arrival nobody has matched yet says so, rather than leaving the cells blank.
       channel: p.match_channel ? (p.match_channel === 'etsy' ? 'Etsy' : 'Shopify') : '-',
       item: item ? `${item.title}${item.variant ? ` (${item.variant})` : ''}` : p.match_channel ? '(item no longer in the order mirror)' : 'Not matched yet - add its order code',
       buyer: item?.buyer || '',
-      status: p.packed_at ? 'Packed' : p.match_channel ? 'Matched' : 'Unmatched', received: p.received_on, note: p.note,
+      status: p.packed_at ? 'Packed' : holding ? 'On hold' : p.match_channel ? 'Matched' : 'Unmatched', received: p.received_on, note: p.note,
+      parcel: parcelLabel(p), message: hold ? hold.messageZh : '',
     });
+    if (hold) {
+      const fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: holding ? 'FFFFF3CD' : 'FFE3F4E1' } };
+      row.eachCell({ includeEmpty: true }, (cell) => { cell.fill = fill; });
+    }
     row.height = 96;
     row.alignment = { vertical: 'middle', wrapText: true };
     row.getCell('code').font = { bold: true };

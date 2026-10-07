@@ -1106,3 +1106,23 @@ CREATE TABLE IF NOT EXISTS image_signatures (
   signature     TEXT NOT NULL,
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- A multi-piece order whose first parcel has arrived before the rest: that
+-- parcel is asked to wait at the warehouse under a HOLD-xxxx code (the last
+-- digits of its China tracking number). The row is the app's memory of it -
+-- when the next piece turns up the same code is used again, and when the order
+-- is complete the hold is marked released but kept, so both parcels still carry
+-- the code on the packing sheet. Everything else (which parcels, whether the
+-- order is complete) is worked out from the matched parcels.
+CREATE TABLE IF NOT EXISTS order_holds (
+  channel         TEXT NOT NULL,           -- 'etsy' | 'shopify'
+  order_id        TEXT NOT NULL,
+  hold_code       TEXT NOT NULL,
+  anchor_parcel_id INTEGER,                -- the parcel whose tracking digits made the code
+  released_at     TEXT,                    -- set once everything has arrived (or it was released by hand)
+  forced_release  INTEGER NOT NULL DEFAULT 0,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (channel, order_id)
+);
+CREATE INDEX IF NOT EXISTS idx_order_holds_code ON order_holds(hold_code);

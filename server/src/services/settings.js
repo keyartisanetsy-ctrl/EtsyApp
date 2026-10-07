@@ -99,6 +99,7 @@ export const SETTING_DEFS = {
     options: [ { value: 'true', label: 'Yes - keep the daily rates current' }, { value: 'false', label: 'No - only when I press refresh' } ] },
   'orders.sync_minutes':   { env: '', def: '5', label: 'How often to check every connected shop for new/updated orders (minutes)' },
   'orders.code_template':  { env: '', def: '{YY}-{MM}{DD}-{NN}', label: 'Short order code shape (e.g. 26-0907-01 for 7 September)' },
+  'orders.code_timezone':  { env: '', def: 'Europe/Istanbul', label: 'Time zone that decides which day is "today" for a new order code (e.g. Europe/Istanbul, Asia/Shanghai, America/New_York)' },
   'orders.shipping_cost_currency': { env: '', def: 'CNY', label: 'Currency you normally pay shipping in' },
 
   'airtable.token':        { env: process.env.AIRTABLE_TOKEN || '', def: '', secret: true, label: 'Airtable personal access token' },

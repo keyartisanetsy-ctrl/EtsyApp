@@ -13,6 +13,7 @@ import { activeShopifyShopId, currentShopifyShop } from '../shopify/shop.js';
 import { readSetting } from '../services/settings.js';
 import { rateOn, convert } from '../services/fx.js';
 import { codeFor, shopifyCodeFor, monthLabelTr, monthLabelEn } from '../services/ordercode.js';
+import { activeHoldCode } from '../services/holds.js';
 import { imageForTransaction } from '../services/variantimages.js';
 import { resolveForTransaction, variantUrlForTransaction, listingImages } from '../services/productimages.js';
 import { feeFor as offsiteFeeFor } from '../services/offsiteads.js';
@@ -284,6 +285,9 @@ const ETSY_ONLY_FIELDS = [
   { key: 'order.code', group: 'Order', label: 'Short order code (26-0709-01)',
     hint: 'A short code built from the order date and its position that day. Every item of the same order shares it.',
     get: ({ order }) => codeFor(order.receipt_id, { shopId: order.shop_id, createdTs: order.created_ts }) },
+  { key: 'order.hold_code', group: 'Order', label: 'Warehouse hold code (HOLD-1524)',
+    hint: 'Filled while the first parcel of a multi-piece order is being kept at the warehouse for the rest of its order (the code the packing sheet shows); empty otherwise. Every item row of the order carries it.',
+    get: ({ order }) => activeHoldCode('etsy', order.receipt_id) },
   { key: 'order.status', group: 'Order', label: 'Etsy status', hint: 'Etsy order status such as Paid, Completed, Open',
     get: ({ order }) => clean(order.status) },
   { key: 'order.is_gift', group: 'Order', label: 'Gift?', hint: 'true/false, buyer marked the order as a gift',
@@ -437,6 +441,9 @@ const SHOPIFY_ONLY_FIELDS = [
   { key: 'order.code', group: 'Order', label: 'Short order code (26-0709-01)',
     hint: 'The same code the Orders list and the packing desk show: the order date and its position that day, shared with Etsy orders so no two orders of a day have the same one.',
     get: ({ order }) => shopifyCodeFor(order.receipt_id, { shopId: order.shop_id ?? undefined }) },
+  { key: 'order.hold_code', group: 'Order', label: 'Warehouse hold code (HOLD-1524)',
+    hint: 'Filled while the first parcel of a multi-piece order is being kept at the warehouse for the rest of its order (the code the packing sheet shows); empty otherwise. Every item row of the order carries it.',
+    get: ({ order }) => activeHoldCode('shopify', order.receipt_id) },
   { key: 'order.id_numeric', group: 'Order', label: 'Order ID (numeric, no #)',
     hint: 'Just the digits, for a sheet that wants a plain number instead of "#2385"',
     get: ({ order }) => numericIdFrom(order.receipt_id) },
@@ -500,7 +507,7 @@ export const SOURCE_FIELDS = [...SHARED_FIELDS, ...ETSY_ONLY_FIELDS, ...SHOPIFY_
  * `item.*` field is written on the first row only.
  */
 export const REPEATED_ON_EVERY_ROW = new Set([
-  'order.id', 'order.id_hash', 'order.code', 'order.id_numeric',
+  'order.id', 'order.id_hash', 'order.code', 'order.hold_code', 'order.id_numeric',
   'order.date', 'order.datetime', 'order.month', 'order.month_en',
   'shop.airtable_name', 'shop.name', 'shop.id', 'shop.domain',
 ]);

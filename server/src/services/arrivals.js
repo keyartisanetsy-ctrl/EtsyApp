@@ -3,8 +3,9 @@
  * can show it next to the order's code without knowing anything about parcels.
  */
 import { getDb } from '../db/index.js';
+import { allHolds } from './holds.js';
 
-/** Parcels matched to these orders: { received, parcels: [{ id, label }], packed } per order id. */
+/** Parcels matched to these orders: { received, parcels: [{ id, label }], packed, hold } per order id. */
 export function arrivalsFor(channel, orderIds = []) {
   const map = new Map();
   if (!orderIds.length) return map;
@@ -19,6 +20,12 @@ export function arrivalsFor(channel, orderIds = []) {
     entry.parcels.push({ id: r.id, label: [r.carrier, r.last4].filter(Boolean).join(' ') });
     if (!r.packed_at) entry.packed = false;
     map.set(r.orderId, entry);
+  }
+  // An order that is waiting for its other pieces carries its HOLD code (and keeps it, released, once complete).
+  const onHold = allHolds();
+  for (const [orderId, entry] of map) {
+    const hold = onHold.get(`${channel}:${orderId}`);
+    entry.hold = hold ? { code: hold.code, state: hold.state } : null;
   }
   return map;
 }

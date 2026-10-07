@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import api, { withBase } from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import {
-  Spinner, Empty, Stat, Thumb, Modal, Checkbox, useAsync, useToast, useErrorToast,
+  Spinner, Empty, Stat, Thumb, Modal, Checkbox, CopyButton, useAsync, useToast, useErrorToast,
 } from '../components/ui.jsx';
 import SplitPhoto from '../components/SplitPhoto.jsx';
 import { normalizePhoto } from '../lib/photo.js';
@@ -296,6 +296,47 @@ function Suggestions({ parcel, s, onAssign, onSplit, onChoose, busy }) {
   );
 }
 
+/** The badge for an order's hold: ⏸ while the parcel is to be kept, ▶ once the rest has arrived. */
+function HoldBadge({ hold }) {
+  const active = hold.state === 'active';
+  return (
+    <span className={`badge ${active ? 'amber' : 'green'}`}
+          title={active ? 'The warehouse is asked to keep this parcel until the rest of its order arrives' : 'Everything has arrived - the held parcels go out together'}>
+      {active ? '⏸' : '▶'} {hold.code}
+    </span>
+  );
+}
+
+/**
+ * A parcel of an order that was not all here when it arrived: it carries a HOLD code, and the
+ * warehouse is asked - in Chinese, ready to copy into WeChat - to keep it a little while.
+ * Once the last piece is matched the message becomes "send them together".
+ */
+function HoldNotice({ hold, busy, onRelease }) {
+  const active = hold.state === 'active';
+  return (
+    <div style={{ marginTop: 6, padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface-2)', maxWidth: 440 }}>
+      <div className="flex gap8" style={{ flexWrap: 'wrap' }}>
+        <HoldBadge hold={hold} />
+        <span className="small muted">
+          {active ? `waiting for the rest of this order - ${hold.received} of ${hold.needed} pieces are here`
+            : hold.forced ? 'released by hand - send the parcels together' : 'the whole order is here - send the parcels together'}
+        </span>
+      </div>
+      <div className="small" lang="zh" style={{ marginTop: 4 }}>{hold.messageZh}</div>
+      <div className="small muted" style={{ marginTop: 2 }}>{hold.messageEn}</div>
+      <div className="flex gap4" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+        <CopyButton text={hold.messageZh} label="Copy 中文 message" className="btn xs primary" />
+        {active && (
+          <button className="btn xs" disabled={busy} onClick={() => onRelease(true)}
+                  title="The missing piece will not come through the warehouse: let the parcels go as they are">Release hold</button>
+        )}
+        {!active && hold.forced && <button className="btn xs" disabled={busy} onClick={() => onRelease(false)}>Hold again</button>}
+      </div>
+    </div>
+  );
+}
+
 /**
  * The order code of an arrival, always editable: type 26-0710-01 and press
  * Enter (or leave the box) to put the arrival on that order; clear it to
@@ -330,6 +371,7 @@ function CodeCell({ parcel, busy, onCode }) {
              }}
              onBlur={commit} />
       {m && <div style={{ marginTop: 3 }}><ChannelBadge channel={m.channel} /></div>}
+      {parcel.hold && <div style={{ marginTop: 3 }}><HoldBadge hold={parcel.hold} /></div>}
     </div>
   );
 }
@@ -363,7 +405,7 @@ function ItemChooser({ parcel, needsItem, busy, onChoose, onClose }) {
   );
 }
 
-function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit, onCode, onChoose }) {
+function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit, onCode, onChoose, onRelease }) {
   const [open, setOpen] = useState(false);
   const s = latestSuggestions(parcel);
   const top = s?.items?.[0];
@@ -417,6 +459,7 @@ function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, on
               </div>
             </div>
           )}
+          {parcel.hold && <HoldNotice hold={parcel.hold} busy={busy} onRelease={(release) => onRelease(parcel, release)} />}
           {!m && top && (
             <button className="btn xs ghost" onClick={() => setOpen((v) => !v)}>
               <span className={`badge ${scoreKind(top.score)}`}>{Math.round(top.score * 100)}%</span> {top.title.slice(0, 40)} {open ? '▴' : '▾'}
@@ -477,6 +520,7 @@ function QueueOrder({ order, busy, onPack }) {
         <strong className="mono">{order.ref}</strong>
         <span className="muted small">{order.buyer} · {shortDay(order.orderedAt)}</span>
         <span className={`badge ${STATUS_KIND[order.status]}`}>{STATUS_LABEL[order.status]}</span>
+        {order.hold && <HoldBadge hold={order.hold} />}
         <div style={{ flex: 1 }} />
         {order.status === 'ready' && <button className="btn sm primary" disabled={busy} onClick={() => onPack(order, true)}>{busy ? <Spinner /> : '📦'} Mark packed</button>}
         {order.status === 'packed' && <button className="btn sm ghost" disabled={busy} onClick={() => onPack(order, false)}>Undo packed</button>}
@@ -541,11 +585,22 @@ export default function Packing() {
   const setFilter = (patch) => setFilters((f) => ({ ...f, ...patch }));
   const flag = (id, on) => setWorking((w) => ({ ...w, [id]: on }));
 
+  /** Said when a match leaves its order waiting for other pieces, or completes it. */
+  const holdToast = (p) => {
+    if (p?.hold?.state === 'active') {
+      toast({ kind: 'info', title: `${p.label} → on hold ${p.hold.code}`, duration: 10000,
+        body: `The rest of that order has not arrived (${p.hold.received} of ${p.hold.needed} pieces). Copy the 中文 message from its row and send it to the warehouse.` });
+    } else if (p?.hold?.state === 'released' && !p.hold.forced) {
+      toast({ kind: 'ok', title: `Order complete - send the ${p.hold.code} parcels together`, duration: 8000, body: 'The 中文 message on the row tells the warehouse.' });
+    }
+  };
+
   const confirm = async (id, target) => {
     flag(id, true);
     try {
-      await api.post(`/packing/parcels/${id}/confirm`, target);
+      const p = await api.post(`/packing/parcels/${id}/confirm`, target);
       toast({ kind: 'ok', title: 'Matched' });
+      holdToast(p);
       refresh();
     } catch (err) { showError(err, 'Could not match that'); } finally { flag(id, false); }
   };
@@ -569,7 +624,7 @@ export default function Packing() {
   const quickOne = useCallback(async (id, { silent = false } = {}) => {
     try {
       const p = await api.post(`/packing/parcels/${id}/quick`, { ...range, assign: filters.autoAssign ? 'sure' : 'tracking' });
-      if (p.status === 'matched') toast({ kind: 'ok', title: `${p.label} → ${p.code}`, body: p.quick?.auto?.reason });
+      if (p.status === 'matched') { toast({ kind: 'ok', title: `${p.label} → ${p.code}`, body: p.quick?.auto?.reason }); holdToast(p); }
       return p;
     } catch (err) { if (!silent) showError(err, 'Free match failed'); return null; }
   }, [range, filters.autoAssign]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -619,6 +674,7 @@ export default function Packing() {
       else {
         setChoosing(null);
         toast(code ? { kind: 'ok', title: `${parcel.label} → ${r.parcel.code}`, body: r.parcel.match?.item?.title } : { kind: 'ok', title: `${parcel.label} released` });
+        if (code) holdToast(r.parcel);
       }
       return true;
     } catch (err) { showError(err, 'That code did not work'); return false; } finally { flag(parcel.id, false); parcels.reload(); queue.reload(); }
@@ -669,9 +725,22 @@ export default function Packing() {
       setChoosing({ parcel, needsItem: parcel.needsItem });
       return;
     }
-    if (parcel.code) { toast({ kind: 'ok', title: `Added ${parcel.label} → ${parcel.code}`, body: parcel.match?.item?.title }); return; }
+    if (parcel.code) { toast({ kind: 'ok', title: `Added ${parcel.label} → ${parcel.code}`, body: parcel.match?.item?.title }); holdToast(parcel); return; }
     toast({ kind: 'ok', title: `Added ${parcel.label}` });
     if (channels.length) freeOne(parcel, { quiet: true });
+  };
+
+  /** Let an order's held parcels go although the order is not complete - or hold them again. */
+  const releaseHold = async (parcel, release) => {
+    const m = parcel.match;
+    if (!m) return;
+    if (release && !window.confirm(`Release ${parcel.hold?.code}? The parcels are sent as they are, without waiting for the rest of the order.`)) return;
+    flag(parcel.id, true);
+    try {
+      await api.post('/packing/orders/hold', { channel: m.channel, orderId: m.orderId, release });
+      toast({ kind: 'ok', title: release ? 'Hold released' : 'Order put back on hold' });
+      refresh();
+    } catch (err) { showError(err, 'Could not change the hold'); } finally { flag(parcel.id, false); }
   };
 
   const unmatch = async (id) => {
@@ -792,7 +861,7 @@ export default function Packing() {
                   {parcels.data.rows.map((p) => (
                     <ParcelRow key={p.id} parcel={p} range={range} busy={!!working[p.id]} reading={!!reading[p.id]}
                                onMatch={matchOne} onFree={freeOne} onAssign={confirm} onUnmatch={unmatch}
-                               onCode={assignCode} onChoose={(parcel, needsItem) => setChoosing({ parcel, needsItem })}
+                               onCode={assignCode} onChoose={(parcel, needsItem) => setChoosing({ parcel, needsItem })} onRelease={releaseHold}
                                onEdit={setEditing} onDelete={remove} onPicker={setPicking}
                                onSplit={setSplitting} onUnsplit={unsplit} />
                   ))}
