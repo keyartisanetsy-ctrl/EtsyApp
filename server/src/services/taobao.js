@@ -327,6 +327,16 @@ export function looksLikeFakeStockoutPrice(price) {
   return digits.length >= 3 && /^(\d)\1+$/.test(digits);
 }
 
+/** The supplier item's own pictures, first one first: "//img.alicdn.com/x.jpg" -> "https://img.alicdn.com/x.jpg". */
+export function itemImages(raw, max = 4) {
+  const list = raw?.item_imgs?.item_img ?? raw?.item_imgs ?? raw?.images ?? [];
+  const urls = [raw?.pic_url, ...(Array.isArray(list) ? list : [list]).map((i) => (typeof i === 'string' ? i : i?.url))]
+    .map((u) => String(u ?? '').trim()).filter(Boolean)
+    .map((u) => (u.startsWith('//') ? `https:${u}` : u))
+    .filter((u) => /^https?:\/\//i.test(u));
+  return [...new Set(urls)].slice(0, max);
+}
+
 /** Turn one OneBound response into the shape the app actually needs. */
 export function analyzeItem(raw, { supplier, itemId }) {
   const skuList = raw?.skus?.sku ?? (Array.isArray(raw?.skus) ? raw.skus : []);
@@ -363,6 +373,8 @@ export function analyzeItem(raw, { supplier, itemId }) {
     supplier, itemId,
     title: raw?.title ?? null,
     picUrl: raw?.pic_url ?? null,
+    // The pictures the listing itself shows, so ours can be held against the first two.
+    images: itemImages(raw),
     delisted,
     overallQuantity,
     variants,
