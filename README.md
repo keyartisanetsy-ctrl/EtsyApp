@@ -83,6 +83,30 @@ Etsy has no per-variation patch endpoint — `PUT .../inventory` replaces the wh
 product array — so every edit is a read-modify-write that rebuilds the payload
 and strips the read-only fields Etsy refuses on write.
 
+### All products (every shop at once)
+One list of the variants of **every Etsy shop and Shopify store**. The only things that can be changed
+there are a variant's **SKU**, its **supplier**, and its **stock** - everything else about a product stays
+where it is edited today. Every change is reviewed first and then written to the shop the variant belongs
+to (each write runs as that shop, never "whichever is active"); a SKU may never be used twice in a shop.
+
+- **Stock.** *Shop* is the quantity the shop shows (written to Etsy / Shopify - a made-up 50 or 999 is
+  fine); *Real* is what is really on the shelf, kept here **per SKU**, so the same product in two shops is
+  one pile. Orders take pieces off the real stock once per order line, never below 0 (an order for
+  something not on the shelf shows "no stock - order N from the supplier" on the order). "Shop sells, shelf
+  empty" lists what could oversell. *Shop shows…* sets one number for a selection; **Export** downloads
+  the filtered list as CSV.
+- **Supplier stock check.** The paid OneBound call runs only when ↻ is pressed; the supplier's first two
+  pictures are held against ours (colours, free; "AI" on request).
+- **Same product in other shops.** Products that point at the same supplier item, share a SKU, or look
+  alike (words and photos - no AI) are suggested; tick the ones that really are the same, confirm, and
+  their variants are paired and given the same SKUs. A product sold on its own that is really one variant
+  of a bigger listing elsewhere is paired with that variant (title words, the supplier's variant id, or
+  the photo). Several matches can be confirmed at once; "Check with AI" is optional.
+- **Auto SKUs.** Gives a SKU to every variant that has none: letters by product type (`KC` keycap, `KCS`
+  keycap set, `BAG`, `DM` deskmat, `MP` mousepad, `SW` switches, `KB` keyboard, `MS` mouse ... editable),
+  numbered per prefix (`KCS012-1`), the same SKUs for the same product in every shop, a SKU that exists
+  never changed. Nothing is written until the plan is ticked and approved.
+
 ### Orders
 - **Done** tick column, so a glance says what is still open, plus a separate
   **new / unseen** badge that distinguishes orders you have not looked at yet.
