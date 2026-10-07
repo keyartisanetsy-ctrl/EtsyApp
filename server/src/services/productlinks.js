@@ -403,6 +403,22 @@ export function rejectPair(aKey, bKey) {
   return { rejected: [a, b] };
 }
 
+/** The picked products are different products: every pair of them, across shops, is never suggested again. */
+export function rejectPairs(keys) {
+  const list = [...new Set(keys ?? [])];
+  if (list.length < 2) throw badRequest('Two different products are needed.');
+  const shopOf = (k) => String(k).split(':').slice(0, 2).join(':');
+  const rejected = [];
+  for (let i = 0; i < list.length; i += 1) {
+    for (let j = i + 1; j < list.length; j += 1) {
+      if (shopOf(list[i]) === shopOf(list[j])) continue; // two listings of one shop are never suggested together anyway
+      rejected.push(rejectPair(list[i], list[j]).rejected);
+    }
+  }
+  audit('catalog.products_rejected', { entity: 'product_link', entityId: list.join(',').slice(0, 200), detail: { pairs: rejected.length } });
+  return { rejected };
+}
+
 // ------------------------------------------------------------------- slots
 
 /** The next product number of this family of SKUs across every shop: KEY004 -> KEY005. */

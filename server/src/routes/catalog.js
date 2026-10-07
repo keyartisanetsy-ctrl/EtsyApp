@@ -111,6 +111,7 @@ router.post('/unlink', asyncRoute(async (req, res) => {
 
 /** "These are not the same product." */
 router.post('/reject', asyncRoute(async (req, res) => {
+  if (Array.isArray(req.body?.keys)) return res.json(links.rejectPairs(req.body.keys));   // every pair among the picked products
   required(req.body ?? {}, ['a', 'b']);
   res.json(links.rejectPair(req.body.a, req.body.b));
 }));
