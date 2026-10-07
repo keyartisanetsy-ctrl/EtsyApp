@@ -268,6 +268,8 @@ export function migrateSchema(db) {
   // where the seller writes in their own figure.
   addColumn(db, 'order_flags', 'manual_cost', 'REAL');
   addColumn(db, 'order_flags', 'manual_cost_note', "TEXT DEFAULT ''");
+  addColumn(db, 'order_flags', 'supply_cost', 'REAL');
+  addColumn(db, 'order_flags', 'supply_cost_currency', 'TEXT');
   addColumn(db, 'shopify_fulfillments', 'manual_cost', 'REAL');
   addColumn(db, 'shopify_fulfillments', 'manual_cost_note', "TEXT DEFAULT ''");
 

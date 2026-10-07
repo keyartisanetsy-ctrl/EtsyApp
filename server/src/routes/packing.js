@@ -5,6 +5,7 @@ import { badRequest } from '../lib/errors.js';
 import * as packing from '../services/packing.js';
 import * as quick from '../services/quickmatch.js';
 import * as holds from '../services/holds.js';
+import * as ordersupply from '../services/ordersupply.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -153,6 +154,20 @@ router.post('/orders/hold', asyncRoute(async (req, res) => {
   const b = req.body ?? {};
   if (!b.channel || b.orderId == null) throw badRequest('channel and orderId are required.');
   res.json({ hold: holds.setHoldRelease(b.channel, b.orderId, b.release === undefined ? true : bool(b.release)) });
+}));
+
+/**
+ * The Taobao order number and cost of an order, typed from the Packing page.
+ * `airtable` says what to do with Airtable: 'none' (just save), 'check' (send it
+ * unless that would overwrite something - then report the conflicts), 'change'
+ * or 'keep' (the answer to such a report: overwrite, or leave what is there).
+ */
+router.post('/orders/supply', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  if (!b.channel || b.orderId == null) throw badRequest('channel and orderId are required.');
+  const airtable = ['none', 'check', 'change', 'keep'].includes(b.airtable) ? b.airtable : 'none';
+  res.json(await ordersupply.saveAndReflect(b.channel, b.orderId,
+    { taobaoOrder: b.taobaoOrder, cost: b.cost, currency: b.currency }, { airtable }));
 }));
 
 router.post('/export', asyncRoute(async (req, res) => {

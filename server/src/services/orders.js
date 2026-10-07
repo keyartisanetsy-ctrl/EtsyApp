@@ -495,6 +495,26 @@ export function setFlags(receiptIds, patch = {}) {
 export const markSeen = (receiptIds) => setFlags(receiptIds, { seen: true });
 
 /**
+ * What the goods of a whole order cost, typed in before it has a tracking code
+ * (the Packing page). Once a shipment carries its own real figure, that one wins.
+ * `cost: null` clears it.
+ */
+export function setOrderSupplyCost(receiptId, { cost, currency } = {}) {
+  const db = getDb();
+  const id = Number(receiptId);
+  if (!db.prepare('SELECT 1 FROM receipts WHERE receipt_id = ? AND shop_id IS ?').get(id, activeShopId())) {
+    throw notFound(`Order ${receiptId} is not in the local mirror. Sync orders first.`);
+  }
+  const amount = cost === null || cost === undefined || cost === '' ? null : Number(cost);
+  if (amount !== null && !Number.isFinite(amount)) throw badRequest(`"${cost}" is not a number.`);
+  db.prepare('INSERT OR IGNORE INTO order_flags (receipt_id) VALUES (?)').run(id);
+  db.prepare("UPDATE order_flags SET supply_cost = ?, supply_cost_currency = ?, updated_at = datetime('now') WHERE receipt_id = ?")
+    .run(amount, amount === null ? null : String(currency || 'CNY').toUpperCase(), id);
+  audit('orders.supply_cost', { entity: 'receipt', entityId: id, detail: { cost: amount, currency } });
+  return { receiptId: id, cost: amount, currency: amount === null ? null : String(currency || 'CNY').toUpperCase() };
+}
+
+/**
  * The hand-typed cost field: Etsy Ads/Offsite Ads spend, or anything else the
  * ledger sync does not tie to this specific order. `amount: null` clears it.
  */
@@ -720,6 +740,19 @@ function loadOrderCosts(db, shopId, receiptIds) {
     if (r.shipping_cost != null) { e.shipping = (e.shipping ?? 0) + r.shipping_cost; e.shippingCcy = r.shipping_cost_currency || e.shippingCcy; }
     if (r.supply_cost != null) { e.supply = (e.supply ?? 0) + r.supply_cost; e.supplyCcy = r.supply_cost_currency || e.supplyCcy; }
     map.set(r.receipt_id, e);
+  }
+
+  // A cost typed on the Packing page for the whole order stands in until a shipment carries a real one.
+  const withoutReal = receiptIds.filter((id) => map.get(id)?.supply == null);
+  if (withoutReal.length) {
+    const typed = db.prepare(`SELECT receipt_id, supply_cost, supply_cost_currency FROM order_flags
+                              WHERE supply_cost IS NOT NULL AND receipt_id IN (${withoutReal.map(() => '?').join(',')})`).all(...withoutReal);
+    for (const r of typed) {
+      const e = map.get(r.receipt_id) ?? { shipping: null, shippingCcy: null, supply: null, supplyCcy: null, supplyIsEstimate: false };
+      e.supply = r.supply_cost;
+      e.supplyCcy = r.supply_cost_currency || e.supplyCcy;
+      map.set(r.receipt_id, e);
+    }
   }
 
   const needEstimate = receiptIds.filter((id) => map.get(id)?.supply == null);

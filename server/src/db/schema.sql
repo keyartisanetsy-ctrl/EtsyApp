@@ -294,6 +294,10 @@ CREATE TABLE IF NOT EXISTS order_flags (
   -- the warehouse - distinct from the outbound, buyer-facing tracking in
   -- the shipments table.
   supply_tracking_number TEXT DEFAULT '',
+  -- What the goods of this whole order cost you, typed in on the Packing page
+  -- before the order has a tracking code to hang the figure on.
+  supply_cost          REAL,
+  supply_cost_currency TEXT,
   notes       TEXT DEFAULT '',
   -- Set by you or the AI, not derived: none | warning | solved | out_of_stock.
   -- An order can be delivered and still carry a warning.

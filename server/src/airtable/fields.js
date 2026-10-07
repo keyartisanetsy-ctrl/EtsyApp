@@ -608,7 +608,7 @@ function loadShopifyRows(orderIds, { rowMode = 'item' } = {}) {
   // shop info below is resolved per order, straight from the row that owns it.
   const orders = db.prepare(`
     SELECT o.*, f.tracking_number, f.tracking_company, f.shipping_cost, f.shipping_cost_currency,
-           f.supplier_order_ref,
+           f.supplier_order_ref, f.supply_cost, f.supply_cost_currency,
            sa.shop_domain AS sa_domain, sa.shop_name AS sa_shop_name, sa.airtable_name AS sa_airtable_name
     FROM shopify_orders o
     LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
@@ -661,6 +661,7 @@ function loadShopifyRows(orderIds, { rowMode = 'item' } = {}) {
       created_ts: toUnixSeconds(o.created_at_shopify), tracking_code: o.tracking_number,
       carrier_name: o.tracking_company, tracking_status: null,
       shipping_cost: o.shipping_cost, shipping_cost_currency: o.shipping_cost_currency,
+      supply_cost: o.supply_cost ?? null, supply_cost_currency: o.supply_cost_currency ?? null,
       is_done: 0, supplier_ordered: 0, supplier_order_ref: o.supplier_order_ref || null, notes: null,
     };
     if (rowMode === 'order' || lines.length === 0) {
@@ -691,7 +692,9 @@ export function loadRows(receiptIds, { rowMode = 'item', channel = 'etsy' } = {}
            COALESCE(f.is_done, 0) AS is_done, COALESCE(f.supplier_ordered, 0) AS supplier_ordered,
            f.supplier_order_ref, f.notes,
            s.tracking_code, s.carrier_name, t.status AS tracking_status,
-           t.shipping_cost, t.shipping_cost_currency, t.supply_cost, t.supply_cost_currency
+           t.shipping_cost, t.shipping_cost_currency,
+           COALESCE(t.supply_cost, f.supply_cost) AS supply_cost,
+           COALESCE(t.supply_cost_currency, f.supply_cost_currency) AS supply_cost_currency
     FROM receipts r
     LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
     LEFT JOIN (SELECT receipt_id, MAX(id) AS sid FROM shipments GROUP BY receipt_id) ls ON ls.receipt_id = r.receipt_id

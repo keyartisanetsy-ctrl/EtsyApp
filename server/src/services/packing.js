@@ -28,6 +28,7 @@ import { resolveForTransaction } from './productimages.js';
 import { codesFor, shopifyCodesFor, ensureOrderCode } from './ordercode.js';
 import { cachedProductImageId } from './warehousecheck.js';
 import * as holds from './holds.js';
+import { supplyForOrders, supplyFor } from './ordersupply.js';
 import * as etsyOrders from './orders.js';
 import * as shopifyOrders from './shopify.js';
 
@@ -134,7 +135,7 @@ function touchHold(channel, orderId) {
   try { holds.refreshHold(channel, String(orderId)); } catch (err) { console.warn(`[holds] ${channel} ${orderId}: ${err.message}`); }
 }
 
-function shapeParcel(r, item = null, children = 0, hold = null) {
+function shapeParcel(r, item = null, children = 0, hold = null, supply = null) {
   return {
     id: r.id,
     typed: r.raw_text || null,
@@ -160,6 +161,8 @@ function shapeParcel(r, item = null, children = 0, hold = null) {
     match: r.match_channel ? {
       channel: r.match_channel, orderId: r.match_order_id, itemId: r.match_item_id, code: r.match_code,
       source: r.match_source, score: r.match_score, matchedAt: r.matched_at, item,
+      // The Taobao order number and cost of the order this parcel belongs to (typed here or on the Orders page).
+      supply,
     } : null,
     suggestions: parse(r.suggestions, null),
     quick: parse(r.quick, null),
@@ -174,7 +177,8 @@ export function getParcel(id) {
   const row = getRow(id);
   const kids = db.prepare('SELECT COUNT(*) AS c FROM inbound_parcels WHERE parent_id = ?').get(row.id).c;
   return shapeParcel(row, loadItemInfo(db, [row]).get(`${row.match_channel}:${row.match_item_id}`) ?? null, kids,
-    row.match_channel ? holds.holdFor(row.match_channel, row.match_order_id) : null);
+    row.match_channel ? holds.holdFor(row.match_channel, row.match_order_id) : null,
+    row.match_channel ? supplyFor(row.match_channel, row.match_order_id) : null);
 }
 
 export function listParcels({ status = 'all', limit = 300 } = {}) {
@@ -190,6 +194,8 @@ export function listParcels({ status = 'all', limit = 300 } = {}) {
     .all(Math.min(1000, Math.max(1, Number(limit) || 300)));
   const items = loadItemInfo(db, rows);
   const onHold = holds.allHolds();
+  const supplies = supplyForOrders(rows.filter((r) => r.match_channel).map((r) => ({ channel: r.match_channel, orderId: r.match_order_id })));
+  const noSupply = { taobaoOrder: '', cost: null, currency: null };
   const kids = new Map(db.prepare(`SELECT parent_id, COUNT(*) AS c FROM inbound_parcels
                                    WHERE parent_id IS NOT NULL GROUP BY parent_id`).all().map((r) => [r.parent_id, r.c]));
   const counts = db.prepare(`
@@ -200,7 +206,8 @@ export function listParcels({ status = 'all', limit = 300 } = {}) {
   return {
     counts: { unmatched: counts.unmatched || 0, matched: counts.matched || 0, packed: counts.packed || 0, total: counts.total || 0 },
     rows: rows.map((r) => shapeParcel(r, items.get(`${r.match_channel}:${r.match_item_id}`) ?? null, kids.get(r.id) ?? 0,
-      onHold.get(`${r.match_channel}:${r.match_order_id}`) ?? null)),
+      onHold.get(`${r.match_channel}:${r.match_order_id}`) ?? null,
+      r.match_channel ? supplies.get(`${r.match_channel}:${r.match_order_id}`) ?? noSupply : null)),
   };
 }
 
@@ -987,6 +994,7 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
                            ORDER BY received_on ASC, id ASC`).all(...params);
   const items = loadItemInfo(db, rows);
   const onHold = holds.allHolds();
+  const supplies = supplyForOrders(rows.filter((r) => r.match_channel).map((r) => ({ channel: r.match_channel, orderId: r.match_order_id })));
 
   const wb = new ExcelJS.Workbook();
   const sheet = wb.addWorksheet('Packing', { properties: { defaultRowHeight: 18 } });
@@ -996,12 +1004,17 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
     { header: 'Image\n(图片)', key: 'image', width: 22 },
     { header: 'Warehouse\n(仓库)', key: 'warehouse', width: 18 },
     { header: 'Message to warehouse\n(留言)', key: 'message', width: 60 },
-    { header: 'Channel', key: 'channel', width: 10 },
-    { header: 'Item', key: 'item', width: 44 },
-    { header: 'Customer', key: 'buyer', width: 20 },
-    { header: 'Status', key: 'status', width: 12 },
-    { header: 'Received', key: 'received', width: 12 },
-    { header: 'Note', key: 'note', width: 30 },
+    // Everything after the five columns the warehouse needs is still in the file, just hidden
+    // (select the columns around them and "Unhide" to see it).
+    { header: 'Channel', key: 'channel', width: 10, hidden: true },
+    { header: 'Item', key: 'item', width: 44, hidden: true },
+    { header: 'Customer', key: 'buyer', width: 20, hidden: true },
+    { header: 'Status', key: 'status', width: 12, hidden: true },
+    { header: 'Received', key: 'received', width: 12, hidden: true },
+    { header: 'Note', key: 'note', width: 30, hidden: true },
+    { header: 'Taobao order', key: 'taobao', width: 26, hidden: true },
+    { header: 'Supply cost', key: 'cost', width: 12, hidden: true },
+    { header: 'Cost currency', key: 'currency', width: 10, hidden: true },
   ];
   const header = sheet.getRow(1);
   header.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
@@ -1028,6 +1041,9 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
       buyer: item?.buyer || '',
       status: p.packed_at ? 'Packed' : holding ? 'On hold' : p.match_channel ? 'Matched' : 'Unmatched', received: p.received_on, note: p.note,
       message: hold ? hold.messageZh : '',
+      taobao: supplies.get(`${p.match_channel}:${p.match_order_id}`)?.taobaoOrder || '',
+      cost: supplies.get(`${p.match_channel}:${p.match_order_id}`)?.cost ?? '',
+      currency: supplies.get(`${p.match_channel}:${p.match_order_id}`)?.currency || '',
     });
     if (hold) {
       const fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: holding ? 'FFFFF3CD' : 'FFE3F4E1' } };
