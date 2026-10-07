@@ -217,7 +217,7 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
           <Banner kind="info">
             <strong>{plan.counts.variants.toLocaleString()} SKUs</strong> for {plan.counts.products.toLocaleString()} products:{' '}
             {matchSets ? `${plan.counts.matches} confirmed match${plan.counts.matches === 1 ? '' : 'es'}.` : `${plan.counts.single} single, ${plan.counts.matches} same-product match${plan.counts.matches === 1 ? '' : 'es'}, ${plan.counts.groups} linked group${plan.counts.groups === 1 ? '' : 's'}.`}
-            Next free number: <span className="mono">{plan.prefix}{String(plan.nextNumber).padStart(3, '0')}</span>
+            {' '}Next free number: <span className="mono">{plan.prefix}{String(plan.nextNumber).padStart(3, '0')}</span>
             {' '}({plan.prefixSource === 'catalogue' ? 'prefix taken from your existing SKUs' : plan.prefixSource === 'typed' ? 'prefix typed by you' : 'prefix from the settings'}).
             {' '}{plan.counts.ticked} of {plan.counts.units} ticked.
           </Banner>
