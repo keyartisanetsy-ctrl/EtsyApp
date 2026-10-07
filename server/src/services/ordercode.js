@@ -34,13 +34,40 @@ export const formatCode = (day, seq, pattern = template()) => format(day, seq, p
 /** The day a code handed out right now is stamped with. */
 export const codeDay = () => todayInZone(zone());
 
+// The numbers of a day that are still in use: the codes of orders that have a parcel in the packing list. A parcel
+// taken off the list gives its number back - when the last one of the day leaves, the next order is 01 again.
 const usedSeqs = (db, day) => [
-  ...db.prepare('SELECT seq FROM order_codes WHERE day = ?').all(day).map((r) => r.seq),
-  ...db.prepare('SELECT seq FROM shopify_order_codes WHERE day = ?').all(day).map((r) => r.seq),
+  ...db.prepare(`SELECT c.seq FROM order_codes c WHERE c.day = ? AND EXISTS
+                   (SELECT 1 FROM inbound_parcels p WHERE p.match_channel = 'etsy' AND p.match_order_id = CAST(c.receipt_id AS TEXT))`)
+    .all(day).map((r) => r.seq),
+  ...db.prepare(`SELECT c.seq FROM shopify_order_codes c WHERE c.day = ? AND EXISTS
+                   (SELECT 1 FROM inbound_parcels p WHERE p.match_channel = 'shopify' AND p.match_order_id = c.order_id)`)
+    .all(day).map((r) => r.seq),
 ];
 
-/** The next unused number of a day, over both shops' codes. Numbers are never reused. */
+/**
+ * The next number of a day: one after the highest number the packing list is holding (01 for an empty list), over
+ * both shops' codes. An order that kept the code of a parcel long gone loses it when its number is handed out again.
+ */
 const nextSeq = (db, day) => Math.max(0, ...usedSeqs(db, day)) + 1;
+const freeSeq = (db, day, seq) => {
+  db.prepare("DELETE FROM order_codes WHERE day = ? AND seq = ? AND source = 'packing'").run(day, seq);
+  db.prepare("DELETE FROM shopify_order_codes WHERE day = ? AND seq = ? AND source = 'packing'").run(day, seq);
+};
+
+/**
+ * An order whose last parcel has left the packing list gives its code back (a code the packing list handed out;
+ * one an order already had from before is kept). Called after a parcel is deleted, unmatched or moved.
+ */
+export function releaseIfUnused(channel, orderId) {
+  if (!channel || orderId == null) return false;
+  const db = getDb();
+  if (db.prepare('SELECT 1 FROM inbound_parcels WHERE match_channel = ? AND match_order_id = ?').get(channel, String(orderId))) return false;
+  const r = channel === 'etsy'
+    ? db.prepare("DELETE FROM order_codes WHERE receipt_id = ? AND source = 'packing'").run(Number(orderId))
+    : db.prepare("DELETE FROM shopify_order_codes WHERE order_id = ? AND source = 'packing'").run(String(orderId));
+  return r.changes > 0;
+}
 
 // ------------------------------------------------------------------- lookup
 
@@ -93,7 +120,8 @@ export function ensureOrderCode(channel, orderId) {
     const day = codeDay();
     const seq = nextSeq(db, day);
     const code = formatCode(day, seq);
-    db.prepare(`INSERT INTO order_codes (shop_id, receipt_id, code, day, seq) VALUES (?,?,?,?,?)
+    freeSeq(db, day, seq);
+    db.prepare(`INSERT INTO order_codes (shop_id, receipt_id, code, day, seq, source) VALUES (?,?,?,?,?, 'packing')
                 ON CONFLICT(shop_id, receipt_id) DO NOTHING`).run(shopId, id, code, day, seq);
     return codeFor(id, { shopId }) ?? code;
   }
@@ -106,7 +134,8 @@ export function ensureOrderCode(channel, orderId) {
     const day = codeDay();
     const seq = nextSeq(db, day);
     const code = formatCode(day, seq);
-    db.prepare(`INSERT INTO shopify_order_codes (shop_id, order_id, code, day, seq) VALUES (?,?,?,?,?)
+    freeSeq(db, day, seq);
+    db.prepare(`INSERT INTO shopify_order_codes (shop_id, order_id, code, day, seq, source) VALUES (?,?,?,?,?, 'packing')
                 ON CONFLICT(shop_id, order_id) DO NOTHING`).run(shopId, id, code, day, seq);
     return shopifyCodeFor(id, { shopId }) ?? code;
   }

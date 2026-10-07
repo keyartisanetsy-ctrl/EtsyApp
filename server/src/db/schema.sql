@@ -655,6 +655,7 @@ CREATE TABLE IF NOT EXISTS order_codes (
   day        TEXT NOT NULL,        -- the order's own day, YYYY-MM-DD
   seq        INTEGER NOT NULL,     -- position within that day
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  source     TEXT,                 -- 'packing': handed out by the packing list (and taken back when its last parcel leaves)
   PRIMARY KEY (shop_id, receipt_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ordercodes_day ON order_codes(shop_id, day, seq);
@@ -1100,6 +1101,7 @@ CREATE TABLE IF NOT EXISTS shopify_order_codes (
   day        TEXT NOT NULL,
   seq        INTEGER NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  source     TEXT,
   PRIMARY KEY (shop_id, order_id)
 );
 CREATE INDEX IF NOT EXISTS idx_shopify_ordercodes_day ON shopify_order_codes(day, seq);

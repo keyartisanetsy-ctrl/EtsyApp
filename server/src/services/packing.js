@@ -25,7 +25,7 @@ import { activeShopifyShopId } from '../shopify/shop.js';
 import { readSetting } from './settings.js';
 import { run, parseJsonish } from './ai/index.js';
 import { resolveForTransaction } from './productimages.js';
-import { codesFor, shopifyCodesFor, ensureOrderCode } from './ordercode.js';
+import { codesFor, shopifyCodesFor, ensureOrderCode, releaseIfUnused } from './ordercode.js';
 import { cachedProductImageId } from './warehousecheck.js';
 import * as holds from './holds.js';
 import { supplyForOrders, supplyFor } from './ordersupply.js';
@@ -181,8 +181,37 @@ export function getParcel(id) {
     row.match_channel ? supplyFor(row.match_channel, row.match_order_id) : null);
 }
 
+/**
+ * Make the orders carry what the packing list says about them, whatever order things were done in: the arrival's
+ * photo on the item (when the item has none), its carrier line on the order's inbound tracking, and the order's
+ * current code on the arrival. Cheap, and safe to run whenever the list is opened.
+ */
+export function syncMatchedParcels() {
+  const db = getDb();
+  let fixed = 0;
+  for (const p of db.prepare('SELECT * FROM inbound_parcels WHERE match_channel IS NOT NULL').all()) {
+    try {
+      const photo = p.match_channel === 'etsy'
+        ? db.prepare('SELECT warehouse_photo_id AS v FROM receipt_transactions WHERE transaction_id = ?').get(Number(p.match_item_id))?.v
+        : db.prepare('SELECT warehouse_photo_id AS v FROM shopify_order_line_items WHERE line_item_id = ?').get(String(p.match_item_id))?.v;
+      if (p.attachment_id && !photo) { setItemPhoto(p.match_channel, p.match_order_id, p.match_item_id, p.attachment_id); fixed += 1; }
+      const token = trackingToken(p);
+      if (token) {
+        const list = splitTracking(currentSupplyTracking(p.match_channel, p.match_order_id));
+        if (!list.includes(token)) { writeSupplyTracking(p.match_channel, p.match_order_id, [...list, token].join(', ')); fixed += 1; }
+      }
+      const code = p.match_channel === 'etsy'
+        ? db.prepare('SELECT code FROM order_codes WHERE receipt_id = ?').get(Number(p.match_order_id))?.code
+        : db.prepare('SELECT code FROM shopify_order_codes WHERE order_id = ?').get(String(p.match_order_id))?.code;
+      if (code && code !== p.match_code) { db.prepare('UPDATE inbound_parcels SET match_code = ? WHERE id = ?').run(code, p.id); fixed += 1; }
+    } catch { /* the order may be gone from the local mirror */ }
+  }
+  return { fixed };
+}
+
 export function listParcels({ status = 'all', limit = 300 } = {}) {
   const db = getDb();
+  try { syncMatchedParcels(); } catch { /* the list still opens */ }
   const where = [];
   if (status === 'unmatched') where.push('match_channel IS NULL AND quantity > 0');
   else if (status === 'matched') where.push('match_channel IS NOT NULL AND packed_at IS NULL');
@@ -267,7 +296,7 @@ export function deleteParcel(id) {
   // Arrivals that were split out of this photo are real deliveries of their own; they stay.
   db.prepare('UPDATE inbound_parcels SET parent_id = NULL WHERE parent_id = ?').run(row.id);
   db.prepare('DELETE FROM inbound_parcels WHERE id = ?').run(row.id);
-  if (row.match_channel) touchHold(row.match_channel, row.match_order_id);
+  if (row.match_channel) { touchHold(row.match_channel, row.match_order_id); releaseIfUnused(row.match_channel, row.match_order_id); }
   for (const att of new Set([row.attachment_id, row.original_attachment_id].filter(Boolean))) removeParcelAttachment(att);
   audit('packing.parcel_delete', { entity: 'parcel', entityId: row.id });
   return { deleted: row.id };
@@ -685,7 +714,7 @@ export function confirmMatch(id, { channel, orderId, itemId, source = 'manual', 
   applyMatchEffects(parcel, channel, orderId, itemId, existingPhoto);
   // Look at the order this parcel now belongs to (and the one it left): if the rest of it
   // has not arrived, this parcel is put on hold; if it is the last piece, the hold is released.
-  if (parcel.match_channel) touchHold(parcel.match_channel, parcel.match_order_id);
+  if (parcel.match_channel) { touchHold(parcel.match_channel, parcel.match_order_id); releaseIfUnused(parcel.match_channel, parcel.match_order_id); }
   touchHold(channel, orderId);
   audit('packing.match', { entity: 'parcel', entityId: parcel.id, detail: { channel, orderId, itemId, code: target.code, source, score } });
   return getParcel(parcel.id);
@@ -699,6 +728,7 @@ export function unmatchParcel(id) {
     UPDATE inbound_parcels SET match_channel = NULL, match_order_id = NULL, match_item_id = NULL, match_code = NULL,
       match_source = NULL, match_score = NULL, matched_at = NULL, packed_at = NULL WHERE id = ?`).run(parcel.id);
   touchHold(parcel.match_channel, parcel.match_order_id);
+  releaseIfUnused(parcel.match_channel, parcel.match_order_id);
   audit('packing.unmatch', { entity: 'parcel', entityId: parcel.id });
   return getParcel(parcel.id);
 }
