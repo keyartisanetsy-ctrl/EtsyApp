@@ -122,15 +122,16 @@ export function applyOrders() {
       LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
       WHERE rt.sku = ? COLLATE NOCASE AND COALESCE(r.was_canceled, 0) = 0 AND COALESCE(f.is_canceled, 0) = 0
         AND r.created_ts >= CAST(strftime('%s', ?) AS INTEGER)
-      ORDER BY r.created_ts`).all(t.sku, t.counted_at).map((r) => ({ ref: `etsy:${r.id}`, qty: r.qty, ts: r.ts }));
+      ORDER BY r.created_ts, rt.transaction_id`).all(t.sku, t.counted_at).map((r) => ({ ref: `etsy:${r.id}`, qty: r.qty, ts: r.ts }));
     const shopify = db.prepare(`
       SELECT li.line_item_id AS id, li.quantity AS qty, o.created_at_shopify AS at
       FROM shopify_order_line_items li JOIN shopify_orders o ON o.order_id = li.order_id
       LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
       WHERE li.sku = ? COLLATE NOCASE AND o.cancelled_at IS NULL AND COALESCE(f.is_canceled, 0) = 0
         AND strftime('%s', o.created_at_shopify) >= strftime('%s', ?)
-      ORDER BY o.created_at_shopify`).all(t.sku, t.counted_at).map((r) => ({ ref: `shopify:${r.id}`, qty: r.qty, ts: Date.parse(r.at) / 1000 }));
-    const all = [...etsy, ...shopify].sort((a, b) => a.ts - b.ts);
+      ORDER BY o.created_at_shopify, li.line_item_id`).all(t.sku, t.counted_at).map((r) => ({ ref: `shopify:${r.id}`, qty: r.qty, ts: Date.parse(r.at) / 1000 }));
+    // oldest first; orders placed in the same second go in the order of their numbers
+    const all = [...etsy, ...shopify].sort((a, b) => a.ts - b.ts || String(a.ref).localeCompare(String(b.ref), undefined, { numeric: true }));
     for (const line of all) {
       if (done.get(line.ref)) continue;
       const ordered = Math.max(0, Number(line.qty) || 0);
