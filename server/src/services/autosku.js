@@ -25,6 +25,7 @@ import * as catalog from './catalog.js';
 import * as links from './productlinks.js';
 import { readSetting } from './settings.js';
 import { DEFAULT_PREFIX } from './skugen.js';
+import { loadTypes, validateTypes, classify } from './skutypes.js';
 
 const MAX_SKU = { etsy: 32, shopify: 255 };
 const SURE = 0.85;
@@ -101,14 +102,16 @@ function splitCluster(members, edges) {
  *
  *   shops          limit to these shops (the matches in other shops still count)
  *   productKeys    limit to these products
- *   prefix         letters in front of the product number (default: what the catalogue uses)
+ *   prefix         letters in front of the product number when no product type applies (default: what the catalogue uses)
+ *   prefixMode     "type" (default: KC for a keycap, KCS for a set, BAG ... - see skutypes.js) | "single" (this one prefix for everything)
+ *   types          the product-type rules to use instead of the saved ones (to try an edit before saving it)
  *   numbering      "auto" | "1" | "01" - how a product's variants are numbered
  *   includeInactive  also draft / expired / sold-out listings
  *   linkMatches    remember products planned together as the same product
  */
 export async function plan({
   shops = null, productKeys = null, prefix = '', numbering = 'auto', includeInactive = false, linkMatches = true, imageBudget = 300,
-  matchSets = null,
+  matchSets = null, prefixMode = 'type', types = null,
 } = {}) {
   const all = catalog.productsOf(null);
   const wantKeys = productKeys?.length ? new Set(productKeys) : null;
@@ -124,21 +127,30 @@ export async function plan({
   if (!/^[A-Z0-9_-]{1,12}$/.test(usedPrefix)) throw badRequest('The prefix can be letters, digits, "-" or "_" (up to 12).');
   const style = numbering === '01' ? { sep: '-', width: 2 } : numbering === '1' ? { sep: '-', width: 1 } : detectStyle(skuList);
 
-  // the numbers in use under this prefix
-  const re = new RegExp(`^${usedPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\d+)`, 'i');
-  let top = 0; let width = 3;
-  for (const sku of skuList) { const m = re.exec(sku); if (m) { top = Math.max(top, Number(m[1]) || 0); width = Math.max(width, m[1].length); } }
+  const typeRules = prefixMode === 'single' ? [] : (Array.isArray(types) && types.length ? validateTypes(types) : loadTypes());
+  // the next free product number under each prefix (KC, KCS, BAG ...): after the highest one already in use
   const taken = catalog.allSkus();
   const usedBases = new Set(skuList.map((s) => links.skuBase(s)));
-  let next = top + 1;
-  const allocBase = () => {
+  const counters = new Map();
+  const counterFor = (pfx) => {
+    if (!counters.has(pfx)) {
+      const re = new RegExp(`^${pfx.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\d+)`, 'i');
+      let top = 0; let width = 3;
+      for (const sku of skuList) { const m = re.exec(sku); if (m) { top = Math.max(top, Number(m[1]) || 0); width = Math.max(width, m[1].length); } }
+      counters.set(pfx, { next: top + 1, width });
+    }
+    return counters.get(pfx);
+  };
+  const allocBase = (pfx) => {
+    const c = counterFor(pfx);
     for (;;) {
-      const base = `${usedPrefix}${String(next).padStart(width, '0')}`;
-      next += 1;
+      const base = `${pfx}${String(c.next).padStart(c.width, '0')}`;
+      c.next += 1;
       const k = base.toLowerCase();
       if (!usedBases.has(k) && !taken.has(k)) { usedBases.add(k); return base; }
     }
   };
+  const typeOf = (products) => { for (const p of products) { const t = classify(p.title, typeRules); if (t) return t; } return null; };
 
   // what each shop already uses, so one shop never gets the same SKU on two variants
   const shopSkus = new Map();
@@ -207,7 +219,9 @@ export async function plan({
 
   const units = [];
   for (const w of work) {
-    const slots = links.slotsFor(w.products, { taken, style, newBase: allocBase });
+    const type = typeOf(w.products);
+    const unitPrefix = type?.prefix ?? usedPrefix;
+    const slots = links.slotsFor(w.products, { taken, style, newBase: () => allocBase(unitPrefix) });
     const notes = [];
     const edits = [];
     for (const slot of slots) {
@@ -232,6 +246,7 @@ export async function plan({
     const link = w.kind === 'match' && linkMatches ? w.products.map((p) => p.key) : null;
     units.push({
       id: units.length, kind: w.kind, title: w.products[0].title, products: w.products.map(publicProduct),
+      type: type ? { key: type.key, label: type.label, prefix: type.prefix } : null,
       slots: slots.length, partial, score: w.score ?? null, edits, link, notes,
       // linked groups and single products are safe to tick; a new match only when it is a sure one with every variant paired
       // confirmed by a person: ticked unless the shops disagree on a SKU; otherwise linked groups and single products are safe to tick,
@@ -241,7 +256,8 @@ export async function plan({
   }
 
   return {
-    prefix: usedPrefix, prefixSource: prefix ? 'typed' : detected.source, style, nextNumber: next,
+    prefix: usedPrefix, prefixSource: prefix ? 'typed' : detected.source, prefixMode, style, nextNumber: counterFor(usedPrefix).next,
+    types: typeRules.map(({ key, label, prefix: pfx, words }) => ({ key, label, prefix: pfx, words })),
     units, skipped,
     counts: {
       variants: units.reduce((n, u) => n + u.edits.length, 0), units: units.length,
@@ -249,6 +265,7 @@ export async function plan({
       groups: units.filter((u) => u.kind === 'group').length, matches: units.filter((u) => u.kind === 'match').length,
       single: units.filter((u) => u.kind === 'product').length, ticked: units.filter((u) => u.ticked).length,
       skipped: skipped.length,
+      byType: Object.fromEntries([...units.reduce((m, u) => m.set(u.type?.label ?? 'Other', (m.get(u.type?.label ?? 'Other') ?? 0) + 1), new Map())]),
     },
   };
 }

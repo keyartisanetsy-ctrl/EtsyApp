@@ -136,6 +136,7 @@ export const SETTING_DEFS = {
 
   'sku.prefix':            { env: '', def: 'KC', label: 'SKU prefix for generated codes' },
   'sku.pattern':           { env: '', def: '{PREFIX}{PRODUCT}-{VARIANT}', label: 'SKU shape, e.g. KC001-01' },
+  'sku.types':             { env: '', def: '', label: 'Automatic SKUs: product types and the letters each starts with (JSON, edited on the Auto SKUs screen)' },
 
   'pricing.discount_percent': { env: String(config.pricing.discountPercent), def: '30', label: 'Discount percentage' },
   'orders.ship_days_min':  { env: '', def: '2', label: 'Expected dispatch: minimum business days' },

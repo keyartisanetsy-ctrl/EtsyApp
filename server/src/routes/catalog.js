@@ -5,6 +5,7 @@ import * as catalog from '../services/catalog.js';
 import * as links from '../services/productlinks.js';
 import * as supplycheck from '../services/supplycheck.js';
 import * as autosku from '../services/autosku.js';
+import * as skutypes from '../services/skutypes.js';
 
 const router = Router();
 
@@ -130,9 +131,19 @@ router.post('/auto-sku/plan', asyncRoute(async (req, res) => {
     includeInactive: bool(b.includeInactive),
     linkMatches: b.linkMatches === undefined ? true : bool(b.linkMatches),
     imageBudget: Math.min(600, int(b.imageBudget, 300)),
+    prefixMode: b.prefixMode === 'single' ? 'single' : 'type',
+    types: Array.isArray(b.types) ? b.types.slice(0, 60) : null,
     matchSets: Array.isArray(b.matchSets) ? b.matchSets.slice(0, 500).map((set) => (Array.isArray(set) ? set.slice(0, 12).map(String) : [])) : null,
   }));
 }));
+
+/** The product types (and the SKU letters each gets) the automatic SKUs use. */
+router.get('/auto-sku/types', asyncRoute(async (req, res) => res.json({ types: skutypes.loadTypes(), defaults: skutypes.DEFAULT_TYPES })));
+router.put('/auto-sku/types', asyncRoute(async (req, res) => {
+  required(req.body ?? {}, ['types']);
+  res.json({ types: skutypes.saveTypes(req.body.types) });
+}));
+router.delete('/auto-sku/types', asyncRoute(async (req, res) => res.json({ types: skutypes.resetTypes() })));
 
 /** Write the approved part of a plan, a few products at a time: { units: [{ id, edits: [{ key, sku }], link }], dryRun }. */
 router.post('/auto-sku/apply', asyncRoute(async (req, res) => {
