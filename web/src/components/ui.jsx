@@ -46,6 +46,10 @@ export function useErrorToast() {
 
 export const Spinner = () => <span className="spinner" />;
 
+const CHANNEL_BADGE = { etsy: 'orange', shopify: 'green' };
+/** The shop a product or variant belongs to, coloured by channel. */
+export const ShopBadge = ({ channel, name }) => <span className={`badge ${CHANNEL_BADGE[channel] ?? 'grey'}`}>{name}</span>;
+
 export function Banner({ kind = 'info', children, onClose }) {
   if (!children) return null;
   return (

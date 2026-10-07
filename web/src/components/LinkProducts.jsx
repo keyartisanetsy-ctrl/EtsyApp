@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import api from '../lib/api.js';
-import { Spinner, Empty, Banner, Thumb, Modal, useAsync, useToast, useErrorToast } from './ui.jsx';
+import { Spinner, Empty, Banner, Thumb, Modal, ShopBadge, useAsync, useToast, useErrorToast } from './ui.jsx';
+import AutoSkuModal from './AutoSku.jsx';
 
-const CHANNEL_BADGE = { etsy: 'orange', shopify: 'green' };
-export const ShopBadge = ({ channel, name }) => <span className={`badge ${CHANNEL_BADGE[channel] ?? 'grey'}`}>{name}</span>;
+export { ShopBadge };
 
 const AI_VERDICT = { same: ['green', 'same product'], different: ['red', 'different'], unsure: ['amber', 'unsure'] };
 const TIER = { sure: ['green', 'sure'], likely: ['amber', 'likely'], maybe: ['grey', 'maybe'] };
@@ -234,10 +234,9 @@ function defaultPick(s) {
  * says which ones look alike - and only the ticked ones go on: to the optional AI
  * look, to "not the same", or to the confirmation that opens the variant line-up.
  */
-function SuggestionCard({ s, onLink, onRejected }) {
+function SuggestionCard({ s, picked, onPick, inBulk, onBulk, onLink, onRejected }) {
   const toast = useToast();
   const showError = useErrorToast();
-  const [picked, setPicked] = useState(() => defaultPick(s));
   const [aiResults, setAiResults] = useState({});   // pair -> what the AI said just now (saved answers come with the suggestion)
   const [aiBusy, setAiBusy] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -262,7 +261,7 @@ function SuggestionCard({ s, onLink, onRejected }) {
   const toAsk = [...pairs].sort((x, y) => (y.ev?.score ?? 0) - (x.ev?.score ?? 0)).slice(0, 6);
   const canAsk = toAsk.length > 0 && toAsk.some((x) => !x.ai);
 
-  const toggle = (key, on) => setPicked((prev) => { const next = new Set(prev); if (on) next.add(key); else next.delete(key); return next; });
+  const toggle = (key, on) => { const next = new Set(picked); if (on) next.add(key); else next.delete(key); onPick(next); };
 
   /** Optional: one small AI look at the photos of the ticked products. Nothing runs unless this is pressed. */
   const askAi = async () => {
@@ -288,11 +287,14 @@ function SuggestionCard({ s, onLink, onRejected }) {
   return (
     <div className="card" style={{ margin: 0, padding: 10 }} data-testid="suggestion">
       <div className="flex gap8" style={{ flexWrap: 'wrap', alignItems: 'center', marginBottom: 6 }}>
+        <input type="checkbox" aria-label="Include this match in the bulk action" checked={inBulk && canConfirm} disabled={!canConfirm}
+               title={canConfirm ? 'Tick to confirm / reject many matches at once (see the bar above the list)' : 'Tick at least two products, one per shop, to include this match'}
+               onChange={(e) => onBulk(e.target.checked)} />
         <span className={`badge ${TIER[s.tier][0]}`}>{TIER[s.tier][1]} · {Math.round(s.score * 100)}%</span>
         {s.joinsGroup != null && <span className="badge blue">adds to group #{s.joinsGroup}</span>}
         <span className="small muted">{selected.length} of {s.members.length} ticked</span>
         {s.members.length > 2 && (
-          <button className="btn xs ghost" onClick={() => setPicked(selected.length === s.members.length ? new Set() : new Set(s.members.map((m) => m.key)))}>
+          <button className="btn xs ghost" onClick={() => onPick(selected.length === s.members.length ? new Set() : new Set(s.members.map((m) => m.key)))}>
             {selected.length === s.members.length ? 'Tick none' : 'Tick all'}
           </button>
         )}
@@ -332,11 +334,22 @@ function SuggestionCard({ s, onLink, onRejected }) {
 
 /** Suggested matches and the groups already made. */
 export default function MatchesTab({ onChanged }) {
+  const toast = useToast();
   const showError = useErrorToast();
   const [linking, setLinking] = useState(null); // product keys
   const suggestions = useAsync(() => api.get('/catalog/suggestions'), []);
   const groups = useAsync(() => api.get('/catalog/groups'), []);
   const reloadAll = useCallback(() => { suggestions.reload(); groups.reload(); onChanged?.(); }, [suggestions, groups, onChanged]);
+
+  // what is ticked on each card (absent = the suggestion's own default), and which cards are in the bulk action
+  const [picks, setPicks] = useState({});
+  const [bulk, setBulk] = useState(new Set());
+  const [bulkSets, setBulkSets] = useState(null);   // product-key sets being confirmed together
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const idOf = (s) => s.members.map((m) => m.key).join('|');
+  const pickedOf = (s) => picks[idOf(s)] ?? defaultPick(s);
+  const chosenOf = (s) => s.members.filter((m) => pickedOf(s).has(m.key));
+  const validOf = (s) => { const c = chosenOf(s); return c.length >= 2 && new Set(c.map((m) => m.shopKey)).size === c.length; };
 
   const unlink = async (productKey) => {
     if (!window.confirm('Take this product out of the group? Its SKUs stay as they are.')) return;
@@ -348,6 +361,18 @@ export default function MatchesTab({ onChanged }) {
   };
 
   const list = suggestions.data?.suggestions ?? [];
+  const inBulk = list.filter((s) => bulk.has(idOf(s)) && validOf(s));
+  const bulkProducts = inBulk.reduce((n, s) => n + chosenOf(s).length, 0);
+  const tickBulk = (cards) => setBulk(new Set(cards.map(idOf)));
+  const rejectBulk = async () => {
+    if (!window.confirm(`Mark the ticked products of ${inBulk.length} match${inBulk.length === 1 ? '' : 'es'} as different products?\nThey will not be suggested together again.`)) return;
+    setBulkBusy(true);
+    try {
+      for (const s of inBulk) await api.post('/catalog/reject', { keys: chosenOf(s).map((m) => m.key) }); // eslint-disable-line no-await-in-loop
+      toast({ kind: 'ok', title: `${inBulk.length} match${inBulk.length === 1 ? '' : 'es'} marked as different products` });
+      setBulk(new Set()); suggestions.reload();
+    } catch (err) { showError(err, 'Could not save that'); } finally { setBulkBusy(false); }
+  };
   return (
     <div style={{ padding: 16 }}>
       <div className="card mb16">
@@ -361,11 +386,29 @@ export default function MatchesTab({ onChanged }) {
         {suggestions.loading && !suggestions.data ? <Spinner /> : !list.length ? (
           <Empty icon="⧉" title="No unlinked matches found">Products already linked, or marked "not the same", are left out.</Empty>
         ) : (
-          <div className="flex col" style={{ gap: 10 }}>
-            {list.map((s) => (
-              <SuggestionCard key={s.members.map((m) => m.key).join('|')} s={s} onLink={setLinking} onRejected={() => suggestions.reload()} />
-            ))}
-          </div>
+          <>
+            <div className="selection-bar" style={{ position: 'sticky', top: 0, zIndex: 5, marginBottom: 10 }} data-testid="bulk-bar">
+              <span className="small muted">Many at once:</span>
+              <button className="btn xs" onClick={() => tickBulk(list.filter((x) => x.tier === 'sure' && validOf(x)))}
+                      title="Tick every match the app is sure of, with the products it has ticked in each">Tick all sure ({list.filter((x) => x.tier === 'sure' && validOf(x)).length})</button>
+              <button className="btn xs ghost" onClick={() => tickBulk(list.filter(validOf))}>Tick all ({list.filter(validOf).length})</button>
+              <button className="btn xs ghost" disabled={!bulk.size} onClick={() => setBulk(new Set())}>Clear</button>
+              <span className="count">{inBulk.length} match{inBulk.length === 1 ? '' : 'es'} · {bulkProducts} products ticked</span>
+              <div className="spacer" />
+              <button className="btn xs ghost" disabled={!inBulk.length || bulkBusy} onClick={rejectBulk}>Not the same ({inBulk.length})</button>
+              <button className="btn xs primary" disabled={!inBulk.length || bulkBusy} onClick={() => setBulkSets(inBulk.map((x) => chosenOf(x).map((m) => m.key)))}
+                      title="They are the same product: pair their variants, give them the same SKUs and link them - you see everything before it is written">
+                Same product - confirm {inBulk.length} match{inBulk.length === 1 ? '' : 'es'}…
+              </button>
+            </div>
+            <div className="flex col" style={{ gap: 10 }}>
+              {list.map((s) => (
+                <SuggestionCard key={idOf(s)} s={s} picked={pickedOf(s)} onPick={(set) => setPicks((p) => ({ ...p, [idOf(s)]: set }))}
+                                inBulk={bulk.has(idOf(s))} onBulk={(on) => setBulk((b) => { const n = new Set(b); if (on) n.add(idOf(s)); else n.delete(idOf(s)); return n; })}
+                                onLink={setLinking} onRejected={() => suggestions.reload()} />
+              ))}
+            </div>
+          </>
         )}
       </div>
 
@@ -399,6 +442,8 @@ export default function MatchesTab({ onChanged }) {
           </div>
         )}
       </div>
+
+      {bulkSets && <AutoSkuModal matchSets={bulkSets} onClose={() => setBulkSets(null)} onDone={() => { setBulk(new Set()); reloadAll(); }} />}
 
       {linking && <LinkModal productKeys={linking} onClose={() => setLinking(null)} onDone={() => { setLinking(null); reloadAll(); }} />}
     </div>

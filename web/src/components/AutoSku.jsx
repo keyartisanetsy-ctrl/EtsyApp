@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../lib/api.js';
-import { Spinner, Banner, Thumb, Modal, Checkbox, useToast, useErrorToast } from './ui.jsx';
-import { ShopBadge } from './LinkProducts.jsx';
+import { Spinner, Banner, Thumb, Modal, Checkbox, ShopBadge, useToast, useErrorToast } from './ui.jsx';
 
 const KIND = {
   product: ['grey', 'single product', 'A product on its own - its variants are numbered in the order the shop lists them'],
@@ -13,6 +12,7 @@ const PAGE = 25;
 
 /** The SKUs of a unit in a few words: KEY022-1 … KEY022-3. */
 function skuRange(unit) {
+  if (!unit.edits.length) return 'no SKU to give';
   const skus = [...new Set(unit.edits.map((e) => e.sku))];
   if (skus.length <= 3) return skus.join(', ');
   return `${skus[0]} … ${skus[skus.length - 1]} (${skus.length})`;
@@ -42,12 +42,17 @@ function UnitRow({ unit, ticked, onTick, open, onOpen }) {
           <span className={`badge ${kind}`} title={kindHelp}>{kindText}</span>
           {unit.score != null && <span className="badge grey" style={{ marginLeft: 4 }} title="How alike the weakest pair is">{Math.round(unit.score * 100)}%</span>}
           <div className="mono small" style={{ marginTop: 4 }}>{skuRange(unit)}</div>
-          <div className="small muted">{unit.edits.length} SKU{unit.edits.length === 1 ? '' : 's'} to give</div>
+          <div className="small muted">{unit.edits.length ? `${unit.edits.length} SKU${unit.edits.length === 1 ? '' : 's'} to give` : unit.notes.length ? 'nothing to write' : 'already carries the same SKUs - only linked'}</div>
           {unit.partial > 0 && <div className="small" style={{ color: 'var(--warn, #fbbf24)' }} title="Some variants exist in only some of the shops. They get a SKU of the same family.">{unit.partial} variant{unit.partial === 1 ? '' : 's'} not in every shop</div>}
           <button className="btn xs ghost" style={{ marginTop: 2 }} onClick={onOpen}>{open ? 'Hide variants' : 'Show variants'}</button>
         </div>
       </div>
-      {unit.kind === 'match' && !unit.ticked && (
+      {unit.kind === 'match' && !unit.ticked && unit.score == null && (
+        <div className="small muted" style={{ marginTop: 4 }}>
+          Not ticked: the shops already carry different SKUs for the same variant. Decide them on the card ("Same product - confirm") where you can pick one.
+        </div>
+      )}
+      {unit.kind === 'match' && !unit.ticked && unit.score != null && (
         <div className="small muted" style={{ marginTop: 4 }}>
           Not ticked on its own: {unit.partial > 0 ? 'the shops do not have the same variants' : unit.score < 0.85 ? 'the match is not certain' : 'it needs a look'} - compare the photos, then tick it if it is the same product.
         </div>
@@ -72,7 +77,7 @@ function UnitRow({ unit, ticked, onTick, open, onOpen }) {
  * who gets which SKU - and nothing is written until the ticked products are
  * approved here. Existing SKUs are never changed.
  */
-export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone }) {
+export default function AutoSkuModal({ shops, selectedProducts = [], matchSets = null, onClose, onDone }) {
   const toast = useToast();
   const showError = useErrorToast();
   const [opts, setOpts] = useState({ scope: 'shown', prefix: '', numbering: 'auto', includeInactive: false, linkMatches: true });
@@ -89,7 +94,9 @@ export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone 
   const load = useCallback(async (o) => {
     setLoading(true);
     try {
-      const body = {
+      const body = matchSets ? {
+        matchSets, prefix: o.prefix || undefined, numbering: o.numbering, linkMatches: true,
+      } : {
         shops: shops && shops.length ? shops : undefined,
         productKeys: o.scope === 'selected' ? selectedProducts : undefined,
         prefix: o.prefix || undefined, numbering: o.numbering, includeInactive: o.includeInactive, linkMatches: o.linkMatches,
@@ -120,7 +127,7 @@ export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone 
     for (const u of chosen) for (const e of u.edits) perShop[e.shopName] = (perShop[e.shopName] ?? 0) + 1;
     const lines = Object.entries(perShop).map(([shop, n]) => `${shop}: ${n}`).join('\n');
     const matches = chosen.filter((u) => u.link).length;
-    if (!window.confirm(`Write ${chosenSkus} SKUs for ${chosenProducts} products?\n\n${lines}\n\n${matches ? `${matches} group${matches === 1 ? '' : 's'} of the same product will also be linked.\n` : ''}Only empty SKUs are filled - no existing SKU is changed.`)) return;
+    if (!window.confirm(`${chosenSkus ? `Write ${chosenSkus} SKUs for ${chosenProducts} products` : `Link ${chosen.length} match${chosen.length === 1 ? '' : 'es'}`}?\n\n${lines}\n\n${matches ? `${matches} group${matches === 1 ? '' : 's'} of the same product will also be linked.\n` : ''}Only empty SKUs are filled - no existing SKU is changed.`)) return;
     stopRef.current = false;
     const state = { done: 0, total: chosen.length, written: 0, failed: [], stopped: false, finished: false };
     setRun({ ...state });
@@ -139,31 +146,41 @@ export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone 
     setRun({ ...state });
     toast({ kind: state.failed.length ? 'err' : 'ok', title: `${state.written} SKU${state.written === 1 ? '' : 's'} written`, body: state.failed.length ? `${state.failed.length} product${state.failed.length === 1 ? '' : 's'} had problems - see the list.` : undefined, duration: 8000 });
     onDone?.();
-    load(opts);
+    if (matchSets) setPlan((p) => ({ ...p, units: [], counts: { ...p.counts, units: 0 } })); else load(opts);
   };
 
   return (
-    <Modal open lg onClose={busy ? () => {} : onClose} title="Automatic SKUs"
+    <Modal open lg onClose={busy ? () => {} : onClose} title={matchSets ? 'Same product - confirm' : 'Automatic SKUs'}
            footer={(
              <>
                {busy ? <button className="btn" onClick={() => { stopRef.current = true; }}>Stop after this batch</button> : <button className="btn" onClick={onClose}>Close</button>}
                <button className="btn primary" disabled={busy || loading || !chosen.length} onClick={write}>
-                 {busy ? <Spinner /> : `Write ${chosenSkus} SKU${chosenSkus === 1 ? '' : 's'} (${chosenProducts} product${chosenProducts === 1 ? '' : 's'})`}
+                 {busy ? <Spinner /> : matchSets && !chosenSkus ? `Link ${chosen.length} match${chosen.length === 1 ? '' : 'es'}`
+                   : matchSets ? `Write ${chosenSkus} SKU${chosenSkus === 1 ? '' : 's'} & link ${chosen.length} match${chosen.length === 1 ? '' : 'es'}`
+                   : `Write ${chosenSkus} SKU${chosenSkus === 1 ? '' : 's'} (${chosenProducts} product${chosenProducts === 1 ? '' : 's'})`}
                </button>
              </>
            )}>
+      {matchSets ? (
+        <div className="small muted mb8">
+          You said these products are the same one. Their variants are paired up and share SKUs - a SKU that exists is passed on to the shops that lack it,
+          a variant only one shop has gets a SKU of the same family - and the products are linked. A SKU that exists is never changed.
+          Nothing is written until you press the button below - untick any match you want to leave out.
+        </div>
+      ) : (
       <div className="small muted mb8">
         Gives a SKU to every variant that has none. A SKU that exists is never changed, a SKU is never used twice, and the same product in several shops gets the same SKUs.
         Nothing is written until you press the button below - untick any product you want to leave out.
       </div>
+      )}
 
       <div className="flex gap12 mb8" style={{ flexWrap: 'wrap', alignItems: 'flex-end' }}>
-        <label className="small">Which products
+        {!matchSets && <label className="small">Which products
           <select className="select sm" style={{ display: 'block' }} value={opts.scope} disabled={busy} onChange={(e) => set({ scope: e.target.value })}>
             <option value="shown">All in the shops shown{shops?.length ? ` (${shops.length})` : ''}</option>
             <option value="selected" disabled={!selectedProducts.length}>Only the {selectedProducts.length} selected</option>
           </select>
-        </label>
+        </label>}
         <label className="small">SKU starts with
           <input className="input sm mono" style={{ display: 'block', width: 90 }} value={prefixDraft} disabled={busy} aria-label="SKU prefix"
                  onChange={(e) => setPrefixDraft(e.target.value.toUpperCase())}
@@ -177,8 +194,8 @@ export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone 
             <option value="01">-01, -02, -03</option>
           </select>
         </label>
-        <Checkbox checked={opts.linkMatches} disabled={busy} onChange={(v) => set({ linkMatches: v })} label="Link products that are the same" />
-        <Checkbox checked={opts.includeInactive} disabled={busy} onChange={(v) => set({ includeInactive: v })} label="Include drafts and expired listings" />
+        {!matchSets && <Checkbox checked={opts.linkMatches} disabled={busy} onChange={(v) => set({ linkMatches: v })} label="Link products that are the same" />}
+        {!matchSets && <Checkbox checked={opts.includeInactive} disabled={busy} onChange={(v) => set({ includeInactive: v })} label="Include drafts and expired listings" />}
       </div>
 
         {run && (
@@ -194,12 +211,12 @@ export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone 
       {loading ? (
         <div className="empty"><Spinner /><p className="small muted">Working out the SKUs and looking at the photos of look-alike products…</p></div>
       ) : !plan ? null : !units.length ? (
-        <Banner kind="ok">Nothing to give: every variant here already has a SKU{plan.skipped.length ? `, apart from ${plan.skipped.length} left out below` : ''}.</Banner>
+        <Banner kind="ok">{matchSets ? (run?.finished ? 'All done.' : 'Nothing to confirm.') : `Nothing to give: every variant here already has a SKU${plan.skipped.length ? `, apart from ${plan.skipped.length} left out below` : ''}.`}</Banner>
       ) : (
         <>
           <Banner kind="info">
             <strong>{plan.counts.variants.toLocaleString()} SKUs</strong> for {plan.counts.products.toLocaleString()} products:{' '}
-            {plan.counts.single} single, {plan.counts.matches} same-product match{plan.counts.matches === 1 ? '' : 'es'}, {plan.counts.groups} linked group{plan.counts.groups === 1 ? '' : 's'}.
+            {matchSets ? `${plan.counts.matches} confirmed match${plan.counts.matches === 1 ? '' : 'es'}.` : `${plan.counts.single} single, ${plan.counts.matches} same-product match${plan.counts.matches === 1 ? '' : 'es'}, ${plan.counts.groups} linked group${plan.counts.groups === 1 ? '' : 's'}.`}
             Next free number: <span className="mono">{plan.prefix}{String(plan.nextNumber).padStart(3, '0')}</span>
             {' '}({plan.prefixSource === 'catalogue' ? 'prefix taken from your existing SKUs' : plan.prefixSource === 'typed' ? 'prefix typed by you' : 'prefix from the settings'}).
             {' '}{plan.counts.ticked} of {plan.counts.units} ticked.

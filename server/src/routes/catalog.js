@@ -130,6 +130,7 @@ router.post('/auto-sku/plan', asyncRoute(async (req, res) => {
     includeInactive: bool(b.includeInactive),
     linkMatches: b.linkMatches === undefined ? true : bool(b.linkMatches),
     imageBudget: Math.min(600, int(b.imageBudget, 300)),
+    matchSets: Array.isArray(b.matchSets) ? b.matchSets.slice(0, 500).map((set) => (Array.isArray(set) ? set.slice(0, 12).map(String) : [])) : null,
   }));
 }));
 

@@ -108,10 +108,13 @@ function splitCluster(members, edges) {
  */
 export async function plan({
   shops = null, productKeys = null, prefix = '', numbering = 'auto', includeInactive = false, linkMatches = true, imageBudget = 300,
+  matchSets = null,
 } = {}) {
   const all = catalog.productsOf(null);
   const wantKeys = productKeys?.length ? new Set(productKeys) : null;
-  const inScope = (p) => (!shops || shops.includes(p.shopKey)) && (!wantKeys || wantKeys.has(p.key));
+  // matchSets: products a person has already confirmed as the same one, [[key, key, ...], ...] - planned exactly as given
+  const sets = Array.isArray(matchSets) ? matchSets : null;
+  const inScope = sets ? () => true : (p) => (!shops || shops.includes(p.shopKey)) && (!wantKeys || wantKeys.has(p.key));
   const needs = (p) => p.variants.some((v) => !v.sku);
   const isActive = (p) => includeInactive || /^active$/i.test(p.state);
 
@@ -144,7 +147,7 @@ export async function plan({
     for (const v of p.variants) if (v.sku) shopSkus.get(p.shopKey).add(lc(v.sku));
   }
 
-  const candidates = all.filter((p) => inScope(p) && needs(p));
+  const candidates = sets ? [] : all.filter((p) => inScope(p) && needs(p));
   const skipped = [];
   const live = [];
   for (const p of candidates) {
@@ -155,10 +158,22 @@ export async function plan({
   const handled = new Set();
   const work = []; // { sortTitle, kind, products, score? }
 
+  if (sets) {
+    const byKey = new Map(all.map((p) => [p.key, p]));
+    for (const keys of sets) {
+      const products = [...new Set(keys)].map((k) => byKey.get(k)).filter(Boolean);
+      if (products.length < 2) { skipped.push({ kind: 'note', products: products.map(publicProduct), reason: 'Pick at least two products that are in the shops.' }); continue; }
+      if (new Set(products.map((p) => p.shopKey)).size !== products.length) {
+        skipped.push({ kind: 'note', products: products.map(publicProduct), reason: 'Two of them are in the same shop - a shop cannot carry the same SKU twice.' }); continue;
+      }
+      work.push({ kind: 'match', products, score: null, confirmed: true, sortTitle: lc(products[0].title) });
+    }
+  }
+
   // 1. products already linked: their group is planned as one
   const byGroup = new Map();
   for (const p of all) if (p.groupId != null) { if (!byGroup.has(p.groupId)) byGroup.set(p.groupId, []); byGroup.get(p.groupId).push(p); }
-  for (const p of live) {
+  for (const p of (sets ? [] : live)) {
     if (p.groupId == null || handled.has(p.key)) continue;
     const members = byGroup.get(p.groupId) ?? [p];
     for (const m of members) handled.add(m.key);
@@ -168,7 +183,7 @@ export async function plan({
 
   // 2. products that clearly are the same one as another shop's
   const unlinkedLive = (k) => liveKeys.has(k) && !handled.has(k);
-  if (live.some((p) => p.groupId == null)) {
+  if (!sets && live.some((p) => p.groupId == null)) {
     const sg = await links.suggest({ shops: null, minScore: 0.6, imageBudget, limit: 100000 });
     const byKey = new Map(all.map((p) => [p.key, p]));
     for (const s of sg.suggestions) {
@@ -212,14 +227,16 @@ export async function plan({
       }
       taken.add(k);
     }
-    if (!edits.length) { for (const n of notes) skipped.push({ kind: 'note', products: w.products.map(publicProduct), reason: n }); continue; }
+    if (!edits.length && !w.confirmed) { for (const n of notes) skipped.push({ kind: 'note', products: w.products.map(publicProduct), reason: n }); continue; }
     const partial = slots.filter((s) => s.members.length < w.products.length).length;
     const link = w.kind === 'match' && linkMatches ? w.products.map((p) => p.key) : null;
     units.push({
       id: units.length, kind: w.kind, title: w.products[0].title, products: w.products.map(publicProduct),
       slots: slots.length, partial, score: w.score ?? null, edits, link, notes,
       // linked groups and single products are safe to tick; a new match only when it is a sure one with every variant paired
-      ticked: w.kind !== 'match' || (w.score >= SURE && partial === 0 && !notes.length),
+      // confirmed by a person: ticked unless the shops disagree on a SKU; otherwise linked groups and single products are safe to tick,
+      // and a new match only when it is a sure one with every variant paired
+      ticked: w.confirmed ? !notes.length : (w.kind !== 'match' || (w.score >= SURE && partial === 0 && !notes.length)),
     });
   }
 
