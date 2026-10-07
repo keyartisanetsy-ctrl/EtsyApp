@@ -59,6 +59,10 @@ export default function ItemSupplyBox({ parcel, onSaved }) {
       setDeciding(null);
       report(r);
       setInfo(r.info);
+      // show what is stored now (a pasted link becomes its item id, a missing SKU becomes the saved one)
+      setTaobao(r.info.current.taobaoId || '');
+      setPrice(r.info.current.cost ?? '');
+      setCcy(r.info.current.currency || 'CNY');
       onSaved?.();
     } catch (err) { showError(err, 'Could not save the Taobao item'); } finally { setBusy(false); }
   };
@@ -67,7 +71,7 @@ export default function ItemSupplyBox({ parcel, onSaved }) {
     <div style={{ marginTop: 6, maxWidth: 460 }}>
       <button className={`btn xs ${summary ? '' : 'ghost'}`} onClick={() => setOpen((v) => !v)}
               title="The Taobao item id (or link) and its price - saved for the product's SKU in every shop that sells it, and as Shopify's cost per item">
-        🏷 {summary || 'Taobao item & price'} {open ? '▴' : '▾'}
+        🏷 {summary || 'Product: Taobao item & price'} {open ? '▴' : '▾'}
       </button>
       {open && (
         <div style={{ marginTop: 6, padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface-2)' }}>
