@@ -153,6 +153,48 @@ export async function updateVariants(productId, changes = {}) {
   return { productId, updated: updated.length, variants: updated };
 }
 
+const VARIANT_LEVELS = `
+query VariantLevels($id: ID!) {
+  productVariant(id: $id) {
+    id
+    inventoryItem { id tracked inventoryLevels(first: 10) { nodes { location { id name } quantities(names: ["available"]) { name quantity } } } }
+  }
+}`;
+const SET_QUANTITIES = `
+mutation SetQuantities($input: InventorySetQuantitiesInput!) {
+  inventorySetQuantities(input: $input) {
+    inventoryAdjustmentGroup { id }
+    userErrors { field message }
+  }
+}`;
+
+/**
+ * Set the quantity a store SHOWS for variants - { [variantId]: quantity }. Shopify keeps stock per location; the
+ * quantity is set at the variant's first location (a store with one location, the usual case, has nothing to choose).
+ */
+export async function setQuantities(changes = {}) {
+  const entries = Object.entries(changes);
+  if (!entries.length) throw badRequest('No quantities to set.');
+  const done = [];
+  for (const [variantId, raw] of entries) {
+    const quantity = Number(raw);
+    if (!Number.isInteger(quantity) || quantity < 0) throw badRequest(`"${raw}" is not a quantity.`);
+    const data = await gql(VARIANT_LEVELS, { id: variantId }); // eslint-disable-line no-await-in-loop
+    const item = data?.productVariant?.inventoryItem;
+    if (!item) throw badRequest('Shopify does not know this variant any more. Sync the store and try again.');
+    const level = (item.inventoryLevels?.nodes ?? [])[0];
+    if (!level) throw badRequest('This variant is not stocked at any location in Shopify - turn on inventory tracking for it there first.');
+    const result = await gql(SET_QUANTITIES, { // eslint-disable-line no-await-in-loop
+      input: { name: 'available', reason: 'correction', ignoreCompareQuantity: true, quantities: [{ inventoryItemId: item.id, locationId: level.location.id, quantity }] },
+    });
+    checkUserErrors(result, 'inventorySetQuantities');
+    getDb().prepare("UPDATE shopify_variants SET inventory_quantity = ?, synced_at = datetime('now') WHERE variant_id = ?").run(quantity, variantId);
+    done.push(variantId);
+  }
+  audit('shopify.quantity_update', { entity: 'shopify_variant', entityId: done.join(',').slice(0, 200), detail: { count: done.length } });
+  return { updated: done.length };
+}
+
 /**
  * Supply link / supplier for a Shopify SKU, the same idea as sku_meta for
  * Etsy. Merges onto whatever is already saved - a caller that only ever

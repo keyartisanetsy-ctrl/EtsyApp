@@ -1193,3 +1193,23 @@ CREATE TABLE IF NOT EXISTS product_ai_checks (
   checked_at  TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (a_key, b_key, a_url, b_url)
 );
+
+-- What is really on the shelf, per SKU. One count for a SKU, whichever shops sell it - the same product in
+-- Etsy and Shopify is the same pile. "counted_at" is when a person last set the number: orders placed after
+-- it take stock off; orders placed before it are already in the count and are never taken off again.
+CREATE TABLE IF NOT EXISTS real_stock (
+  sku         TEXT PRIMARY KEY COLLATE NOCASE,
+  qty         INTEGER NOT NULL DEFAULT 0,
+  counted_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Each order line takes stock off once ("etsy:<transaction id>" / "shopify:<line item id>"), and never more than was there.
+CREATE TABLE IF NOT EXISTS stock_movements (
+  ref         TEXT PRIMARY KEY,
+  sku         TEXT NOT NULL COLLATE NOCASE,
+  ordered     INTEGER NOT NULL,
+  taken       INTEGER NOT NULL,
+  at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_stock_movements_sku ON stock_movements(sku);

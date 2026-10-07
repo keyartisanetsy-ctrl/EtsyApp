@@ -6,6 +6,7 @@ import * as links from '../services/productlinks.js';
 import * as supplycheck from '../services/supplycheck.js';
 import * as autosku from '../services/autosku.js';
 import * as skutypes from '../services/skutypes.js';
+import * as stockSvc from '../services/stock.js';
 
 const router = Router();
 
@@ -29,6 +30,7 @@ router.get('/variants', asyncRoute(async (req, res) => {
     ungrouped: bool(req.query.ungrouped),
     duplicatesOnly: bool(req.query.duplicates),
     state: req.query.state ?? '',
+    stockFilter: ['oversell', 'zero', 'untracked', 'tracked'].includes(req.query.stock) ? req.query.stock : '',
     sort: req.query.sort ?? 'title',
     dir: req.query.dir ?? 'asc',
     limit: Math.min(1000, int(req.query.limit, 200)),
@@ -117,6 +119,17 @@ router.post('/reject', asyncRoute(async (req, res) => {
   required(req.body ?? {}, ['a', 'b']);
   res.json(links.rejectPair(req.body.a, req.body.b));
 }));
+
+// -------------------------------------------------------------- real stock
+
+/** How the real stock of a SKU moved: the order lines that took pieces off it. */
+router.get('/stock/movements', asyncRoute(async (req, res) => {
+  required(req.query ?? {}, ['sku']);
+  res.json({ movements: stockSvc.movements(String(req.query.sku)) });
+}));
+
+/** Take new orders off the real stock now (the scheduler does it every two minutes). */
+router.post('/stock/apply-orders', asyncRoute(async (req, res) => res.json(stockSvc.applyOrders())));
 
 // ----------------------------------------------------------- automatic SKUs
 

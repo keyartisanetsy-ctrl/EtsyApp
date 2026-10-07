@@ -12,6 +12,7 @@ import { syncTracking, refreshStaleFlags } from './services/tracking/index.js';
 import { syncReceipts, syncAll, syncLedgerEntries } from './services/sync.js';
 import { syncProducts as syncShopifyProducts, syncOrders as syncShopifyOrders, syncBalanceTransactions as syncShopifyBalanceTransactions } from './services/shopify.js';
 import { ensureRates } from './services/fx.js';
+import { applyOrders as applyOrdersToStock } from './services/stock.js';
 import { scanInbox } from './services/productstudio.js';
 import { checkForUpdate, applyUpdate } from '../../scripts/self-update.mjs';
 
@@ -57,6 +58,11 @@ export const enabledByDefault = (value) => !/^(0|false|no|off)$/i.test(value ?? 
 
 export function startScheduler() {
   const trackingMinutes = Number(readSetting('tracking.sync_minutes')) || 180;
+
+  // New orders take their pieces off the real stock - a few indexed lookups, once per order line.
+  timers.push(setInterval(() => {
+    try { applyOrdersToStock(); } catch (err) { log.warn(`stock from orders: ${err.message}`); }
+  }, 2 * 60_000).unref());
 
   // Stale flags are pure arithmetic, so run them often and cheaply.
   timers.push(setInterval(() => {

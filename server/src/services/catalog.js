@@ -22,6 +22,7 @@ import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 import { withShop } from '../etsy/client.js';
 import { withShopifyShop } from '../shopify/client.js';
+import * as stock from './stock.js';
 import * as inventory from './inventory.js';
 import * as shopify from './shopify.js';
 
@@ -80,7 +81,7 @@ function etsyRows(where, params) {
     channel: 'etsy', shopKey: shopKey('etsy', r.shop_id), shopId: r.shop_id, shopName: r.label || r.shop_name || `Etsy ${r.shop_id}`,
     productRef: String(r.listing_id), productKey: variantKey('etsy', r.shop_id, `p${r.listing_id}`), variantRef: String(r.product_id),
     productTitle: r.title || '', productUrl: r.url || '', state: r.state || '',
-    variation: norm(r.variation_label), sku: norm(r.sku), ord: r.ord,
+    variation: norm(r.variation_label), sku: norm(r.sku), ord: r.ord, shopQty: r.quantity ?? null,
     variantImageUrl: r.variant_image_url || r.variation_image_url || '', coverUrl: r.first_image_url || '',
     supplyLink: r.supply_link || '', variantSupplyLink: r.variant_supply_link || '', supplierName: r.supplier_name || '',
   }));
@@ -88,7 +89,7 @@ function etsyRows(where, params) {
 
 function shopifyRows(where, params) {
   return getDb().prepare(`
-    SELECT v.position AS ord, v.variant_id, v.product_id, v.title AS variant_title, v.sku, v.image_url,
+    SELECT v.position AS ord, v.variant_id, v.product_id, v.title AS variant_title, v.sku, v.image_url, v.inventory_quantity,
            p.shop_id, p.title, p.status, p.first_image_url,
            a.shop_name, a.label, a.shop_domain,
            m.supply_link, m.supplier_name
@@ -103,7 +104,7 @@ function shopifyRows(where, params) {
     productTitle: r.title || '',
     productUrl: r.shop_domain ? `https://${r.shop_domain}/admin/products/${shopifyNumericId(r.product_id)}` : '',
     state: String(r.status || '').toLowerCase(),
-    variation: isPlaceholderTitle(r.variant_title) ? '' : norm(r.variant_title), sku: norm(r.sku), ord: r.ord,
+    variation: isPlaceholderTitle(r.variant_title) ? '' : norm(r.variant_title), sku: norm(r.sku), ord: r.ord, shopQty: r.inventory_quantity ?? null,
     variantImageUrl: r.image_url || '', coverUrl: r.first_image_url || '',
     supplyLink: r.supply_link || '', variantSupplyLink: '', supplierName: r.supplier_name || '',
   }));
@@ -126,7 +127,7 @@ const likeAny = (cols, term) => `(${cols.map((c) => `${c} LIKE ?`).join(' OR ')}
  */
 export function variantRows({
   shops = null, search = '', missingSku = false, missingSupply = false, groupId = null, ungrouped = false,
-  duplicatesOnly = false, state = '', sort = 'title', dir = 'asc', limit = 200, offset = 0,
+  duplicatesOnly = false, state = '', stockFilter = '', sort = 'title', dir = 'asc', limit = 200, offset = 0,
 } = {}) {
   const wanted = Array.isArray(shops) && shops.length ? new Set(shops) : null;
   const term = norm(search);
@@ -151,6 +152,14 @@ export function variantRows({
 
   const groups = groupIndex();
   for (const r of rows) r.groupId = groups.get(r.productKey) ?? null;
+  // the real stock of the SKU (one count for a SKU, whichever shop sells it), and what the shop shows next to it
+  const real = stock.allReal();
+  for (const r of rows) {
+    const c = r.sku ? real.get(r.sku.toLowerCase()) : null;
+    r.realStock = c ? c.qty : null;
+    r.realCountedAt = c ? c.countedAt : null;
+    r.oversellRisk = !!c && c.qty === 0 && (r.shopQty ?? 0) > 0;   // the shop will sell what is not on the shelf
+  }
 
   // Facts about the set before the finer filters, for the counters.
   const lc = (s) => s.toLowerCase();
@@ -159,6 +168,9 @@ export function variantRows({
     missingSku: rows.filter((r) => !r.sku).length,
     missingSupply: rows.filter((r) => !r.supplyLink && !r.variantSupplyLink).length,
     grouped: rows.filter((r) => r.groupId != null).length,
+    realTracked: rows.filter((r) => r.realStock != null).length,
+    realZero: rows.filter((r) => r.realStock === 0).length,
+    oversell: rows.filter((r) => r.oversellRisk).length,
   };
   // The same SKU on two variants of one shop is nearly always a slip.
   const seen = new Map();
@@ -170,10 +182,16 @@ export function variantRows({
   if (groupId != null) rows = rows.filter((r) => r.groupId === Number(groupId));
   if (ungrouped) rows = rows.filter((r) => r.groupId == null);
   if (duplicatesOnly) rows = rows.filter((r) => r.duplicateSku);
+  if (stockFilter === 'oversell') rows = rows.filter((r) => r.oversellRisk);
+  else if (stockFilter === 'zero') rows = rows.filter((r) => r.realStock === 0);
+  else if (stockFilter === 'untracked') rows = rows.filter((r) => r.realStock == null);
+  else if (stockFilter === 'tracked') rows = rows.filter((r) => r.realStock != null);
 
   const by = {
     title: (r) => `${lc(r.productTitle)}|${r.shopKey}|${lc(r.variation)}`,
     sku: (r) => lc(r.sku) || '￿',
+    stock: (r) => String(r.realStock ?? -1).padStart(9, '0'),
+    shopqty: (r) => String(r.shopQty ?? -1).padStart(9, '0'),
     shop: (r) => `${r.shopKey}|${lc(r.productTitle)}|${lc(r.variation)}`,
   }[sort] ?? ((r) => lc(r.productTitle));
   const sign = String(dir).toLowerCase() === 'desc' ? -1 : 1;
@@ -191,6 +209,8 @@ export function getRow(key) {
   if (!rows.length) throw notFound(`That variant is not in ${channel === 'etsy' ? 'Etsy shop' : 'Shopify store'} ${shopId}. Sync the shop first.`);
   const row = rows[0];
   row.groupId = groupIndex().get(row.productKey) ?? null;
+  const c = row.sku ? stock.allReal().get(row.sku.toLowerCase()) : null;
+  row.realStock = c ? c.qty : null; row.realCountedAt = c ? c.countedAt : null;
   return row;
 }
 
@@ -249,12 +269,22 @@ function rekeySupply(channel, shopId, oldSku, newSku) {
     }
   };
   if (channel === 'etsy') { move('sku_meta', 'shop_id'); move('supply_items', 'shop_id'); } else move('shopify_variant_meta', 'shop_id');
+  // the real count belongs to the SKU, not to a shop: it follows a rename unless the new name already has one
+  const count = db.prepare('SELECT 1 FROM real_stock WHERE sku = ?');
+  if (count.get(oldSku) && !count.get(newSku)) db.prepare('UPDATE real_stock SET sku = ? WHERE sku = ?').run(newSku, oldSku);
 }
 
 /** The real writers: each runs inside the context of the shop it is for. */
 export const liveWriters = {
   etsy: (shopId, listingId, changes) => withShop(shopId, () => inventory.updateVariations(Number(listingId), changes)),
-  shopify: (storeId, productId, changes) => withShopifyShop(storeId, () => shopify.updateVariants(productId, changes)),
+  shopify: (storeId, productId, changes) => withShopifyShop(storeId, async () => {
+    const skus = Object.fromEntries(Object.entries(changes).filter(([, c]) => c.sku !== undefined).map(([v, c]) => [v, { sku: c.sku }]));
+    const quantities = Object.fromEntries(Object.entries(changes).filter(([, c]) => c.quantity !== undefined).map(([v, c]) => [v, c.quantity]));
+    let res = null;
+    if (Object.keys(skus).length) res = await shopify.updateVariants(productId, skus);
+    if (Object.keys(quantities).length) await shopify.setQuantities(quantities);
+    return res ?? { productId };
+  }),
   supplier: (channel, shopId, sku, meta) => (channel === 'etsy'
     ? withShop(shopId, () => inventory.setSkuMeta(sku, meta))
     : withShopifyShop(shopId, () => shopify.saveVariantMeta(sku, meta))),
@@ -277,13 +307,30 @@ export async function applyChanges(edits = [], { dryRun = false, writers = liveW
   for (const edit of edits) {
     let row;
     try { row = getRow(edit.key); } catch (err) { fail(edit.key, err.message); continue; }
-    const item = { edit, row, newSku: null, supplier: null };
+    const item = { edit, row, newSku: null, supplier: null, newQty: null, real: undefined };
 
     if (edit.sku !== undefined) {
       const sku = norm(edit.sku);
       const problem = skuProblem(row.channel, sku);
       if (problem) { fail(edit.key, problem); continue; }
       if (sku !== row.sku) item.newSku = sku;
+    }
+    // what the shop shows (written to the shop) and what is really on the shelf (kept here, per SKU)
+    if (edit.quantity !== undefined && String(edit.quantity).trim() !== '') {
+      const q = Number(String(edit.quantity).trim());
+      const max = row.channel === 'etsy' ? 999 : 1_000_000;
+      if (!Number.isInteger(q) || q < 0 || q > max) { fail(edit.key, `The quantity a ${row.channel === 'etsy' ? 'Etsy listing' : 'Shopify store'} shows is a whole number from 0 to ${max.toLocaleString('en-US')}.`); continue; }
+      if (q !== row.shopQty) item.newQty = q;
+    }
+    if (edit.realStock !== undefined) {
+      const raw = String(edit.realStock ?? '').trim();
+      if (!(item.newSku || row.sku)) { fail(edit.key, 'Give this variant a SKU first - the real stock is kept per SKU.'); continue; }
+      if (raw === '') { if (row.realStock != null) item.real = null; } // blank: stop counting this SKU
+      else {
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 0 || n > 1_000_000) { fail(edit.key, 'Real stock is a whole number, 0 or more.'); continue; }
+        if (n !== row.realStock) item.real = n;
+      }
     }
     const meta = {};
     for (const [from, to] of [['supplyLink', 'supplyLink'], ['variantSupplyLink', 'variantSupplyLink'], ['supplierName', 'supplierName']]) {
@@ -300,7 +347,7 @@ export async function applyChanges(edits = [], { dryRun = false, writers = liveW
       if (!(item.newSku || row.sku)) { fail(edit.key, 'Give this variant a SKU first - the supplier is saved against it.'); continue; }
       item.supplier = meta;
     }
-    if (!item.newSku && !item.supplier) { results.set(edit.key, { key: edit.key, ok: true, unchanged: true }); continue; }
+    if (!item.newSku && !item.supplier && item.newQty == null && item.real === undefined) { results.set(edit.key, { key: edit.key, ok: true, unchanged: true }); continue; }
     plan.push(item);
   }
 
@@ -333,20 +380,22 @@ export async function applyChanges(edits = [], { dryRun = false, writers = liveW
   if (dryRun) {
     for (const p of allowed) {
       results.set(p.edit.key, { key: p.edit.key, ok: true, dryRun: true, shop: p.row.shopName, channel: p.row.channel,
-        from: p.row.sku, sku: p.newSku ?? p.row.sku, supplier: p.supplier ?? null });
+        from: p.row.sku, sku: p.newSku ?? p.row.sku, supplier: p.supplier ?? null,
+        quantity: p.newQty != null ? { from: p.row.shopQty, to: p.newQty } : null,
+        real: p.real !== undefined ? { from: p.row.realStock, to: p.real } : null });
     }
     return summarize(edits, results);
   }
 
   // 3. SKUs, one call per product, each inside its own shop's context
   const byProduct = new Map();
-  for (const p of allowed.filter((x) => x.newSku)) {
+  for (const p of allowed.filter((x) => x.newSku || x.newQty != null)) {
     const k = p.row.productKey;
     if (!byProduct.has(k)) byProduct.set(k, { row: p.row, items: [] });
     byProduct.get(k).items.push(p);
   }
   for (const { row, items } of byProduct.values()) {
-    const changes = Object.fromEntries(items.map((p) => [p.row.variantRef, { sku: p.newSku }]));
+    const changes = Object.fromEntries(items.map((p) => [p.row.variantRef, { ...(p.newSku ? { sku: p.newSku } : {}), ...(p.newQty != null ? { quantity: p.newQty } : {}) }]));
     try {
       const res = await (row.channel === 'etsy'
         ? writers.etsy(row.shopId, row.productRef, changes)
@@ -359,8 +408,11 @@ export async function applyChanges(edits = [], { dryRun = false, writers = liveW
           p.failed = true;
           continue;
         }
-        rekeySupply(p.row.channel, p.row.shopId, p.row.sku, p.newSku);
-        audit('catalog.sku', { entity: `${p.row.channel}_variant`, entityId: p.row.variantRef, detail: { shop: p.row.shopKey, from: p.row.sku, to: p.newSku } });
+        if (p.newSku) {
+          rekeySupply(p.row.channel, p.row.shopId, p.row.sku, p.newSku);
+          audit('catalog.sku', { entity: `${p.row.channel}_variant`, entityId: p.row.variantRef, detail: { shop: p.row.shopKey, from: p.row.sku, to: p.newSku } });
+        }
+        if (p.newQty != null) audit('catalog.shop_quantity', { entity: `${p.row.channel}_variant`, entityId: p.row.variantRef, detail: { shop: p.row.shopKey, from: p.row.shopQty, to: p.newQty } });
       }
     } catch (err) {
       log.warn(`SKU change failed on ${row.shopName} / ${row.productTitle}: ${err.message}`);
@@ -374,7 +426,11 @@ export async function applyChanges(edits = [], { dryRun = false, writers = liveW
     if (p.supplier) {
       try { writers.supplier(p.row.channel, p.row.shopId, p.newSku ?? p.row.sku, p.supplier); } catch (err) { fail(p.edit.key, err.message); continue; }
     }
-    results.set(p.edit.key, { key: p.edit.key, ok: true, shop: p.row.shopName, from: p.row.sku, sku: p.newSku ?? p.row.sku, supplier: p.supplier ?? null });
+    if (p.real !== undefined) {
+      try { if (p.real === null) stock.clearReal(p.newSku ?? p.row.sku); else stock.setReal(p.newSku ?? p.row.sku, p.real); } catch (err) { fail(p.edit.key, err.message); continue; }
+    }
+    results.set(p.edit.key, { key: p.edit.key, ok: true, shop: p.row.shopName, from: p.row.sku, sku: p.newSku ?? p.row.sku, supplier: p.supplier ?? null,
+      quantity: p.newQty != null ? { from: p.row.shopQty, to: p.newQty } : null, real: p.real !== undefined ? { from: p.row.realStock, to: p.real } : null });
   }
   return summarize(edits, results);
 }
