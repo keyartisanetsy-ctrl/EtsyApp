@@ -6,6 +6,7 @@ import * as packing from '../services/packing.js';
 import * as quick from '../services/quickmatch.js';
 import * as holds from '../services/holds.js';
 import * as ordersupply from '../services/ordersupply.js';
+import * as itemsupply from '../services/itemsupply.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -168,6 +169,23 @@ router.post('/orders/supply', asyncRoute(async (req, res) => {
   const airtable = ['none', 'check', 'change', 'keep'].includes(b.airtable) ? b.airtable : 'none';
   res.json(await ordersupply.saveAndReflect(b.channel, b.orderId,
     { taobaoOrder: b.taobaoOrder, cost: b.cost, currency: b.currency }, { airtable }));
+}));
+
+/**
+ * The Taobao item (id or link) and price of one order item - what it is saved as, and every shop
+ * that sells its SKU. GET shows it; POST saves it to all of those shops (and Shopify's cost per
+ * item). `decision`: 'check' (report other shops that hold something different), 'change', 'keep'.
+ */
+router.get('/items/supply', asyncRoute(async (req, res) => {
+  if (!req.query.channel || req.query.itemId == null) throw badRequest('channel and itemId are required.');
+  res.json(itemsupply.describe(String(req.query.channel), req.query.itemId, { sku: req.query.sku ?? '' }));
+}));
+
+router.post('/items/supply', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  if (!b.channel || b.itemId == null) throw badRequest('channel and itemId are required.');
+  const decision = ['check', 'change', 'keep'].includes(b.decision) ? b.decision : 'check';
+  res.json(await itemsupply.save(b.channel, b.itemId, { taobao: b.taobao, price: b.price, currency: b.currency, sku: b.sku }, { decision }));
 }));
 
 router.post('/export', asyncRoute(async (req, res) => {

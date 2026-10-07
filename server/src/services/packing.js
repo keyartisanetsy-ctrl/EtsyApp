@@ -29,6 +29,7 @@ import { codesFor, shopifyCodesFor, ensureOrderCode, releaseIfUnused } from './o
 import { cachedProductImageId } from './warehousecheck.js';
 import * as holds from './holds.js';
 import { supplyForOrders, supplyFor } from './ordersupply.js';
+import { briefFor } from './itemsupply.js';
 import * as etsyOrders from './orders.js';
 import * as shopifyOrders from './shopify.js';
 
@@ -103,7 +104,7 @@ function loadItemInfo(db, rows) {
   if (etsyIds.length) {
     const found = db.prepare(`
       SELECT x.transaction_id, x.title, x.sku, x.quantity, x.image_url, x.listing_id, x.product_id, x.variations,
-             r.name AS buyer, r.created_ts
+             r.name AS buyer, r.created_ts, r.shop_id
       FROM receipt_transactions x JOIN receipts r ON r.receipt_id = x.receipt_id
       WHERE x.transaction_id IN (${etsyIds.map(() => '?').join(',')})`).all(...etsyIds);
     for (const x of found) {
@@ -111,18 +112,20 @@ function loadItemInfo(db, rows) {
         title: x.title, sku: x.sku || '', variant: variationText(x.variations), quantity: x.quantity, buyer: x.buyer,
         orderedAt: x.created_ts ? new Date(x.created_ts * 1000).toISOString() : null,
         imageUrl: resolveForTransaction(x)?.best?.url || x.image_url || null,
+        itemSupply: briefFor('etsy', x.shop_id, x.sku),
       });
     }
   }
   if (shopifyIds.length) {
     const found = db.prepare(`
-      SELECT x.line_item_id, x.title, x.sku, x.variant_title, x.quantity, x.image_url, o.customer_name, o.created_at_shopify
+      SELECT x.line_item_id, x.title, x.sku, x.variant_title, x.quantity, x.image_url, o.customer_name, o.created_at_shopify, o.shop_id
       FROM shopify_order_line_items x JOIN shopify_orders o ON o.order_id = x.order_id
       WHERE x.line_item_id IN (${shopifyIds.map(() => '?').join(',')})`).all(...shopifyIds);
     for (const x of found) {
       info.set(`shopify:${x.line_item_id}`, {
         title: x.title, sku: x.sku || '', variant: x.variant_title || '', quantity: x.quantity, buyer: x.customer_name,
         orderedAt: x.created_at_shopify, imageUrl: x.image_url || null,
+        itemSupply: briefFor('shopify', x.shop_id, x.sku),
       });
     }
   }

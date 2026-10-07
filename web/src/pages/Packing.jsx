@@ -5,6 +5,7 @@ import {
   Spinner, Empty, Stat, Thumb, Modal, Checkbox, CopyButton, useAsync, useToast, useErrorToast,
 } from '../components/ui.jsx';
 import SplitPhoto from '../components/SplitPhoto.jsx';
+import ItemSupplyBox from '../components/ItemSupply.jsx';
 import { normalizePhoto } from '../lib/photo.js';
 
 const FILTER_KEY = 'packing.filters';
@@ -482,7 +483,7 @@ function ItemChooser({ parcel, needsItem, busy, onChoose, onClose }) {
   );
 }
 
-function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit, onCode, onChoose, onRelease, onSupply }) {
+function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit, onCode, onChoose, onRelease, onSupply, onItemSaved }) {
   const [open, setOpen] = useState(false);
   const s = latestSuggestions(parcel);
   const top = s?.items?.[0];
@@ -538,6 +539,7 @@ function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, on
           )}
           {parcel.hold && <HoldNotice hold={parcel.hold} busy={busy} onRelease={(release) => onRelease(parcel, release)} />}
           {m && <SupplyBox parcel={parcel} busy={busy} onSave={onSupply} />}
+          {m && <ItemSupplyBox parcel={parcel} onSaved={onItemSaved} />}
           {!m && top && (
             <button className="btn xs ghost" onClick={() => setOpen((v) => !v)}>
               <span className={`badge ${scoreKind(top.score)}`}>{Math.round(top.score * 100)}%</span> {top.title.slice(0, 40)} {open ? '▴' : '▾'}
@@ -977,7 +979,7 @@ export default function Packing() {
                   {parcels.data.rows.map((p) => (
                     <ParcelRow key={p.id} parcel={p} range={range} busy={!!working[p.id]} reading={!!reading[p.id]}
                                onMatch={matchOne} onFree={freeOne} onAssign={confirm} onUnmatch={unmatch}
-                               onCode={assignCode} onChoose={(parcel, needsItem) => setChoosing({ parcel, needsItem })} onRelease={releaseHold} onSupply={saveSupply}
+                               onCode={assignCode} onChoose={(parcel, needsItem) => setChoosing({ parcel, needsItem })} onRelease={releaseHold} onSupply={saveSupply} onItemSaved={refresh}
                                onEdit={setEditing} onDelete={remove} onPicker={setPicking}
                                onSplit={setSplitting} onUnsplit={unsplit} />
                   ))}
