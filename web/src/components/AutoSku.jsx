@@ -110,6 +110,7 @@ export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone 
   const pageUnits = visible.slice(page * PAGE, page * PAGE + PAGE);
   const chosen = units.filter((u) => ticked.has(u.id));
   const chosenSkus = chosen.reduce((n, u) => n + u.edits.length, 0);
+  const chosenProducts = new Set(chosen.flatMap((u) => u.edits.map((e) => e.productKey))).size;
   const busy = !!run && !run.finished;
 
   const tickMany = (list, on) => setTicked((prev) => { const next = new Set(prev); for (const u of list) { if (on) next.add(u.id); else next.delete(u.id); } return next; });
@@ -119,7 +120,7 @@ export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone 
     for (const u of chosen) for (const e of u.edits) perShop[e.shopName] = (perShop[e.shopName] ?? 0) + 1;
     const lines = Object.entries(perShop).map(([shop, n]) => `${shop}: ${n}`).join('\n');
     const matches = chosen.filter((u) => u.link).length;
-    if (!window.confirm(`Write ${chosenSkus} SKUs for ${chosen.length} products?\n\n${lines}\n\n${matches ? `${matches} group${matches === 1 ? '' : 's'} of the same product will also be linked.\n` : ''}Only empty SKUs are filled - no existing SKU is changed.`)) return;
+    if (!window.confirm(`Write ${chosenSkus} SKUs for ${chosenProducts} products?\n\n${lines}\n\n${matches ? `${matches} group${matches === 1 ? '' : 's'} of the same product will also be linked.\n` : ''}Only empty SKUs are filled - no existing SKU is changed.`)) return;
     stopRef.current = false;
     const state = { done: 0, total: chosen.length, written: 0, failed: [], stopped: false, finished: false };
     setRun({ ...state });
@@ -147,7 +148,7 @@ export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone 
              <>
                {busy ? <button className="btn" onClick={() => { stopRef.current = true; }}>Stop after this batch</button> : <button className="btn" onClick={onClose}>Close</button>}
                <button className="btn primary" disabled={busy || loading || !chosen.length} onClick={write}>
-                 {busy ? <Spinner /> : `Write ${chosenSkus} SKU${chosenSkus === 1 ? '' : 's'} (${chosen.length} product${chosen.length === 1 ? '' : 's'})`}
+                 {busy ? <Spinner /> : `Write ${chosenSkus} SKU${chosenSkus === 1 ? '' : 's'} (${chosenProducts} product${chosenProducts === 1 ? '' : 's'})`}
                </button>
              </>
            )}>
@@ -180,6 +181,16 @@ export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone 
         <Checkbox checked={opts.includeInactive} disabled={busy} onChange={(v) => set({ includeInactive: v })} label="Include drafts and expired listings" />
       </div>
 
+        {run && (
+          <div className="mb8" data-testid="auto-progress">
+            <div className="small">{run.finished ? (run.stopped ? 'Stopped' : 'Done') : 'Writing'}: {run.done} of {run.total} products · {run.written} SKUs written{run.failed.length ? ` · ${run.failed.length} with problems` : ''}</div>
+            <div style={{ height: 6, background: 'var(--line, #223)', borderRadius: 3, marginTop: 4 }}>
+              <div style={{ height: 6, width: `${run.total ? Math.round((run.done / run.total) * 100) : 0}%`, background: 'var(--brand)', borderRadius: 3 }} />
+            </div>
+            {run.failed.slice(0, 8).map((f, i) => <div key={i} className="small" style={{ color: 'var(--bad)' }}>{f.title}: {f.errors[0]}</div>)}
+          </div>
+        )}
+
       {loading ? (
         <div className="empty"><Spinner /><p className="small muted">Working out the SKUs and looking at the photos of look-alike products…</p></div>
       ) : !plan ? null : !units.length ? (
@@ -193,15 +204,6 @@ export default function AutoSkuModal({ shops, selectedProducts, onClose, onDone 
             {' '}({plan.prefixSource === 'catalogue' ? 'prefix taken from your existing SKUs' : plan.prefixSource === 'typed' ? 'prefix typed by you' : 'prefix from the settings'}).
             {' '}{plan.counts.ticked} of {plan.counts.units} ticked.
           </Banner>
-          {run && (
-            <div className="mb8" data-testid="auto-progress">
-              <div className="small">{run.finished ? (run.stopped ? 'Stopped' : 'Done') : 'Writing'}: {run.done} of {run.total} products · {run.written} SKUs written{run.failed.length ? ` · ${run.failed.length} with problems` : ''}</div>
-              <div style={{ height: 6, background: 'var(--line, #223)', borderRadius: 3, marginTop: 4 }}>
-                <div style={{ height: 6, width: `${run.total ? Math.round((run.done / run.total) * 100) : 0}%`, background: 'var(--brand)', borderRadius: 3 }} />
-              </div>
-              {run.failed.slice(0, 8).map((f, i) => <div key={i} className="small" style={{ color: 'var(--bad)' }}>{f.title}: {f.errors[0]}</div>)}
-            </div>
-          )}
           <div className="flex gap8 mb8" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
             <select className="select sm" value={kindFilter} onChange={(e) => { setKindFilter(e.target.value); setPage(0); }} aria-label="Show">
               <option value="all">All ({units.length})</option>

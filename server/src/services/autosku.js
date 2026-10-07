@@ -69,7 +69,8 @@ const publicProduct = (p) => ({
  */
 function splitCluster(members, edges) {
   const left = new Map(members.map((m) => [m.key, m]));
-  const usable = edges.filter((e) => e.score >= 0.6).sort((x, y) => y.score - x.score);
+  // the strongest first; between equals, the pair whose words match best (two listings of different products can share photos)
+  const usable = edges.filter((e) => e.score >= 0.6).sort((x, y) => y.score - x.score || (y.title ?? 0) - (x.title ?? 0));
   const sets = [];
   for (;;) {
     const seed = usable.find((e) => left.has(e.a) && left.has(e.b));
