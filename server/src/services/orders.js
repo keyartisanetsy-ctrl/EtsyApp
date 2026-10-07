@@ -14,6 +14,7 @@ import { reportingCurrency } from './reporting.js';
 import { resolveForTransaction } from './productimages.js';
 import { convert } from './fx.js';
 import { codesFor } from './ordercode.js';
+import { forLines as stockForLines } from './stock.js';
 import { arrivalsFor, arrivalFor } from './arrivals.js';
 
 const asMoney = (amount, divisor, currency) =>
@@ -349,6 +350,7 @@ export function getOrder(receiptId) {
            m.supply_cost, m.supply_currency, m.variant_image_url, m.lead_time_days
     FROM receipt_transactions x LEFT JOIN sku_meta m ON m.sku = x.sku AND x.sku <> ''
     WHERE x.receipt_id = ? ORDER BY x.transaction_id`).all(receiptId);
+  const lineStock = stockForLines(items.map((i) => ({ ref: `etsy:${i.transaction_id}`, sku: i.sku })));
 
   const shipments = db.prepare(`
     SELECT s.*, t.status, t.status_detail, t.last_event_at, t.last_event_text, t.days_since_move,
@@ -399,6 +401,7 @@ export function getOrder(receiptId) {
     shipWindow: shipWindow(r.created_ts),
     paymentMethod: r.payment_method,
     items: items.map((i) => ({
+      stock: lineStock.get(`etsy:${i.transaction_id}`) ?? null,
       transactionId: i.transaction_id,
       listingId: i.listing_id,
       productId: i.product_id,

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import api, { withBase } from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import {
-  Spinner, Empty, Banner, Checkbox, Drawer, Modal, Thumb, Tabs, Help,
+  Spinner, Empty, Banner, Checkbox, Drawer, Modal, Thumb, Tabs, Help, StockBadge,
   useAsync, useToast, useErrorToast, fmtMoney, fmtDateTime, DecimalInput,
 } from '../components/ui.jsx';
 import { SendToAirtable } from './Airtable.jsx';
@@ -1175,7 +1175,7 @@ function OrderDetail({ orderId, onClose, onChanged }) {
             <tbody>
               {data.items.map((i) => (
                 <tr key={i.lineItemId}>
-                  <td className="mono small">{i.sku || '—'}</td>
+                  <td className="mono small">{i.sku || '—'}{i.stock && <div><StockBadge stock={i.stock} quantity={i.quantity} /></div>}</td>
                   <td className="small">{i.title}</td>
                   <td className="small dim">{i.variantTitle}</td>
                   <td className="num">{i.quantity}</td>

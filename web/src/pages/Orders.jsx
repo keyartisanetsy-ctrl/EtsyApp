@@ -4,7 +4,7 @@ import api, { withBase } from '../lib/api.js';
 import { useRates } from '../lib/rates.js';
 import { TablePage } from '../components/Page.jsx';
 import {
-  Spinner, Empty, Banner, Checkbox, Pager, SortTh, Drawer, Modal, CopyButton, Thumb, Tabs,
+  Spinner, Empty, Banner, Checkbox, Pager, SortTh, Drawer, Modal, CopyButton, Thumb, Tabs, StockBadge,
   useAsync, useDebounced, useToast, useErrorToast, fmtMoney, fmtDateTime, fmtDate, TRACK_BADGE,
 } from '../components/ui.jsx';
 import { SendToAirtable } from './Airtable.jsx';
@@ -1130,6 +1130,7 @@ function OrderDetail({ id, onClose, onChanged }) {
                     <td className="mono small">
                       {i.sku || <span className="muted">—</span>}
                       {i.sku && <CopyButton text={i.sku} label="⧉" className="btn xs ghost" />}
+                      {i.stock && <div><StockBadge stock={i.stock} quantity={i.quantity} /></div>}
                     </td>
                     <td className="num">{i.quantity}</td>
                     <td className="num">{fmtMoney(i.price?.value, i.price?.currency)}</td>

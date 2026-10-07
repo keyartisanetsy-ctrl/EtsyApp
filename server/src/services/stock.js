@@ -92,3 +92,28 @@ export function applyOrders() {
 export function movements(sku, limit = 30) {
   return getDb().prepare('SELECT ref, ordered, taken, at FROM stock_movements WHERE sku = ? ORDER BY at DESC, rowid DESC LIMIT ?').all(String(sku ?? '').trim(), limit);
 }
+
+/**
+ * What the real stock did for order lines - for the order desk: "from stock" (the pieces were on the shelf),
+ * "short by n" (n have to be ordered from the supplier), or just how many are on the shelf now.
+ * `lines` is [{ ref, sku }]; the answer is a Map(ref -> info), and a line nobody counts is left out.
+ */
+export function forLines(lines = []) {
+  const out = new Map();
+  const wanted = lines.filter((l) => l.ref);
+  if (!wanted.length) return out;
+  const db = getDb();
+  const real = allReal();
+  const moved = new Map();
+  for (let i = 0; i < wanted.length; i += 400) {
+    const chunk = wanted.slice(i, i + 400);
+    for (const m of db.prepare(`SELECT ref, ordered, taken FROM stock_movements WHERE ref IN (${chunk.map(() => '?').join(',')})`).all(...chunk.map((l) => l.ref))) moved.set(m.ref, m);
+  }
+  for (const l of wanted) {
+    const m = moved.get(l.ref);
+    const c = l.sku ? real.get(String(l.sku).toLowerCase()) : null;
+    if (m) out.set(l.ref, { ordered: m.ordered, taken: m.taken, short: Math.max(0, m.ordered - m.taken), real: c ? c.qty : null });
+    else if (c) out.set(l.ref, { ordered: null, taken: null, short: 0, real: c.qty });
+  }
+  return out;
+}

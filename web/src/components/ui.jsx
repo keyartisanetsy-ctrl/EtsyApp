@@ -60,6 +60,20 @@ export function Banner({ kind = 'info', children, onClose }) {
   );
 }
 
+/**
+ * What the real stock did for an order line: the pieces came off the shelf, some are short and have to be ordered
+ * from the supplier, or just how many are on the shelf now. Nothing for a SKU nobody counts.
+ */
+export function StockBadge({ stock, quantity }) {
+  if (!stock) return null;
+  if (stock.taken != null && stock.ordered != null) {
+    if (stock.short > 0 && stock.taken === 0) return <span className="badge red" title={`Nothing was on the shelf - order ${stock.short} from the supplier`}>no stock · order {stock.short}</span>;
+    if (stock.short > 0) return <span className="badge amber" title={`${stock.taken} came off the shelf, ${stock.short} are short - order them from the supplier`}>{stock.taken} from stock · order {stock.short}</span>;
+    return <span className="badge green" title={`${stock.taken} came off the real stock; ${stock.real ?? 0} left on the shelf`}>from stock · {stock.real ?? 0} left</span>;
+  }
+  return <span className="badge grey" title="Counted after this order came in, so it was not taken off">{stock.real} on the shelf{quantity ? '' : ''}</span>;
+}
+
 export function Empty({ icon = '∅', title, children, action }) {
   return (
     <div className="empty">

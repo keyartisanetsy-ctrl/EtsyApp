@@ -12,6 +12,7 @@ import { createLogger } from '../lib/logger.js';
 import { convert } from './fx.js';
 import { shopifyCodesFor } from './ordercode.js';
 import { arrivalsFor, arrivalFor } from './arrivals.js';
+import { forLines as stockForLines } from './stock.js';
 
 const log = createLogger('shopify-svc');
 export { syncProducts, syncOrders, syncBalanceTransactions };
@@ -702,11 +703,14 @@ export function getOrder(orderId) {
                FROM airtable_links GROUP BY receipt_id) al ON al.receipt_id = o.order_id
     WHERE o.order_id = ? AND o.shop_id = ?`).get(orderId, shopId);
   if (!o) throw notFound(`Shopify order ${orderId} is not in the local mirror. Sync orders first.`);
-  const items = db.prepare(`
+  let items = db.prepare(`
     SELECT x.*, m.supply_link, m.supplier_name
     FROM shopify_order_line_items x
     LEFT JOIN shopify_variant_meta m ON m.sku = x.sku AND m.shop_id = ? AND x.sku <> ''
-    WHERE x.order_id = ?`).all(shopId, orderId).map((i) => ({
+    WHERE x.order_id = ?`).all(shopId, orderId);
+  const lineStock = stockForLines(items.map((i) => ({ ref: `shopify:${i.line_item_id}`, sku: i.sku })));
+  items = items.map((i) => ({
+    stock: lineStock.get(`shopify:${i.line_item_id}`) ?? null,
     lineItemId: i.line_item_id, productId: i.product_id, variantId: i.variant_id, sku: i.sku || '',
     title: i.title, variantTitle: i.variant_title || '', quantity: i.quantity,
     price: i.price_amount, currency: i.currency, imageUrl: i.image_url,
