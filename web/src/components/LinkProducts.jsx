@@ -364,6 +364,24 @@ export default function MatchesTab({ onChanged }) {
   const inBulk = list.filter((s) => bulk.has(idOf(s)) && validOf(s));
   const bulkProducts = inBulk.reduce((n, s) => n + chosenOf(s).length, 0);
   const tickBulk = (cards) => setBulk(new Set(cards.map(idOf)));
+  // the pairs of the ticked products that have no AI answer yet (at most 3 per match) - asked only when the button is pressed
+  const bulkAiPairs = inBulk.flatMap((s) => {
+    const keys = new Set(chosenOf(s).map((m) => m.key));
+    return s.evidence.filter((e) => keys.has(e.a) && keys.has(e.b) && !e.ai).slice(0, 3).map((e) => ({ a: e.a, b: e.b }));
+  });
+  const aiBulk = async () => {
+    if (!window.confirm(`Ask the AI about ${bulkAiPairs.length} pair${bulkAiPairs.length === 1 ? '' : 's'} of products?\nOne small AI call each; nothing is linked or changed by it.`)) return;
+    setBulkBusy(true);
+    try {
+      let failed = 0;
+      for (let i = 0; i < bulkAiPairs.length; i += 6) {
+        const r = await api.post('/catalog/ai-compare', { pairs: bulkAiPairs.slice(i, i + 6) }); // eslint-disable-line no-await-in-loop
+        failed += r.results.filter((x) => x.error).length;
+      }
+      toast(failed ? { kind: 'err', title: `${failed} pair${failed === 1 ? '' : 's'} could not be checked`, duration: 8000 } : { kind: 'ok', title: 'The AI has looked at them - see the badges on the cards' });
+      suggestions.reload();
+    } catch (err) { showError(err, 'AI check failed'); } finally { setBulkBusy(false); }
+  };
   const rejectBulk = async () => {
     if (!window.confirm(`Mark the ticked products of ${inBulk.length} match${inBulk.length === 1 ? '' : 'es'} as different products?\nThey will not be suggested together again.`)) return;
     setBulkBusy(true);
@@ -395,6 +413,8 @@ export default function MatchesTab({ onChanged }) {
               <button className="btn xs ghost" disabled={!bulk.size} onClick={() => setBulk(new Set())}>Clear</button>
               <span className="count">{inBulk.length} match{inBulk.length === 1 ? '' : 'es'} · {bulkProducts} products ticked</span>
               <div className="spacer" />
+              <button className="btn xs" disabled={!bulkAiPairs.length || bulkBusy} onClick={aiBulk}
+                      title="Optional. The matching is free and uses no AI; this asks one small AI model to look at the photos of the ticked products when you are not sure.">Check with AI ({bulkAiPairs.length})</button>
               <button className="btn xs ghost" disabled={!inBulk.length || bulkBusy} onClick={rejectBulk}>Not the same ({inBulk.length})</button>
               <button className="btn xs primary" disabled={!inBulk.length || bulkBusy} onClick={() => setBulkSets(inBulk.map((x) => chosenOf(x).map((m) => m.key)))}
                       title="They are the same product: pair their variants, give them the same SKUs and link them - you see everything before it is written">
