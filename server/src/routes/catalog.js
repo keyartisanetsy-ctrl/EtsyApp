@@ -128,6 +128,22 @@ router.get('/stock/movements', asyncRoute(async (req, res) => {
   res.json({ movements: stockSvc.movements(String(req.query.sku)) });
 }));
 
+/** The real counts of these SKUs: { skus: [...] } -> { real: { sku: { qty, countedAt } } } */
+router.post('/stock/real-map', asyncRoute(async (req, res) => {
+  required(req.body ?? {}, ['skus']);
+  res.json({ real: stockSvc.realMap(req.body.skus) });
+}));
+
+/** Set (or, with qty null / blank, stop keeping) the real count of one SKU. */
+router.post('/stock/real', asyncRoute(async (req, res) => {
+  required(req.body ?? {}, ['sku']);
+  const { sku, qty } = req.body;
+  if (qty === null || qty === undefined || String(qty).trim() === '') { stockSvc.clearReal(sku); return res.json({ sku, qty: null }); }
+  const r = stockSvc.setReal(sku, qty);
+  stockSvc.applyOrders();   // orders that came in after this count take their pieces off at once
+  res.json({ sku: r.sku, qty: stockSvc.realFor(r.sku)?.qty ?? r.qty });
+}));
+
 /** Take new orders off the real stock now (the scheduler does it every two minutes). */
 router.post('/stock/apply-orders', asyncRoute(async (req, res) => res.json(stockSvc.applyOrders())));
 

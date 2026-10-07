@@ -127,6 +127,11 @@ export async function updateVariants(productId, changes = {}) {
   const entries = Object.entries(changes);
   if (!entries.length) throw badRequest('No variant changes to apply.');
 
+  // the quantity the store shows goes through the inventory API, not the variant update
+  const quantities = {};
+  for (const [variantId, change] of entries) {
+    if (change.quantity !== undefined && change.quantity !== null && String(change.quantity).trim() !== '') quantities[variantId] = Number(change.quantity);
+  }
   const variants = entries.map(([variantId, change]) => {
     const v = { id: variantId };
     if (change.price !== undefined && change.price !== null && change.price !== '') v.price = String(change.price);
@@ -137,8 +142,13 @@ export async function updateVariants(productId, changes = {}) {
       if (change.cost !== undefined) v.inventoryItem.cost = change.cost === null || change.cost === '' ? null : String(change.cost);
     }
     return v;
-  });
+  }).filter((v) => Object.keys(v).length > 1);
 
+  if (!variants.length) {
+    if (!Object.keys(quantities).length) throw badRequest('No variant changes to apply.');
+    await setQuantities(quantities);
+    return { productId, updated: 0, variants: [], quantities: Object.keys(quantities).length };
+  }
   const data = await gql(VARIANTS_BULK_UPDATE, { productId, variants });
   const result = checkUserErrors(data, 'productVariantsBulkUpdate');
   const updated = result?.productVariants ?? [];
@@ -151,7 +161,8 @@ export async function updateVariants(productId, changes = {}) {
       v.inventoryItem?.unitCost?.amount != null ? Number(v.inventoryItem.unitCost.amount) : null, v.id);
   }
   audit('shopify.variants_update', { entity: 'shopify_product', entityId: productId, detail: { count: updated.length } });
-  return { productId, updated: updated.length, variants: updated };
+  if (Object.keys(quantities).length) await setQuantities(quantities);
+  return { productId, updated: updated.length, variants: updated, quantities: Object.keys(quantities).length };
 }
 
 const VARIANT_LEVELS = `

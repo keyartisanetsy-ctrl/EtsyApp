@@ -110,6 +110,7 @@ export function migrateSchema(db) {
   addColumn(db, 'order_flags', 'problem_state', "TEXT NOT NULL DEFAULT 'none'");
   addColumn(db, 'order_flags', 'problem_note', "TEXT DEFAULT ''");
   addColumn(db, 'order_flags', 'offsite_ads', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'stock_movements', 'restocked', 'INTEGER NOT NULL DEFAULT 0');
   // Inbound supplier-to-warehouse tracking, alongside the existing
   // supplier_order_ref - both surfaced next to the order's own images.
   addColumn(db, 'order_flags', 'supply_tracking_number', "TEXT DEFAULT ''");

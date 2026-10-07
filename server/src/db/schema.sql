@@ -1210,6 +1210,7 @@ CREATE TABLE IF NOT EXISTS stock_movements (
   sku         TEXT NOT NULL COLLATE NOCASE,
   ordered     INTEGER NOT NULL,
   taken       INTEGER NOT NULL,
+  restocked   INTEGER NOT NULL DEFAULT 0,   -- 1: the order was cancelled and the pieces were put back; 2: cancelled, but a newer count already includes them
   at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_stock_movements_sku ON stock_movements(sku);
