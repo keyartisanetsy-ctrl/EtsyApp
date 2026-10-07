@@ -7,6 +7,7 @@ import * as supplycheck from '../services/supplycheck.js';
 import * as autosku from '../services/autosku.js';
 import * as skutypes from '../services/skutypes.js';
 import * as stockSvc from '../services/stock.js';
+import * as stockList from '../services/stocklist.js';
 
 const router = Router();
 
@@ -121,6 +122,20 @@ router.post('/reject', asyncRoute(async (req, res) => {
 }));
 
 // -------------------------------------------------------------- real stock
+
+/** The real-stock page: one row per SKU. */
+router.get('/stock/list', asyncRoute(async (req, res) => {
+  res.json(stockList.list({
+    search: req.query.search ?? '', filter: req.query.filter ?? '', sort: req.query.sort ?? 'sku', dir: req.query.dir ?? 'asc',
+    limit: Math.min(500, int(req.query.limit, 100)), offset: int(req.query.offset, 0),
+  }));
+}));
+
+/** Everything that ever changed the real stock of one SKU. */
+router.get('/stock/history', asyncRoute(async (req, res) => {
+  required(req.query ?? {}, ['sku']);
+  res.json(stockList.history(String(req.query.sku), { limit: int(req.query.limit, 500) }));
+}));
 
 /** How the real stock of a SKU moved: the order lines that took pieces off it. */
 router.get('/stock/movements', asyncRoute(async (req, res) => {

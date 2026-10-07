@@ -1216,3 +1216,27 @@ CREATE TABLE IF NOT EXISTS stock_movements (
   at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_stock_movements_sku ON stock_movements(sku);
+
+-- Every change of a real count, with what it was before and after and where it came from, so the history of a SKU
+-- can say not just "when" but what happened: counted by hand, taken off by an order (which one, whose, how many were
+-- short), put back by a cancellation, a SKU renamed, counting stopped.
+CREATE TABLE IF NOT EXISTS stock_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  sku         TEXT NOT NULL COLLATE NOCASE,
+  at          TEXT NOT NULL DEFAULT (datetime('now')),
+  kind        TEXT NOT NULL,        -- count | order | cancel | clear | rename
+  before_qty  INTEGER,              -- null: it was not counted
+  after_qty   INTEGER,
+  delta       INTEGER,
+  ref         TEXT,                 -- etsy:<transaction id> / shopify:<line item id>
+  channel     TEXT,
+  order_id    TEXT,
+  order_label TEXT,                 -- #4193809215 / #1001
+  order_code  TEXT,                 -- the packing code, when it has one
+  buyer       TEXT,
+  shop_name   TEXT,
+  ordered     INTEGER,
+  taken       INTEGER,
+  note        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_stock_log_sku ON stock_log(sku, id);

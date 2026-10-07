@@ -23,6 +23,37 @@ const toInt = (v) => {
   return n;
 };
 
+// ------------------------------------------------------------------ the ledger
+
+/** The order behind a line: who bought it, in which shop, under which number and packing code. */
+function orderInfo(ref) {
+  const db = getDb();
+  if (String(ref).startsWith('etsy:')) {
+    const r = db.prepare(`
+      SELECT r.receipt_id AS id, r.name AS buyer, a.label AS label, a.shop_name AS shop, c.code AS code
+      FROM receipt_transactions rt JOIN receipts r ON r.receipt_id = rt.receipt_id
+      LEFT JOIN etsy_accounts a ON a.shop_id = r.shop_id LEFT JOIN order_codes c ON c.receipt_id = r.receipt_id
+      WHERE rt.transaction_id = ?`).get(Number(String(ref).slice(5)));
+    return r ? { channel: 'etsy', orderId: String(r.id), label: `#${r.id}`, code: r.code ?? null, buyer: r.buyer ?? null, shop: r.label || r.shop || null } : {};
+  }
+  const r = db.prepare(`
+    SELECT o.order_id AS id, o.name AS name, o.customer_name AS buyer, a.label AS label, a.shop_name AS shop, c.code AS code
+    FROM shopify_order_line_items li JOIN shopify_orders o ON o.order_id = li.order_id
+    LEFT JOIN shopify_accounts a ON a.id = o.shop_id LEFT JOIN shopify_order_codes c ON c.order_id = o.order_id
+    WHERE li.line_item_id = ?`).get(String(ref).slice(8));
+  return r ? { channel: 'shopify', orderId: r.id, label: r.name || r.id, code: r.code ?? null, buyer: r.buyer ?? null, shop: r.label || r.shop || null } : {};
+}
+
+/** One line of the history of a SKU. */
+function ledger({ sku, kind, before = null, after = null, ref = null, ordered = null, taken = null, note = null }) {
+  const o = ref ? orderInfo(ref) : {};
+  getDb().prepare(`
+    INSERT INTO stock_log (sku, kind, before_qty, after_qty, delta, ref, channel, order_id, order_label, order_code, buyer, shop_name, ordered, taken, note)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(sku, kind, before, after, before != null && after != null ? after - before : null, ref, o.channel ?? null, o.orderId ?? null,
+      o.label ?? null, o.code ?? null, o.buyer ?? null, o.shop ?? null, ordered, taken, note);
+}
+
 /** Every real count, as Map(lower-case sku -> { qty, countedAt }). */
 export function allReal() {
   const out = new Map();
@@ -59,11 +90,15 @@ export function setReal(sku, qty) {
     INSERT INTO real_stock (sku, qty, counted_at, updated_at) VALUES (?,?, datetime('now'), datetime('now'))
     ON CONFLICT(sku) DO UPDATE SET qty = excluded.qty, counted_at = datetime('now'), updated_at = datetime('now')`).run(s, n);
   audit('stock.set', { entity: 'sku', entityId: s, detail: { from: before?.qty ?? null, to: n } });
+  ledger({ sku: s, kind: 'count', before: before?.qty ?? null, after: n, note: before ? 'Counted by hand' : 'Counting started' });
   return { sku: s, qty: n, from: before?.qty ?? null };
 }
 
 export function clearReal(sku) {
-  getDb().prepare('DELETE FROM real_stock WHERE sku = ?').run(String(sku ?? '').trim());
+  const s = String(sku ?? '').trim();
+  const before = getDb().prepare('SELECT qty FROM real_stock WHERE sku = ?').get(s);
+  getDb().prepare('DELETE FROM real_stock WHERE sku = ?').run(s);
+  if (before) ledger({ sku: s, kind: 'clear', before: before.qty, after: null, note: 'Stopped counting this SKU' });
 }
 
 /**
@@ -101,7 +136,12 @@ export function applyOrders() {
       const ordered = Math.max(0, Number(line.qty) || 0);
       const now = db.prepare('SELECT qty FROM real_stock WHERE sku = ?').get(t.sku).qty;
       const n = Math.min(ordered, now);   // with 0 on the shelf it was 0 and stays 0 - never below
-      db.transaction(() => { if (n > 0) take.run(n, t.sku); insert.run(line.ref, t.sku, ordered, n); })();
+      db.transaction(() => {
+        if (n > 0) take.run(n, t.sku);
+        insert.run(line.ref, t.sku, ordered, n);
+        ledger({ sku: t.sku, kind: 'order', before: now, after: now - n, ref: line.ref, ordered, taken: n,
+          note: n >= ordered ? 'Taken off the shelf' : n > 0 ? `Only ${n} of ${ordered} were on the shelf - order ${ordered - n} from the supplier` : `Nothing on the shelf - order ${ordered} from the supplier` });
+      })();
       lines += 1; taken += n;
     }
   }
@@ -132,8 +172,11 @@ export function restockCancelled() {
     const counted = c ? Date.parse(`${c.counted_at.replace(' ', 'T')}Z`) / 1000 : null;
     const stillInTheCount = !c || (m.placed != null && counted != null && m.placed < counted);
     db.transaction(() => {
+      const now = db.prepare('SELECT qty FROM real_stock WHERE sku = ?').get(m.sku)?.qty ?? null;
       if (!stillInTheCount) db.prepare("UPDATE real_stock SET qty = qty + ?, updated_at = datetime('now') WHERE sku = ?").run(m.taken, m.sku);
       db.prepare('UPDATE stock_movements SET restocked = ? WHERE ref = ?').run(stillInTheCount ? 2 : 1, m.ref);
+      if (!stillInTheCount) ledger({ sku: m.sku, kind: 'cancel', before: now, after: (now ?? 0) + m.taken, ref: m.ref, taken: m.taken, note: 'The order was cancelled - its pieces were put back' });
+      else ledger({ sku: m.sku, kind: 'cancel', before: now, after: now, ref: m.ref, taken: m.taken, note: 'The order was cancelled, but a newer count already includes its pieces - nothing added' });
     })();
     if (!stillInTheCount) { lines += 1; pieces += m.taken; audit('stock.restock', { entity: 'sku', entityId: m.sku, detail: { ref: m.ref, pieces: m.taken } }); }
   }

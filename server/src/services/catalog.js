@@ -271,7 +271,13 @@ function rekeySupply(channel, shopId, oldSku, newSku) {
   if (channel === 'etsy') { move('sku_meta', 'shop_id'); move('supply_items', 'shop_id'); } else move('shopify_variant_meta', 'shop_id');
   // the real count belongs to the SKU, not to a shop: it follows a rename unless the new name already has one
   const count = db.prepare('SELECT 1 FROM real_stock WHERE sku = ?');
-  if (count.get(oldSku) && !count.get(newSku)) db.prepare('UPDATE real_stock SET sku = ? WHERE sku = ?').run(newSku, oldSku);
+  if (count.get(oldSku) && !count.get(newSku)) {
+    const q = db.prepare('SELECT qty FROM real_stock WHERE sku = ?').get(oldSku)?.qty ?? null;
+    db.prepare('UPDATE real_stock SET sku = ? WHERE sku = ?').run(newSku, oldSku);
+    db.prepare('UPDATE stock_log SET sku = ? WHERE sku = ?').run(newSku, oldSku);
+    db.prepare('UPDATE stock_movements SET sku = ? WHERE sku = ?').run(newSku, oldSku);
+    db.prepare("INSERT INTO stock_log (sku, kind, before_qty, after_qty, delta, note) VALUES (?, 'rename', ?, ?, 0, ?)").run(newSku, q, q, `The SKU was renamed from ${oldSku} - the count and its history moved with it`);
+  }
 }
 
 /** The real writers: each runs inside the context of the shop it is for. */
