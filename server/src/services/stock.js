@@ -30,6 +30,14 @@ export function allReal() {
   return out;
 }
 
+/** The count of one SKU, or null when nobody counts it - one indexed lookup. */
+export function realFor(sku) {
+  const s = String(sku ?? '').trim();
+  if (!s) return null;
+  const r = getDb().prepare('SELECT qty, counted_at FROM real_stock WHERE sku = ?').get(s);
+  return r ? { qty: r.qty, countedAt: r.counted_at } : null;
+}
+
 /** Put a count in (the number a person just counted), and take off what has been ordered since. */
 export function setReal(sku, qty) {
   const s = String(sku ?? '').trim();

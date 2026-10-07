@@ -207,6 +207,14 @@ export default function AllProducts() {
       {tab === 'variants' && (
         <>
           {error && <div style={{ padding: 16 }}><Banner kind="err">{error.message}</Banner></div>}
+          {counts?.oversell > 0 && stockFilter !== 'oversell' && (
+            <div style={{ padding: '8px 16px 0' }}>
+              <Banner kind="warn">
+                <strong>{counts.oversell} variant{counts.oversell === 1 ? '' : 's'}</strong> show pieces in the shop while the shelf is empty - the shop can sell what you do not have.{' '}
+                <button className="btn xs" onClick={() => { setStockFilter('oversell'); setOffset(0); }}>Show them</button>
+              </Banner>
+            </div>
+          )}
           {loading && !data ? <div className="empty"><Spinner /></div> : rows.length === 0 ? (
             <Empty icon="⧉" title="No variants here">Sync the shops, or loosen the filters above.</Empty>
           ) : (

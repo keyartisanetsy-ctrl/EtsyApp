@@ -209,7 +209,7 @@ export function getRow(key) {
   if (!rows.length) throw notFound(`That variant is not in ${channel === 'etsy' ? 'Etsy shop' : 'Shopify store'} ${shopId}. Sync the shop first.`);
   const row = rows[0];
   row.groupId = groupIndex().get(row.productKey) ?? null;
-  const c = row.sku ? stock.allReal().get(row.sku.toLowerCase()) : null;
+  const c = stock.realFor(row.sku);
   row.realStock = c ? c.qty : null; row.realCountedAt = c ? c.countedAt : null;
   return row;
 }
