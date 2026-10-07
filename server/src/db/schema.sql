@@ -871,6 +871,7 @@ CREATE TABLE IF NOT EXISTS shopify_variant_meta (
   supply_link     TEXT DEFAULT '',
   supplier_name   TEXT DEFAULT '',
   supply_currency TEXT DEFAULT 'CNY',
+  supply_cost     REAL,              -- what the supplier asks per piece, in supply_currency (the Packing page)
   notes           TEXT DEFAULT '',
   updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (shop_id, sku)

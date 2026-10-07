@@ -21,7 +21,7 @@ import { getDb, audit } from '../db/index.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
 import { withShop } from '../etsy/client.js';
-import { withShopifyShop } from '../shopify/client.js';
+import { withShopifyShop, gql } from '../shopify/client.js';
 import * as catalog from './catalog.js';
 import * as inventory from './inventory.js';
 import * as shopify from './shopify.js';
@@ -108,6 +108,20 @@ const shopLabel = (channel, shopId) => {
   return s?.name ?? `${channel === 'etsy' ? 'Etsy' : 'Shopify'} ${shopId}`;
 };
 
+/** The currency a Shopify store keeps its costs in: what its orders are in, else (asking Shopify) its own setting. */
+const storeCurrencyLocal = (storeId) => getDb().prepare(
+  "SELECT currency FROM shopify_orders WHERE shop_id = ? AND currency IS NOT NULL AND currency <> '' ORDER BY created_at_shopify DESC LIMIT 1").get(storeId)?.currency ?? null;
+
+async function storeCurrency(storeId) {
+  const known = storeCurrencyLocal(storeId);
+  if (known) return known;
+  try {
+    const data = await withShopifyShop(storeId, () => gql('{ shop { currencyCode } }'));
+    if (data?.shop?.currencyCode) return data.shop.currencyCode;
+  } catch (err) { log.warn(`could not ask store ${storeId} for its currency: ${err.message}`); }
+  return 'USD';
+}
+
 // ------------------------------------------------------------ what is saved
 
 /** What a shop's own supply record holds for a SKU, plus (Shopify) the cost per item it shows. */
@@ -129,7 +143,7 @@ function stateOf(channel, shopId, sku, variantRef) {
     link, variantLink: '',
     taobaoId: taobao.parseSupplyUrl(link || '').itemId ?? null,
     cost: m.supply_cost ?? null, currency: m.supply_currency || 'CNY',
-    shopCost: v?.cost_amount ?? null, shopCurrency: v?.currency || null,
+    shopCost: v?.cost_amount ?? null, shopCurrency: v?.currency || storeCurrencyLocal(shopId),
   };
 }
 
@@ -173,6 +187,14 @@ const sameCost = (a, ccyA, b, ccyB) => {
   }
   return Math.abs(x - Number(b)) < 0.005 + Math.abs(Number(b)) * 0.0005;
 };
+
+/** Does the store's own "cost per item" already show this price (allowing for the rate having moved a little since)? */
+function pushed(st, amount, ccy) {
+  if (st.shopCost == null) return false;
+  const want = String(ccy).toUpperCase() === String(st.shopCurrency || 'USD').toUpperCase() ? Number(amount) : fx.convert(amount, ccy, st.shopCurrency || 'USD', today());
+  if (want == null) return true; // no rate to judge by: take the store's figure as it is
+  return Math.abs(Number(st.shopCost) - want) <= 0.01 + want * 0.05;
+}
 
 /** What the item looks like right now: its SKU, and what every shop that sells it holds. */
 export function describe(channel, itemId, { sku: typedSku = '' } = {}) {
@@ -244,18 +266,17 @@ function plan(targets, { t, amount, ccy }, decision) {
       }
     }
     if (amount != null) {
-      // Shopify: the cost per item must also exist in the store, not only the figure in our record.
-      const saved = sameCost(st.cost, st.currency, amount, ccy) && (tg.channel !== 'shopify' || st.shopCost != null);
-      const empty = st.cost == null && !(tg.channel === 'shopify' && st.shopCost != null);
-      let theirs = st.cost;
-      let theirCcy = st.currency;
-      if (theirs == null && tg.channel === 'shopify' && st.shopCost != null) { theirs = st.shopCost; theirCcy = st.shopCurrency || 'USD'; }
+      const holds = st.cost != null ? { v: st.cost, c: st.currency }
+        : tg.channel === 'shopify' && st.shopCost != null ? { v: st.shopCost, c: st.shopCurrency || 'USD' } : null;
+      const matches = holds != null && sameCost(holds.v, holds.c, amount, ccy);
+      // Shopify must also show it as its cost per item, not only hold the figure in our record
+      const inSync = tg.channel !== 'shopify' || !tg.variantRef || pushed(st, amount, ccy);
       const knownToCaller = shown.cost != null && st.cost != null && sameCost(st.cost, st.currency, shown.cost, shown.currency);
-      if (saved || empty) row.write.cost = !saved;
-      else if (sameCost(theirs, theirCcy, amount, ccy)) row.write.cost = tg.channel === 'shopify' && st.cost == null; // the store already shows it: just remember the figure
+      if (matches && inSync) row.write.cost = false;
+      else if (!holds || matches) row.write.cost = true;
       else if (tg.own || knownToCaller || decision === 'change') row.write.cost = true;
       else {
-        conflicts.push({ shop: tg.shopName, channel: tg.channel, field: 'Price', current: `${theirs} ${theirCcy}`, next: `${amount} ${ccy}`, product: tg.productTitle, variation: tg.variation });
+        conflicts.push({ shop: tg.shopName, channel: tg.channel, field: 'Price', current: `${holds.v} ${holds.c}`, next: `${amount} ${ccy}`, product: tg.productTitle, variation: tg.variation });
         row.why.cost = 'conflict';
       }
     }
@@ -280,7 +301,7 @@ async function costInStore(amount, ccy, storeCcy) {
  *             'change' - write everywhere, replacing what the other shops hold
  *             'keep'   - write, but leave the shops that hold something different as they are
  */
-export async function save(channel, itemId, { taobao: typed, price, currency, sku: typedSku } = {}, { decision = 'check' } = {}) {
+export async function save(channel, itemId, { taobao: typed, price, currency, sku: typedSku } = {}, { decision = 'check', writers } = {}) {
   const t = parseTaobaoInput(typed);
   const amount = parsePrice(price);
   if (!t && amount == null) throw badRequest('Type the Taobao item id (or paste its link) and/or the price.');
@@ -293,7 +314,7 @@ export async function save(channel, itemId, { taobao: typed, price, currency, sk
     sku = norm(typedSku);
     if (!sku) throw badRequest('This item has no SKU yet - type one. The Taobao item and price are saved against the SKU, so every shop that sells it gets them.');
     if (!item.own) throw badRequest('This item is not tied to a variation in the shop any more, so a SKU cannot be written to it. Give the variation a SKU on the All products page.');
-    const check = await catalog.applyChanges([{ key: item.own.key, sku }], { dryRun: true });
+    const check = await catalog.applyChanges([{ key: item.own.key, sku }], { dryRun: true, ...(writers ? { writers } : {}) });
     if (check.failed) throw badRequest(check.results[0]?.error || 'That SKU cannot be used.');
   }
 
@@ -303,7 +324,7 @@ export async function save(channel, itemId, { taobao: typed, price, currency, sk
 
   // 1. the SKU itself, for an item that had none (written to the shop the variation belongs to)
   if (needsSku) {
-    const res = await catalog.applyChanges([{ key: item.own.key, sku }]);
+    const res = await catalog.applyChanges([{ key: item.own.key, sku }], writers ? { writers } : {});
     if (res.failed) throw badRequest(res.results[0]?.error || 'The SKU could not be written.');
     const db = getDb();
     if (channel === 'etsy') db.prepare('UPDATE receipt_transactions SET sku = ? WHERE transaction_id = ?').run(sku, Number(itemId));
@@ -333,8 +354,10 @@ export async function save(channel, itemId, { taobao: typed, price, currency, sk
       }
     }
     if (amount != null && row.write.cost) {
+      meta.supplyCost = amount; meta.supplyCurrency = ccy; // our record always holds the price as typed
       if (tg.channel === 'shopify' && tg.variantRef) {
-        const storeCcy = tg.state.shopCurrency || 'USD';
+        // eslint-disable-next-line no-await-in-loop
+        const storeCcy = tg.state.shopCurrency || await storeCurrency(tg.shopId);
         // eslint-disable-next-line no-await-in-loop
         const cost = await costInStore(amount, ccy, storeCcy);
         if (cost == null) {
@@ -348,8 +371,6 @@ export async function save(channel, itemId, { taobao: typed, price, currency, sk
           g.items.push({ out, tg });
           out.shopCost = `${cost} ${storeCcy}`;
         }
-      } else {
-        meta.supplyCost = amount; meta.supplyCurrency = ccy;
       }
     }
     const metaKey = `${tg.channel}:${tg.shopId}:${tg.sku}`;
@@ -364,14 +385,11 @@ export async function save(channel, itemId, { taobao: typed, price, currency, sk
     }
   }
 
-  // 3. Shopify's cost per item, one call per product, inside that store's context; the figure is kept in our record only once Shopify has taken it
+  // 3. Shopify's cost per item, one call per product, inside that store's context (a refusal is reported and retried by the next save)
   for (const g of shopifyCosts.values()) {
     try {
       // eslint-disable-next-line no-await-in-loop
       await withShopifyShop(g.storeId, () => shopify.updateVariants(g.productRef, Object.fromEntries(Object.entries(g.changes).map(([v, c]) => [v, { cost: c }]))));
-      for (const it of g.items) {
-        try { withShopifyShop(it.tg.shopId, () => shopify.saveVariantMeta(it.tg.sku, { supplyCost: amount, supplyCurrency: ccy })); } catch (err) { it.out.error = err.message; }
-      }
     } catch (err) {
       log.warn(`Shopify cost failed (${g.storeId}/${g.productRef}): ${err.message}`);
       for (const it of g.items) { it.out.error = `Shopify refused the cost per item: ${err.message}`; it.out.price = 'failed'; }
