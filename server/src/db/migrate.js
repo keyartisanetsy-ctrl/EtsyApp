@@ -134,6 +134,7 @@ export function migrateSchema(db) {
   addColumn(db, 'inbound_parcels', 'original_quantity', 'INTEGER');
   addColumn(db, 'inbound_parcels', 'ocr_text', 'TEXT');
   addColumn(db, 'inbound_parcels', 'quick', 'TEXT');
+  addColumn(db, 'inbound_parcels', 'raw_text', 'TEXT');
 
   // What each shop is called over in Airtable.
   addColumn(db, 'etsy_accounts', 'airtable_name', "TEXT DEFAULT ''");
@@ -375,6 +376,7 @@ export function migrateData(db) {
   }
 
   reissueShopifyCodesForToday(db);
+  reissueCodesFromTheirFirstParcel(db);
 }
 
 /**
@@ -416,6 +418,83 @@ function reissueShopifyCodesForToday(db) {
       }
       log.info(`re-issued ${old.length} Shopify order code(s) with today's date`);
     }
+    db.prepare("INSERT INTO settings (key, value) VALUES (?, '1')").run(FLAG);
+  })();
+}
+
+/**
+ * For a few hours, order codes were handed out to every order the moment it was
+ * listed or synced, which ate the day's numbers (the first parcel of the day was
+ * 12, the next 15) before any parcel arrived. A code now belongs to an order
+ * from its first parcel on, numbered 01, 02, 03... of the day it was given.
+ *
+ * Once, this clears out what that produced: codes from that window that no
+ * parcel and no Airtable row depends on are dropped (they are handed out again,
+ * properly, if the order's parcel ever arrives), and the codes of orders that do
+ * have parcels are renumbered from 01 in the order their first parcel arrived,
+ * on the parcels too. Codes from before that window - the ones already in
+ * Airtable sheets - are never touched, nor are codes an Airtable row carries.
+ */
+const CODES_HANDED_OUT_ON_LISTING_FROM = '2026-10-07 08:00:00';
+
+function reissueCodesFromTheirFirstParcel(db) {
+  if (!hasTable(db, 'settings') || !hasTable(db, 'order_codes') || !hasTable(db, 'shopify_order_codes')) return;
+  const FLAG = 'migrations.codes_on_first_parcel';
+  if (db.prepare('SELECT 1 FROM settings WHERE key = ?').get(FLAG)) return;
+
+  const setting = (key, fallback) => db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value || fallback;
+  const day = todayInZone(setting('orders.code_timezone', DEFAULT_TIMEZONE));
+  const pattern = setting('orders.code_template', DEFAULT_TEMPLATE);
+
+  db.transaction(() => {
+    const matched = hasTable(db, 'inbound_parcels')
+      ? db.prepare(`SELECT match_channel AS channel, match_order_id AS orderId FROM inbound_parcels
+                    WHERE match_channel IS NOT NULL GROUP BY match_channel, match_order_id
+                    ORDER BY MIN(matched_at), MIN(id)`).all() : [];
+    const hasParcel = new Set(matched.map((m) => `${m.channel}:${m.orderId}`));
+    const pushed = new Set(hasTable(db, 'airtable_links')
+      ? db.prepare('SELECT DISTINCT receipt_id FROM airtable_links').all().map((r) => String(r.receipt_id)) : []);
+
+    const early = [
+      ...db.prepare('SELECT shop_id, receipt_id AS id, code FROM order_codes WHERE created_at >= ?').all(CODES_HANDED_OUT_ON_LISTING_FROM)
+        .map((r) => ({ ...r, channel: 'etsy' })),
+      ...db.prepare('SELECT shop_id, order_id AS id, code FROM shopify_order_codes WHERE created_at >= ?').all(CODES_HANDED_OUT_ON_LISTING_FROM)
+        .map((r) => ({ ...r, channel: 'shopify' })),
+    ];
+    const renumber = new Map();
+    let dropped = 0;
+    for (const c of early) {
+      const key = `${c.channel}:${c.id}`;
+      if (hasParcel.has(key)) renumber.set(key, c);
+      else if (!pushed.has(String(c.id))) {
+        db.prepare(c.channel === 'etsy'
+          ? 'DELETE FROM order_codes WHERE shop_id IS ? AND receipt_id = ?'
+          : 'DELETE FROM shopify_order_codes WHERE shop_id IS ? AND order_id = ?').run(c.shop_id, c.id);
+        dropped += 1;
+      }
+    }
+
+    // Numbers today already taken by codes that stay as they are.
+    const taken = new Set([
+      ...db.prepare('SELECT shop_id, receipt_id, seq FROM order_codes WHERE day = ?').all(day)
+        .filter((r) => !renumber.has(`etsy:${r.receipt_id}`)).map((r) => r.seq),
+      ...db.prepare('SELECT shop_id, order_id, seq FROM shopify_order_codes WHERE day = ?').all(day)
+        .filter((r) => !renumber.has(`shopify:${r.order_id}`)).map((r) => r.seq),
+    ]);
+    const relabel = hasTable(db, 'inbound_parcels')
+      ? db.prepare('UPDATE inbound_parcels SET match_code = ? WHERE match_channel = ? AND match_order_id = ?') : null;
+    let seq = 0;
+    for (const m of matched) {
+      const c = renumber.get(`${m.channel}:${m.orderId}`);
+      if (!c) continue;
+      do { seq += 1; } while (taken.has(seq));
+      const code = formatCode(day, seq, pattern);
+      db.prepare(c.channel === 'etsy'
+        ? 'UPDATE order_codes SET code = ?, day = ?, seq = ? WHERE shop_id IS ? AND receipt_id = ?'
+        : 'UPDATE shopify_order_codes SET code = ?, day = ?, seq = ? WHERE shop_id IS ? AND order_id = ?').run(code, day, seq, c.shop_id, c.id);
+      relabel?.run(code, c.channel, String(c.id));
+    }
+    log.info(`order codes: ${dropped} handed out before any parcel dropped, ${renumber.size} renumbered from 01`);
     db.prepare("INSERT INTO settings (key, value) VALUES (?, '1')").run(FLAG);
   })();
 }

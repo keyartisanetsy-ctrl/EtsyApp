@@ -1079,7 +1079,8 @@ CREATE TABLE IF NOT EXISTS inbound_parcels (
   -- the last time it looked (JSON), so the page can show it without asking again.
   ocr_text       TEXT,
   quick          TEXT,
-  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  raw_text         TEXT                   -- the line exactly as it was typed (中通 3324 1件), for the packing sheet
 );
 CREATE INDEX IF NOT EXISTS idx_parcels_match ON inbound_parcels(match_channel, match_item_id);
 CREATE INDEX IF NOT EXISTS idx_parcels_parent ON inbound_parcels(parent_id);

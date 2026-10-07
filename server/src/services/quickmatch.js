@@ -366,13 +366,9 @@ export async function assignByCode(id, { code, itemId = null, channels, from, to
   if (!text) return { parcel: packing.unmatchParcel(parcel.id) };
 
   const range = packing.resolveRange({ channels, from, to });
-  let found = findOrderByCode(text);
-  if (!found) {
-    // Codes are given out the first time an order is listed; list this range to be sure they exist.
-    packing.loadDemand(range);
-    found = findOrderByCode(text);
-  }
-  if (!found) throw notFound(`No order has the code "${text}" in the shop${range.channels.length > 1 ? 's' : ''} you are working with.`);
+  // A code (26-1007-01) once the order has one; before that, the order's own number (#2419).
+  const found = findOrderByCode(text);
+  if (!found) throw notFound(`No order has the code or number "${text}" in the shop${range.channels.length > 1 ? 's' : ''} you are working with. Type an order code like 26-1007-01, or an order number like #2419.`);
 
   const items = packing.loadDemand(range, found);
   if (!items.length) throw notFound(`Order ${text} has no items in the local mirror. Sync orders first.`);

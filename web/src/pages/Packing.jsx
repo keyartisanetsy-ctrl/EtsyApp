@@ -110,8 +110,9 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
       <div className="card-head"><h3>New arrival</h3></div>
       <div className="card-sub">
         Paste the photo from WeChat (Ctrl+V), then the line under it - carrier, last 4 digits and piece count, like 中通 3324 1件.
-        Know the order already? Type its code (like 26-0710-01) and the arrival goes straight onto that order.
-        Otherwise the free matcher looks for the order the moment you add it - tracking number, order state, text read off the photo and colours, no AI credits.
+        Know the order already? Type its code (like 26-1007-01) - or its order number (#2419) if it has no code yet - and the arrival goes straight onto that order.
+        An order gets its code the moment its first parcel is added (today's date, numbered 01, 02, 03...).
+        Otherwise the free matcher looks for the order as soon as you add it - tracking number, order state, text read off the photo and colours, no AI credits.
         The AI only runs when you press Find match. One photo with products for several customers? Use ✂ Split on its row.
       </div>
       <div className="flex" style={{ alignItems: 'flex-start', flexWrap: 'wrap', gap: 14 }}>
@@ -134,7 +135,7 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
           <input ref={textRef} className="input" value={text} placeholder="中通 3324 1件"
                  onChange={(e) => setText(e.target.value)}
                  onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
-          <input className="input mono" value={code} placeholder="Order code (optional) - 26-0710-01"
+          <input className="input mono" value={code} placeholder="Order code or number (optional) - 26-1007-01 / #2419"
                  onChange={(e) => setCode(e.target.value)}
                  onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
           <input className="input" value={warehouse} placeholder="Warehouse (仓库) - optional, remembered"
@@ -363,7 +364,7 @@ function CodeCell({ parcel, busy, onCode }) {
     <div>
       <input className="input sm mono" style={{ width: 118, fontWeight: parcel.code ? 700 : 400, borderColor: bad ? 'var(--bad)' : undefined }}
              value={value} placeholder="26-0710-01" disabled={busy} aria-label={`Order code for ${parcel.label}`}
-             title="Type the order code and press Enter. Clear it to release this arrival."
+             title="Type the order code (or the order number, #2419) and press Enter. Clear it to release this arrival."
              onChange={(e) => { setValue(e.target.value); setBad(false); }}
              onKeyDown={(e) => {
                if (e.key === 'Enter') { e.preventDefault(); commit(); }

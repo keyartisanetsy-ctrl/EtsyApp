@@ -25,7 +25,7 @@ import { activeShopifyShopId } from '../shopify/shop.js';
 import { readSetting } from './settings.js';
 import { run, parseJsonish } from './ai/index.js';
 import { resolveForTransaction } from './productimages.js';
-import { codesFor, shopifyCodesFor } from './ordercode.js';
+import { codesFor, shopifyCodesFor, ensureOrderCode } from './ordercode.js';
 import { cachedProductImageId } from './warehousecheck.js';
 import * as holds from './holds.js';
 import * as etsyOrders from './orders.js';
@@ -137,6 +137,7 @@ function touchHold(channel, orderId) {
 function shapeParcel(r, item = null, children = 0, hold = null) {
   return {
     id: r.id,
+    typed: r.raw_text || null,
     carrier: r.carrier,
     last4: r.last4,
     quantity: r.quantity,
@@ -215,9 +216,10 @@ export function createParcel({ text = '', carrier, last4, quantity, attachmentId
   }
   const day = /^\d{4}-\d{2}-\d{2}$/.test(receivedOn || '') ? receivedOn : isoDay(new Date());
   const info = getDb().prepare(`
-    INSERT INTO inbound_parcels (carrier, last4, quantity, attachment_id, warehouse, note, received_on)
-    VALUES (?,?,?,?,?,?,?)`)
-    .run(fields.carrier, fields.last4, fields.quantity, attachmentId, String(warehouse).trim(), String(note).trim(), day);
+    INSERT INTO inbound_parcels (carrier, last4, quantity, attachment_id, warehouse, note, received_on, raw_text)
+    VALUES (?,?,?,?,?,?,?,?)`)
+    .run(fields.carrier, fields.last4, fields.quantity, attachmentId, String(warehouse).trim(), String(note).trim(), day,
+      String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 80) || null);
   audit('packing.parcel_add', { entity: 'parcel', entityId: info.lastInsertRowid, detail: { ...fields, attachmentId } });
   return getParcel(info.lastInsertRowid);
 }
@@ -242,8 +244,10 @@ export function updateParcel(id, patch = {}) {
     received_on: /^\d{4}-\d{2}-\d{2}$/.test(patch.receivedOn || '') ? patch.receivedOn : row.received_on,
   };
   getDb().prepare(`
-    UPDATE inbound_parcels SET carrier = ?, last4 = ?, quantity = ?, warehouse = ?, note = ?, received_on = ? WHERE id = ?`)
-    .run(next.carrier, next.last4, next.quantity, next.warehouse, next.note, next.received_on, row.id);
+    UPDATE inbound_parcels SET carrier = ?, last4 = ?, quantity = ?, warehouse = ?, note = ?, received_on = ?,
+      raw_text = CASE WHEN carrier = ? AND last4 = ? AND quantity = ? THEN raw_text ELSE NULL END WHERE id = ?`)
+    .run(next.carrier, next.last4, next.quantity, next.warehouse, next.note, next.received_on,
+      next.carrier, next.last4, next.quantity, row.id);
   // Its tracking digits or piece count may be what a hold was written from.
   if (row.match_channel) touchHold(row.match_channel, row.match_order_id);
   return getParcel(row.id);
@@ -585,7 +589,8 @@ function lookupItem(channel, orderId, itemId) {
       WHERE x.transaction_id = ? AND x.receipt_id = ? AND r.shop_id IS ?`)
       .get(Number(itemId), Number(orderId), activeShopId());
     if (!row) throw notFound(`Item ${itemId} is not on Etsy order ${orderId}.`);
-    return { code: codesFor([row.receipt_id])[row.receipt_id] || String(row.receipt_id), warehousePhotoId: row.warehouse_photo_id };
+    // The order's first parcel is what gives it a code (today's date, next number of the day).
+    return { code: ensureOrderCode('etsy', row.receipt_id) || String(row.receipt_id), warehousePhotoId: row.warehouse_photo_id };
   }
   if (channel === 'shopify') {
     const row = db.prepare(`
@@ -594,7 +599,7 @@ function lookupItem(channel, orderId, itemId) {
       WHERE x.line_item_id = ? AND x.order_id = ? AND o.shop_id = ?`)
       .get(String(itemId), String(orderId), activeShopifyShopId());
     if (!row) throw notFound(`Item ${itemId} is not on Shopify order ${orderId}.`);
-    return { code: shopifyCodesFor([row.order_id])[row.order_id] || row.name || row.order_id, warehousePhotoId: row.warehouse_photo_id };
+    return { code: ensureOrderCode('shopify', row.order_id) || row.name || row.order_id, warehousePhotoId: row.warehouse_photo_id };
   }
   throw badRequest('channel must be "etsy" or "shopify".');
 }
@@ -757,7 +762,7 @@ export function splitParcel(id, { regions, crops = [], remainder = null, done = 
         .run(parent.carrier, parent.last4, 1, cropIds[i], parent.warehouse, parent.note, parent.received_on, parent.id, JSON.stringify(box));
       childIds.push(Number(info.lastInsertRowid));
     });
-    db.prepare('UPDATE inbound_parcels SET attachment_id = ?, quantity = ?, suggestions = NULL WHERE id = ?')
+    db.prepare('UPDATE inbound_parcels SET attachment_id = ?, quantity = ?, suggestions = NULL, raw_text = NULL WHERE id = ?')
       .run(remainderId ?? parent.attachment_id, piecesLeft, parent.id);
   })();
   removeParcelAttachment(previousRemainder);
@@ -990,14 +995,13 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
     { header: 'Code\n(编号)', key: 'code', width: 18 },
     { header: 'Image\n(图片)', key: 'image', width: 22 },
     { header: 'Warehouse\n(仓库)', key: 'warehouse', width: 18 },
+    { header: 'Message to warehouse\n(留言)', key: 'message', width: 60 },
     { header: 'Channel', key: 'channel', width: 10 },
     { header: 'Item', key: 'item', width: 44 },
     { header: 'Customer', key: 'buyer', width: 20 },
     { header: 'Status', key: 'status', width: 12 },
     { header: 'Received', key: 'received', width: 12 },
     { header: 'Note', key: 'note', width: 30 },
-    { header: 'Parcel\n(包裹)', key: 'parcel', width: 18 },
-    { header: 'Message to warehouse\n(留言)', key: 'message', width: 64 },
   ];
   const header = sheet.getRow(1);
   header.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
@@ -1010,19 +1014,20 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
   for (const p of rows) {
     r += 1;
     const item = items.get(`${p.match_channel}:${p.match_item_id}`);
-    // A parcel of an order that was not all here when it arrived carries that order's HOLD code in
-    // "Tracking Code" - both parcels of the order do, so the warehouse can tell they go together - and in
-    // "Code" for as long as it is to be kept; once the order is complete "Code" is the order's own code again.
+    // "Tracking Code" is always the line as it was typed. A parcel of an order that was not all here when it
+    // arrived carries that order's HOLD code in "Code" for as long as it is to be kept (both parcels of the
+    // order do, so the warehouse can tell they go together), with the message to the warehouse beside it;
+    // once the order is complete "Code" is the order's own code again.
     const hold = p.match_channel ? onHold.get(`${p.match_channel}:${p.match_order_id}`) ?? null : null;
     const holding = hold?.state === 'active';
     const row = sheet.addRow({
-      label: hold ? hold.code : parcelLabel(p), code: (holding ? hold.code : p.match_code) || '', image: '', warehouse: p.warehouse,
+      label: p.raw_text || parcelLabel(p), code: (holding ? hold.code : p.match_code) || '', image: '', warehouse: p.warehouse,
       // An arrival nobody has matched yet says so, rather than leaving the cells blank.
       channel: p.match_channel ? (p.match_channel === 'etsy' ? 'Etsy' : 'Shopify') : '-',
       item: item ? `${item.title}${item.variant ? ` (${item.variant})` : ''}` : p.match_channel ? '(item no longer in the order mirror)' : 'Not matched yet - add its order code',
       buyer: item?.buyer || '',
       status: p.packed_at ? 'Packed' : holding ? 'On hold' : p.match_channel ? 'Matched' : 'Unmatched', received: p.received_on, note: p.note,
-      parcel: parcelLabel(p), message: hold ? hold.messageZh : '',
+      message: hold ? hold.messageZh : '',
     });
     if (hold) {
       const fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: holding ? 'FFFFF3CD' : 'FFE3F4E1' } };
