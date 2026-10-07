@@ -339,6 +339,82 @@ function HoldNotice({ hold, busy, onRelease }) {
 }
 
 /**
+ * The Taobao order number and cost of the order this parcel belongs to. They are saved on the
+ * order (the same fields the Orders pages show), and can be sent on to the order's Airtable row.
+ */
+function SupplyBox({ parcel, busy, onSave }) {
+  const s = parcel.match.supply ?? { taobaoOrder: '', cost: null, currency: null };
+  const [open, setOpen] = useState(false);
+  const [ref, setRef] = useState(s.taobaoOrder);
+  const [cost, setCost] = useState(s.cost ?? '');
+  const [ccy, setCcy] = useState(s.currency || 'CNY');
+  useEffect(() => { setRef(s.taobaoOrder); setCost(s.cost ?? ''); setCcy(s.currency || 'CNY'); }, [s.taobaoOrder, s.cost, s.currency]);
+
+  const summary = [s.taobaoOrder && `Taobao ${s.taobaoOrder}`, s.cost != null && `${s.cost} ${s.currency || 'CNY'}`].filter(Boolean).join(' · ');
+  const values = { taobaoOrder: ref, cost: String(cost), currency: ccy };
+  return (
+    <div style={{ marginTop: 6, maxWidth: 440 }}>
+      <button className={`btn xs ${summary ? '' : 'ghost'}`} onClick={() => setOpen((v) => !v)}
+              title="The Taobao order number and what the order cost - saved on the order, and sendable to its Airtable row">
+        🛒 {summary || 'Taobao order & cost'} {open ? '▴' : '▾'}
+      </button>
+      {open && (
+        <div style={{ marginTop: 6, padding: '6px 8px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface-2)' }}>
+          <div className="flex gap4" style={{ flexWrap: 'wrap' }}>
+            <input className="input sm" style={{ flex: '2 1 190px' }} value={ref} placeholder="Taobao order number"
+                   aria-label={`Taobao order number for ${parcel.label}`} onChange={(e) => setRef(e.target.value)} />
+            <input className="input sm" style={{ flex: '1 1 70px', maxWidth: 100 }} type="number" min="0" step="0.01" value={cost} placeholder="Cost"
+                   aria-label={`Supply cost for ${parcel.label}`} onChange={(e) => setCost(e.target.value)} />
+            <input className="input sm" style={{ width: 56 }} value={ccy} maxLength={4} aria-label="Cost currency" onChange={(e) => setCcy(e.target.value.toUpperCase())} />
+          </div>
+          <div className="small muted" style={{ marginTop: 4 }}>
+            For the whole order. Bought in several Taobao orders? Write them all, separated by commas, and the total cost.
+          </div>
+          <div className="flex gap4" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+            <button className="btn xs" disabled={busy} onClick={() => onSave(parcel, values, 'none')}>Save</button>
+            <button className="btn xs primary" disabled={busy} onClick={() => onSave(parcel, values, 'check')}
+                    title="Save, then put them in the Taobao-order and cost columns of this order's Airtable row. If Airtable already has different values you are asked first.">
+              Save & send to Airtable
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Airtable already holds different values for this order: change them, or keep what is there. */
+function AirtableDecision({ decision, busy, onAnswer, onClose }) {
+  return (
+    <Modal open onClose={onClose} title="Airtable already has this order's Taobao order / cost"
+           footer={(
+             <>
+               <button className="btn" disabled={busy} onClick={() => onAnswer('keep')}>Keep (don't change)</button>
+               <button className="btn primary" disabled={busy} onClick={() => onAnswer('change')}>{busy ? <Spinner /> : 'Change'}</button>
+             </>
+           )}>
+      <div className="small muted mb8">
+        {decision.parcel.label} · order {decision.parcel.code || decision.parcel.match.orderId}. Nothing has been sent yet.
+        "Change" replaces what Airtable has with what you entered; "Keep" leaves Airtable as it is (anything it has empty is still filled in).
+        What you entered stays saved here either way.
+      </div>
+      <table className="data">
+        <thead><tr><th>Airtable column</th><th>Airtable has</th><th>You entered</th></tr></thead>
+        <tbody>
+          {decision.conflicts.map((c) => (
+            <tr key={`${c.destination}:${c.column}`}>
+              <td><strong>{c.column}</strong><div className="small muted">{c.field} · {c.destination}</div></td>
+              <td className="mono">{c.current}</td>
+              <td className="mono"><strong>{c.next}</strong></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Modal>
+  );
+}
+
+/**
  * The order code of an arrival, always editable: type 26-0710-01 and press
  * Enter (or leave the box) to put the arrival on that order; clear it to
  * release the arrival. A code only names an order - when the order has several
@@ -406,7 +482,7 @@ function ItemChooser({ parcel, needsItem, busy, onChoose, onClose }) {
   );
 }
 
-function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit, onCode, onChoose, onRelease }) {
+function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit, onCode, onChoose, onRelease, onSupply }) {
   const [open, setOpen] = useState(false);
   const s = latestSuggestions(parcel);
   const top = s?.items?.[0];
@@ -461,6 +537,7 @@ function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, on
             </div>
           )}
           {parcel.hold && <HoldNotice hold={parcel.hold} busy={busy} onRelease={(release) => onRelease(parcel, release)} />}
+          {m && <SupplyBox parcel={parcel} busy={busy} onSave={onSupply} />}
           {!m && top && (
             <button className="btn xs ghost" onClick={() => setOpen((v) => !v)}>
               <span className={`badge ${scoreKind(top.score)}`}>{Math.round(top.score * 100)}%</span> {top.title.slice(0, 40)} {open ? '▴' : '▾'}
@@ -569,6 +646,7 @@ export default function Packing() {
   const [splitting, setSplitting] = useState(null);
   const [choosing, setChoosing] = useState(null);
   const [reading, setReading] = useState({});
+  const [deciding, setDeciding] = useState(null);
   const cancelRef = useRef(false);
 
   const channels = useMemo(() => [filters.etsy && 'etsy', filters.shopify && 'shopify'].filter(Boolean), [filters.etsy, filters.shopify]);
@@ -731,6 +809,43 @@ export default function Packing() {
     if (channels.length) freeOne(parcel, { quiet: true });
   };
 
+  /** What the answer from Airtable means to the person who pressed the button. */
+  const reportAirtable = (parcel, a) => {
+    if (!a) { toast({ kind: 'ok', title: 'Saved' }); return; }
+    const where = (a.destinations ?? []).filter((d) => d.status === 'sent').map((d) => d.destination).join(', ');
+    if (a.status === 'sent') toast({ kind: 'ok', title: 'Saved and sent to Airtable', body: where });
+    else if (a.status === 'nothing_to_change') toast({ kind: 'ok', title: 'Saved', body: a.kept?.length ? 'Airtable was left as it is.' : 'Airtable already has exactly these values.' });
+    else if (a.status === 'not_in_airtable') toast({ kind: 'info', title: 'Saved', duration: 9000, body: 'This order is not in Airtable yet - send it from Orders and the Taobao order and cost go with it.' });
+    else if (a.status === 'not_mapped') toast({ kind: 'info', title: 'Saved', duration: 9000, body: 'The Airtable destination has no column for the Taobao order number or the cost. Map them in Settings > Airtable.' });
+    else if (a.status === 'no_destination') toast({ kind: 'info', title: 'Saved', body: 'There is no Airtable destination for this shop yet (Settings > Airtable).' });
+    else if (a.status === 'error') toast({ kind: 'err', title: 'Saved here, but Airtable failed', body: a.message, duration: 9000 });
+  };
+
+  /** Save the Taobao order and cost of a parcel's order; with 'check' also send them to Airtable (asking first if that would overwrite). */
+  const saveSupply = async (parcel, values, airtable) => {
+    const m = parcel.match;
+    if (!m) return;
+    flag(parcel.id, true);
+    try {
+      const r = await api.post('/packing/orders/supply', { channel: m.channel, orderId: m.orderId, ...values, airtable });
+      if (r.airtable?.status === 'needs_decision') setDeciding({ parcel, conflicts: r.airtable.conflicts });
+      else reportAirtable(parcel, r.airtable);
+      refresh();
+    } catch (err) { showError(err, 'Could not save that'); } finally { flag(parcel.id, false); }
+  };
+
+  const answerDecision = async (answer) => {
+    const { parcel } = deciding;
+    const m = parcel.match;
+    flag(parcel.id, true);
+    try {
+      const r = await api.post('/packing/orders/supply', { channel: m.channel, orderId: m.orderId, airtable: answer });
+      setDeciding(null);
+      reportAirtable(parcel, r.airtable);
+      refresh();
+    } catch (err) { showError(err, 'Could not update Airtable'); } finally { flag(parcel.id, false); }
+  };
+
   /** Let an order's held parcels go although the order is not complete - or hold them again. */
   const releaseHold = async (parcel, release) => {
     const m = parcel.match;
@@ -862,7 +977,7 @@ export default function Packing() {
                   {parcels.data.rows.map((p) => (
                     <ParcelRow key={p.id} parcel={p} range={range} busy={!!working[p.id]} reading={!!reading[p.id]}
                                onMatch={matchOne} onFree={freeOne} onAssign={confirm} onUnmatch={unmatch}
-                               onCode={assignCode} onChoose={(parcel, needsItem) => setChoosing({ parcel, needsItem })} onRelease={releaseHold}
+                               onCode={assignCode} onChoose={(parcel, needsItem) => setChoosing({ parcel, needsItem })} onRelease={releaseHold} onSupply={saveSupply}
                                onEdit={setEditing} onDelete={remove} onPicker={setPicking}
                                onSplit={setSplitting} onUnsplit={unsplit} />
                   ))}
@@ -894,6 +1009,9 @@ export default function Packing() {
 
       {editing && <EditParcel parcel={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} />}
       {splitting && <SplitPhoto parcel={splitting} onClose={() => setSplitting(null)} onDone={() => { setSplitting(null); refresh(); }} />}
+      {deciding && (
+        <AirtableDecision decision={deciding} busy={!!working[deciding.parcel.id]} onAnswer={answerDecision} onClose={() => setDeciding(null)} />
+      )}
       {choosing && (
         <ItemChooser parcel={choosing.parcel} needsItem={choosing.needsItem} busy={!!working[choosing.parcel.id]}
                      onClose={() => setChoosing(null)}
