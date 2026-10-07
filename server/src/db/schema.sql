@@ -1131,3 +1131,50 @@ CREATE TABLE IF NOT EXISTS order_holds (
   PRIMARY KEY (channel, order_id)
 );
 CREATE INDEX IF NOT EXISTS idx_order_holds_code ON order_holds(hold_code);
+
+-- Products that are the same thing in different places - an Etsy listing and a
+-- Shopify product, or two Etsy shops' listings - so their matching variants can
+-- carry the same SKU. A product belongs to at most one group. product_ref is
+-- the Etsy listing id, or the Shopify product GID; shop_id is the Etsy shop id
+-- or shopify_accounts.id, as the channel says.
+CREATE TABLE IF NOT EXISTS product_groups (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  title      TEXT DEFAULT '',
+  base_sku   TEXT DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS product_group_members (
+  channel     TEXT NOT NULL,
+  shop_id     INTEGER NOT NULL,
+  product_ref TEXT NOT NULL,
+  group_id    INTEGER NOT NULL,
+  source      TEXT DEFAULT 'manual',   -- manual | supplier | sku | title | image
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (channel, shop_id, product_ref),
+  FOREIGN KEY (group_id) REFERENCES product_groups(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_pgm_group ON product_group_members(group_id);
+
+-- Pairs of products somebody said are NOT the same, so they are not suggested again.
+CREATE TABLE IF NOT EXISTS product_link_rejects (
+  a_key      TEXT NOT NULL,
+  b_key      TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (a_key, b_key)
+);
+
+-- What the picture check said about one of our photos against a supplier
+-- item's own pictures (the first two the supplier API returns).
+CREATE TABLE IF NOT EXISTS supplier_image_checks (
+  supplier    TEXT NOT NULL,
+  item_id     TEXT NOT NULL,
+  ours_url    TEXT NOT NULL,
+  similarity  REAL,              -- colour likeness of the best of the first two supplier pictures, 0..1
+  which       INTEGER,           -- 1 or 2: which supplier picture looked most like ours
+  verdict     TEXT,              -- match | unsure | mismatch (colours first, the AI when it was asked)
+  by_ai       INTEGER NOT NULL DEFAULT 0,
+  summary     TEXT,
+  checked_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (supplier, item_id, ours_url)
+);
