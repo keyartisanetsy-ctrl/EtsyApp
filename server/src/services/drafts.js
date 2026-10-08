@@ -1323,8 +1323,27 @@ async function verifyListFields(listingId, sent, caller, shopId, touched) {
  * Each part is fetched independently: a shop with no return policies should
  * still get its shipping profiles, rather than the whole panel failing.
  */
-export async function shopChoices() {
+const CHOICES_TTL_MS = 12 * 3600_000;
+const choicesKey = (shopId) => `etsy.choices.${shopId}`;
+export function forgetShopChoices(shopId = requireShopId()) { setSetting(choicesKey(shopId), ''); }
+
+/**
+ * Shipping / processing / return / production choices of the shop. They hardly ever change and cost five Etsy requests
+ * to read, so the answer is kept for 12 hours; `refresh` (the "Shop choices" Etsy request) asks Etsy again.
+ */
+export async function shopChoices({ refresh = false } = {}) {
   const shopId = requireShopId();
+  if (!refresh) {
+    const cached = parse(getSetting(choicesKey(shopId), ''), null);
+    if (cached?.at && Date.now() - cached.at < CHOICES_TTL_MS && cached.value) return { ...cached.value, cachedAt: new Date(cached.at).toISOString() };
+  }
+  const value = await fetchShopChoices(shopId);
+  // only a complete answer is kept - a half-failed one would hide what is missing for 12 hours
+  if (!Object.keys(value).some((k) => k.endsWith('Error'))) setSetting(choicesKey(shopId), JSON.stringify({ at: Date.now(), value }));
+  return value;
+}
+
+async function fetchShopChoices(shopId) {
   const out = {};
 
   const settle = async (name, fn, fallback = []) => {

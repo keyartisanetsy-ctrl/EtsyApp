@@ -364,7 +364,7 @@ export async function refreshAllAccounts() {
 
 // ------------------------------------------------------------ request core
 
-// How many requests this app has sent to Etsy today (UTC day) - kept in memory, seeded from the call log on first use
+// What this app has sent to Etsy today (UTC day), counted here - only a guide for "how much did that click cost"
 let usageDay = '';
 let usageCount = 0;
 const todayKey = () => new Date().toISOString().slice(0, 10);
@@ -376,11 +376,47 @@ function usageNow() {
   }
   return usageCount;
 }
-export const DEFAULT_DAILY_CAP = 4000;
+
+/**
+ * Etsy's own numbers. Every answer from Etsy says how many requests the app may make a day and how many are left
+ * (x-limit-per-day / x-remaining-today, and the same per second). Those are what the app goes by - nothing is typed in.
+ * The last answer is remembered across restarts, so the page can show it before the first new request.
+ */
+let rate = null;
+let ratePersistedAt = 0;
+function loadRate() {
+  if (rate) return rate;
+  try { rate = JSON.parse(getSetting('etsy.rate', '') || 'null'); } catch { rate = null; }
+  return rate;
+}
+function noteRate(res) {
+  const num = (name) => { const v = res.headers.get(name); return v === null || v === '' ? NaN : Number(v); };
+  const limitDay = num('x-limit-per-day');
+  if (!Number.isFinite(limitDay)) return;
+  rate = {
+    limitDay, remainingDay: num('x-remaining-today'), limitSec: num('x-limit-per-second'), remainingSec: num('x-remaining-this-second'), at: Date.now(),
+  };
+  if (Date.now() - ratePersistedAt > 5000) { ratePersistedAt = Date.now(); try { setSetting('etsy.rate', JSON.stringify(rate)); } catch { /* only a convenience */ } }
+}
+
+/** { known, limit, remaining, used, asOf, cooldownUntil, today } - `today` is just what this app counted itself. */
 export function etsyUsage() {
-  const cap = Number(getSetting('etsy.daily_cap', '')) || DEFAULT_DAILY_CAP;
+  const r = loadRate();
   const cool = etsyCooldown();
-  return { today: usageNow(), cap, cooldownUntil: cool.active ? cool.until : null };
+  const fresh = r && Date.now() - r.at < 24 * 3600_000;
+  // an exhausted allowance that has since reopened (the cooldown passed) is no longer "0 left"
+  const reopened = fresh && r.remainingDay <= 0 && !cool.active && Date.now() - r.at > 60_000;
+  const known = !!fresh && Number.isFinite(r.remainingDay) && !reopened;
+  return {
+    known,
+    limit: fresh && Number.isFinite(r.limitDay) ? r.limitDay : null,
+    remaining: known ? r.remainingDay : null,
+    used: known && Number.isFinite(r.limitDay) ? Math.max(0, r.limitDay - r.remainingDay) : null,
+    perSecond: fresh && Number.isFinite(r.limitSec) ? r.limitSec : null,
+    asOf: fresh ? new Date(r.at).toISOString() : null,
+    cooldownUntil: cool.active ? cool.until : null,
+    today: usageNow(),
+  };
 }
 
 function logCall(entry) {
@@ -496,10 +532,6 @@ async function performRequest(pathname, {
 
   const cool = etsyCooldown(account);
   if (cool.active) throw cooldownError(cool.until, operationId, url.toString());
-  // This app's own brake, well under Etsy's daily allowance: a bug or a busy day can never use the whole of it up
-  { const u = etsyUsage();
-    if (u.today >= u.cap) throw new EtsyApiError(429, `The app's own daily safety limit for Etsy requests is reached (${u.today} of ${u.cap} today). It starts again after midnight UTC, or raise the limit on the Etsy requests page.`, { operationId, url: url.toString(), safetyCap: true }); }
-
   let attempt = 0;
   for (;;) {
     attempt += 1;
@@ -550,6 +582,7 @@ async function performRequest(pathname, {
     }
 
     const durationMs = Date.now() - started;
+    noteRate(res);
 
     if (RETRY_STATUS.has(res.status) && attempt <= config.etsy.maxRetries) {
       const retryAfter = Number(res.headers.get('retry-after'));
@@ -635,10 +668,15 @@ export async function call(operationId, args = {}, opts = {}) {
   // Some operations accept a token but do not require one; use it when present.
   const auth = opts.auth ?? (operationNeedsAuth(op) || opts.accessToken || !!getStoredToken());
 
-  return request(pathname, {
+  const result = await request(pathname, {
     method: op.method, query, body, bodyKind, auth, operationId, raw: opts.raw,
     accessToken: opts.accessToken, account: opts.account,
   });
+  // the shop's remembered shipping / return / processing / section choices are stale the moment one of them is changed
+  if (/^(create|update|delete|consolidate)Shop(ShippingProfile|ReturnPolic|ReadinessState|Section|ProductionPartner)/.test(operationId) && args.shop_id) {
+    try { setSetting(`etsy.choices.${args.shop_id}`, ''); } catch { /* it simply expires */ }
+  }
+  return result;
 }
 
 /**

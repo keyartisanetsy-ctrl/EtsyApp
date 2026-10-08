@@ -15,9 +15,8 @@ export default function EtsyRequests() {
   const toast = useToast();
   const showError = useErrorToast();
   const [data, setData] = useState(null);
-  const [cap, setCap] = useState('');
   const load = useCallback(async () => {
-    try { const d = await api.get('/etsy-requests'); setData(d); setCap((c) => c || String(d.usage.cap)); } catch (err) { showError(err, 'Could not load the Etsy requests'); }
+    try { const d = await api.get('/etsy-requests'); setData(d); } catch (err) { showError(err, 'Could not load the Etsy requests'); }
   }, [showError]);
   useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
   const { run, running } = useRunRequest(load);
@@ -28,13 +27,14 @@ export default function EtsyRequests() {
   const setAuto = async (req, patch) => {
     try { await api.put(`/etsy-requests/${req.id}/auto`, { enabled: req.auto.enabled, minutes: req.auto.minutes, ...patch }); load(); } catch (err) { showError(err, 'Could not change the schedule'); }
   };
-  const saveCap = async () => {
-    try { await api.put('/etsy-requests/limit/daily', { cap: Number(cap) }); toast({ kind: 'ok', title: 'Daily safety limit saved' }); load(); } catch (err) { showError(err, 'Could not save the limit'); }
+  const applyRecommended = async () => {
+    if (!window.confirm('Star the recommended requests and switch the recommended ones to repeat by themselves (with the suggested interval)? Everything else stays as it is.')) return;
+    try { await api.post('/etsy-requests/recommended', { stars: true, auto: true }); toast({ kind: 'ok', title: 'Recommended setup applied' }); load(); } catch (err) { showError(err, 'Could not apply the recommendation'); }
   };
 
   if (!data) return <Page title="Etsy requests"><div className="flex"><Spinner /> <span className="dim">Loading…</span></div></Page>;
   const { usage, requests } = data;
-  const pct = Math.min(100, Math.round((usage.today / usage.cap) * 100));
+  const pct = usage.known && usage.limit ? Math.min(100, Math.round((usage.used / usage.limit) * 100)) : 0;
   const groups = [...new Set(requests.map((r) => r.group))];
   const autoOn = requests.filter((r) => r.auto.enabled).length;
 
@@ -45,21 +45,24 @@ export default function EtsyRequests() {
       )}
       <div className="card" style={{ padding: 14, marginBottom: 16 }}>
         <div className="flex" style={{ alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ flex: '1 1 280px' }}>
-            <div><strong>{usage.today.toLocaleString()}</strong> of <strong>{usage.cap.toLocaleString()}</strong> requests used today (UTC day)</div>
-            <div style={{ height: 8, borderRadius: 4, background: 'var(--surface-2)', marginTop: 6, overflow: 'hidden' }}>
-              <div style={{ width: `${pct}%`, height: '100%', background: pct > 85 ? 'var(--bad)' : pct > 60 ? 'var(--warn)' : 'var(--good)' }} />
-            </div>
+          <div style={{ flex: '1 1 320px' }}>
+            {usage.known ? (
+              <>
+                <div><strong>{usage.remaining.toLocaleString()}</strong> of <strong>{usage.limit.toLocaleString()}</strong> requests left today <span className="muted small">- as Etsy reports it{usage.asOf ? `, ${new Date(usage.asOf).toISOString().slice(11, 16)} UTC` : ''}</span></div>
+                <div style={{ height: 8, borderRadius: 4, background: 'var(--surface-2)', marginTop: 6, overflow: 'hidden' }}>
+                  <div style={{ width: `${pct}%`, height: '100%', background: pct > 85 ? 'var(--bad)' : pct > 60 ? 'var(--warn)' : 'var(--good)' }} />
+                </div>
+              </>
+            ) : (
+              <div>Etsy has not told this app its allowance yet{usage.limit ? ` (${usage.limit.toLocaleString()} a day)` : ''}. The first request of any kind shows it here - or press <em>Check the connection and my allowance</em> below (one request).</div>
+            )}
+            <div className="small muted" style={{ marginTop: 4 }}>This app has sent {usage.today.toLocaleString()} request{usage.today === 1 ? '' : 's'} to Etsy today (UTC).</div>
           </div>
-          <label className="flex col small" style={{ width: 170 }}>Daily safety limit
-            <div className="flex gap4">
-              <input className="input" type="number" min="100" max="20000" step="100" value={cap} aria-label="Daily safety limit" onChange={(e) => setCap(e.target.value)} />
-              <button className="btn sm" disabled={Number(cap) === usage.cap} onClick={saveCap}>Save</button>
-            </div>
-          </label>
+          <button className="btn" onClick={applyRecommended}>★ Use the recommended setup</button>
         </div>
         <div className="small muted" style={{ marginTop: 8 }}>
-          Etsy gives this app a fixed number of requests a day. The app stops by itself at the safety limit, so a busy day can never use all of Etsy&rsquo;s allowance.
+          The daily allowance is Etsy&rsquo;s own number, read from Etsy&rsquo;s answers - nothing here is typed in. Repeating requests stop by themselves when only about a tenth of it is left,
+          so your own clicks always have room.
           {' '}{autoOn ? `${autoOn} request${autoOn === 1 ? ' is' : 's are'} set to repeat by themselves.` : 'Nothing repeats by itself.'}
         </div>
       </div>
@@ -73,6 +76,14 @@ export default function EtsyRequests() {
                 <div style={{ flex: '2 1 380px', minWidth: 0 }}>
                   <EtsyRequestCard req={r} run={run} running={running} onStar={star} />
                   <div className="small muted" style={{ marginTop: 4 }}>{r.note}</div>
+                  {r.recommend && (r.recommend.star || r.recommend.auto) && (
+                    <div className="small" style={{ marginTop: 4, color: 'var(--good)' }} data-testid={`rec-${r.id}`}>
+                      {r.recommend.star ? '★ Recommended for the dashboard' : ''}{r.recommend.star && r.recommend.auto ? ' · ' : ''}
+                      {r.recommend.auto ? `↻ Recommended to keep on (every ${everyLabel(r.recommend.minutes ?? r.auto.minutes)})` : ''}
+                      <span className="muted"> - {r.recommend.why}</span>
+                    </div>
+                  )}
+                  {r.recommend && !r.recommend.star && !r.recommend.auto && <div className="small muted" style={{ marginTop: 4 }}>Not recommended to repeat: {r.recommend.why}</div>}
                 </div>
                 <div className="card" style={{ flex: '1 1 230px', padding: 12 }}>
                   <Checkbox checked={r.auto.enabled} onChange={(v) => setAuto(r, { enabled: v })} label="Keep sending it by itself" />

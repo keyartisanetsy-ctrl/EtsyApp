@@ -311,7 +311,7 @@ export async function applyUnits(units = [], { dryRun = false, writers } = {}) {
   const refused = new Map(); // variant key -> why
   const waiting = new Set(); // Etsy variants not sent because Etsy cannot take requests right now (they stay empty and are planned again later)
   const usage = etsyUsage();
-  const etsyShut = !!usage.cooldownUntil || usage.today >= usage.cap;
+  const etsyShut = !!usage.cooldownUntil || (usage.known && usage.remaining <= 0);
   for (const unit of units) {
     for (const e of unit.edits ?? []) {
       let row;

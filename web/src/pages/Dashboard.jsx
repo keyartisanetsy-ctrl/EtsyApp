@@ -85,7 +85,7 @@ export default function Dashboard({ summary, onRefresh }) {
       )}
 
       <div className="section-title">Etsy requests <span className="dim small" style={{ fontWeight: 400 }}>
-        {reqs ? `· ${reqs.usage.today.toLocaleString()} of ${reqs.usage.cap.toLocaleString()} requests used today` : ''}</span></div>
+        {reqs ? (reqs.usage.known ? `· Etsy: ${reqs.usage.remaining.toLocaleString()} of ${reqs.usage.limit.toLocaleString()} requests left today` : `· ${reqs.usage.today.toLocaleString()} sent today`) : ''}</span></div>
       {!reqs ? <div className="flex"><Spinner /></div> : !reqs.requests.some((r) => r.starred) ? (
         <div className="card" style={{ padding: 12 }}>
           <span className="dim">Nothing starred yet. </span>
