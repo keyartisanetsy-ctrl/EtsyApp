@@ -554,50 +554,116 @@ export function nearestSupportedSize(size) {
  * model supports are honoured by asking for the closest shape and reporting
  * what was actually produced, so the caller can scale it.
  */
-export async function editImage({ prompt, image, size = '1024x1024', n = 1, model: modelOverride, signal }) {
+/**
+ * Every setting OpenAI's image endpoints take, as the picture-editing box offers them. `values` are the choices of the
+ * person; 'auto' / '' mean "leave it to the model" and are not sent.
+ */
+export const OPENAI_IMAGE_PARAMS = {
+  size: { label: 'Size & orientation', def: 'match', choices: [
+    { id: 'match', label: 'Match the picture (nearest shape)' },
+    { id: 'auto', label: 'Auto (the model decides)' },
+    { id: '1024x1024', label: 'Square (1024x1024)' },
+    { id: '1024x1536', label: 'Portrait (1024x1536)' },
+    { id: '1536x1024', label: 'Landscape (1536x1024)' },
+    { id: '2560x1440', label: '2K (2560x1440)' },
+    { id: '3840x2160', label: '4K (3840x2160)' },
+  ] },
+  quality: { label: 'Quality', def: 'medium', choices: [
+    { id: 'auto', label: 'Auto' }, { id: 'low', label: 'Low' }, { id: 'medium', label: 'Medium' }, { id: 'high', label: 'High' },
+  ] },
+  outputFormat: { label: 'Output format', def: 'jpeg', choices: [
+    { id: 'jpeg', label: 'JPEG' }, { id: 'png', label: 'PNG' }, { id: 'webp', label: 'WebP (Etsy does not accept it)' },
+  ] },
+  outputCompression: { label: 'JPEG / WebP compression (1-100, blank = the model\'s own)', def: '' },
+  n: { label: 'Number of images', def: 1, min: 1, max: 4 },
+  background: { label: 'Background', def: 'auto', choices: [
+    { id: 'auto', label: 'Auto' }, { id: 'transparent', label: 'Transparent (PNG / WebP only)' }, { id: 'opaque', label: 'Opaque' },
+  ] },
+  moderation: { label: 'Moderation', def: 'auto', choices: [{ id: 'auto', label: 'Auto' }, { id: 'low', label: 'Low (less restrictive)' }] },
+  inputFidelity: { label: 'Input fidelity (how closely the original is kept)', def: 'auto', choices: [
+    { id: 'auto', label: 'Auto' }, { id: 'high', label: 'High - keep the original closely' }, { id: 'low', label: 'Low' },
+  ] },
+};
+
+const OPTIONAL_WIRE = { quality: 'quality', outputFormat: 'output_format', outputCompression: 'output_compression', background: 'background', moderation: 'moderation', inputFidelity: 'input_fidelity' };
+
+/**
+ * Image editing / generation. Only OpenAI exposes this today.
+ *
+ * `n` asks for several results from one prompt. Sizes outside the three the
+ * model supports are honoured by asking for the closest shape and reporting
+ * what was actually produced, so the caller can scale it.
+ *
+ * `options` (see OPENAI_IMAGE_PARAMS) adds the rest of what the endpoint takes. A setting the chosen model does not
+ * know is dropped and the request is repeated without it, and the caller is told which ones were ignored.
+ */
+export async function editImage({ prompt, image, size = '1024x1024', n = 1, model: modelOverride, options = null, signal }) {
   const apiKey = readSetting('ai.openai.api_key');
   if (!apiKey) throw badRequest('Image editing needs an OpenAI API key (Settings > AI).');
   const model = modelOverride || readSetting('ai.openai.image_model');
-  const count = Math.min(Math.max(1, Number(n) || 1), 10);
+  const o = options ?? {};
+  const count = Math.min(Math.max(1, Number(o.n ?? n) || 1), 10);
+  const sizeChoice = o.size && o.size !== 'match' ? o.size : null;
   const target = nearestSupportedSize(size);
+  const requestSize = sizeChoice ?? target.request;
 
-  const shape = (body) => ({
+  // the optional settings that were asked for (not 'auto' / blank)
+  const optional = {};
+  for (const [key, wire] of Object.entries(OPTIONAL_WIRE)) {
+    const v = o[key];
+    if (v === undefined || v === null || v === '' || v === 'auto') continue;
+    optional[wire] = String(v);
+  }
+
+  const shape = (body, ignored) => ({
     images: (body.data ?? []).map((d) => ({ b64: d.b64_json ?? null, url: d.url ?? null })),
     // Kept so existing callers that read .b64 still work.
     b64: body.data?.[0]?.b64_json ?? null,
     url: body.data?.[0]?.url ?? null,
-    producedSize: target.request,
+    producedSize: requestSize,
     requestedSize: `${target.width}x${target.height}`,
-    needsResize: !target.exact,
+    needsResize: !sizeChoice && !target.exact,
+    outputFormat: body.output_format ?? optional.output_format ?? 'png',
+    ignored,
+    usage: body.usage ?? null,
     raw: body,
   });
 
-  if (image) {
-    const form = new FormData();
-    form.append('model', model);
-    form.append('prompt', prompt);
-    form.append('size', target.request);
-    if (count > 1) form.append('n', String(count));
-    form.append('image', new Blob([image.buffer], { type: image.mime || 'image/png' }), image.filename || 'image.png');
-    const res = await outboundFetch(`${config.ai.openai.base}/v1/images/edits`, {
-      method: 'POST', headers: { Authorization: `Bearer ${apiKey}` }, body: form, signal,
-    });
+  const ignored = [];
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    let res;
+    if (image) {
+      const form = new FormData();
+      form.append('model', model);
+      form.append('prompt', prompt);
+      form.append('size', requestSize);
+      if (count > 1) form.append('n', String(count));
+      for (const [k, v] of Object.entries(optional)) form.append(k, v);
+      form.append('image', new Blob([image.buffer], { type: image.mime || 'image/png' }), image.filename || 'image.png');
+      // eslint-disable-next-line no-await-in-loop
+      res = await outboundFetch(`${config.ai.openai.base}/v1/images/edits`, {
+        method: 'POST', headers: { Authorization: `Bearer ${apiKey}` }, body: form, signal,
+      });
+    } else {
+      // eslint-disable-next-line no-await-in-loop
+      res = await outboundFetch(`${config.ai.openai.base}/v1/images/generations`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, prompt, size: requestSize, n: count, ...optional }),
+        signal,
+      });
+    }
+    // eslint-disable-next-line no-await-in-loop
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new AppError(res.status, `OpenAI image edit failed: ${body?.error?.message || res.statusText}`);
-    return shape(body);
+    if (res.ok) return shape(body, ignored);
+    const message = body?.error?.message || res.statusText;
+    // a setting this model does not take: leave it out and ask again
+    const culprit = Object.keys(optional).find((wire) => (body?.error?.param === wire) || new RegExp(`\\b${wire}\\b`, 'i').test(message));
+    if (res.status === 400 && culprit) { delete optional[culprit]; ignored.push(culprit); continue; }
+    throw new AppError(res.status, `OpenAI image ${image ? 'edit' : 'generation'} failed: ${message}`);
   }
-
-  const res = await outboundFetch(`${config.ai.openai.base}/v1/images/generations`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, prompt, size: target.request, n: count }),
-    signal,
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new AppError(res.status, `OpenAI image generation failed: ${body?.error?.message || res.statusText}`);
-  return shape(body);
+  throw new AppError(400, 'OpenAI image edit failed: the model refused the settings.');
 }
-
 
 // -------------------------------------------------------- Manus: edit an image
 //

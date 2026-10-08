@@ -5,8 +5,6 @@ import { asyncRoute, bool, required } from '../lib/http.js';
 import * as drafts from '../services/drafts.js';
 import * as draftmedia from '../services/draftmedia.js';
 import * as imageedit from '../services/imageedit.js';
-import * as listings from '../services/listings.js';
-import { getDb } from '../db/index.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
@@ -54,10 +52,10 @@ router.post('/delete', asyncRoute(async (req, res) => {
 router.get('/image-edit/options', asyncRoute(async (req, res) => res.json(imageedit.options())));
 router.get('/image-edit/jobs/:jobId', asyncRoute(async (req, res) => res.json(imageedit.job(req.params.jobId))));
 router.get('/image-edit/jobs/:jobId/file', asyncRoute(async (req, res) => {
-  const { path, mime } = imageedit.jobFile(req.params.jobId);
+  const { path, mime } = imageedit.jobFile(req.params.jobId, req.query.i);
   res.type(mime).send(fs.readFileSync(path));
 }));
-router.post('/image-edit/jobs/:jobId/apply', asyncRoute(async (req, res) => res.json(await imageedit.apply(req.params.jobId, { mode: req.body?.mode }))));
+router.post('/image-edit/jobs/:jobId/apply', asyncRoute(async (req, res) => res.json(await imageedit.apply(req.params.jobId, { mode: req.body?.mode, index: req.body?.index }))));
 router.delete('/image-edit/jobs/:jobId', asyncRoute(async (req, res) => res.json(imageedit.discard(req.params.jobId))));
 
 router.get('/:id', asyncRoute(async (req, res) => res.json(drafts.get(Number(req.params.id)))));
@@ -101,24 +99,20 @@ router.delete('/:id', asyncRoute(async (req, res) => res.json(drafts.remove(Numb
 router.get('/:id/media', asyncRoute(async (req, res) => res.json(draftmedia.list(Number(req.params.id)))));
 
 /**
- * Add by pasting a link. A picture is downloaded and kept by this app (so it carries on under this site's own
- * address, whatever happens to the link, and it is this copy that goes to Etsy); a video stays a link.
- * On a draft that is already a real Etsy listing the picture goes straight to Etsy.
+ * Add by pasting a link. On a draft that only exists here the link is staged as it is (it is fetched when the draft is
+ * sent). On a draft that already is a real Etsy listing the picture is fetched and uploaded to Etsy at once, since Etsy
+ * only takes uploaded files.
  */
 router.post('/:id/media', asyncRoute(async (req, res) => {
   const b = req.body ?? {};
   required(b, ['kind', 'url']);
   const id = Number(req.params.id);
   if (b.kind === 'image' && id > 0) {
-    const pic = await draftmedia.fetchPicture(b.url);
-    const have = getDb().prepare('SELECT COUNT(*) c FROM listing_images WHERE listing_id = ?').get(id).c;
-    if (have >= draftmedia.MAX_IMAGES) throw new Error(`Etsy allows up to ${draftmedia.MAX_IMAGES} images on a listing, and this one already has ${have}.`);
-    await listings.uploadImage(id, { buffer: pic.buffer, filename: pic.filename, mime: pic.mime, rank: have + 1, altText: b.altText });
+    const out = await draftmedia.addUrlToEtsy(id, b.url, b.altText);
     await drafts.refreshSnapshot(id);
-    res.status(201).json({ uploaded: true });
+    res.status(201).json(out);
     return;
   }
-  if (b.kind === 'image') { res.status(201).json(await draftmedia.addImageFromUrl(id, b.url, b.altText)); return; }
   res.status(201).json(draftmedia.addUrl(id, { kind: b.kind, url: b.url, altText: b.altText }));
 }));
 
@@ -127,7 +121,7 @@ router.post('/:id/media/:mediaId/ai-edit', asyncRoute(async (req, res) => {
   const b = req.body ?? {};
   res.status(202).json(await imageedit.start({
     listingId: Number(req.params.id), mediaId: Number(req.params.mediaId),
-    provider: b.provider, model: b.model, prompt: b.prompt, remember: b.remember !== false,
+    provider: b.provider, model: b.model, prompt: b.prompt, params: b.params, remember: b.remember !== false,
   }));
 }));
 

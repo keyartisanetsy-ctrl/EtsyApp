@@ -20,6 +20,8 @@ import { createLogger } from '../lib/logger.js';
 import { outboundFetch } from '../lib/outbound.js';
 import { readSetting, writeSetting } from './settings.js';
 import * as ai from './ai/index.js';
+import { OPENAI_IMAGE_PARAMS } from './ai/providers.js';
+import * as undo from './undo.js';
 import { decodeImage } from './imagesig.js';
 import * as draftmedia from './draftmedia.js';
 import * as listings from './listings.js';
@@ -37,13 +39,43 @@ export const MODELS = {
     { id: 'standard', label: 'Manus 2.0 Standard', note: 'More careful.' },
     { id: 'max', label: 'Manus 2.0 Max', note: 'Most thorough - slowest, most credits.' },
   ],
+  // the picture models OpenAI lists (newest first); a dated name is that model frozen on its date
   openai: [
-    { id: 'gpt-image-2', label: 'ChatGPT Image 2 (gpt-image-2)', note: 'The newest picture model.' },
-    { id: 'gpt-image-1.5', label: 'ChatGPT Image 1.5 (gpt-image-1.5)' },
-    { id: 'gpt-image-1', label: 'ChatGPT Image 1 (gpt-image-1)' },
-    { id: 'gpt-image-1-mini', label: 'ChatGPT Image 1 mini (gpt-image-1-mini)', note: 'Cheaper, rougher.' },
+    { id: 'chatgpt-image-latest', label: 'chatgpt-image-latest', note: 'Whatever ChatGPT uses right now.' },
+    { id: 'gpt-image-2.5-sunburst', label: 'gpt-image-2.5-sunburst' },
+    { id: 'gpt-image-2.5-sunburst-2026-09-08', label: 'gpt-image-2.5-sunburst-2026-09-08', note: 'Frozen 2026-09-08.' },
+    { id: 'gpt-image-2.5-flare', label: 'gpt-image-2.5-flare' },
+    { id: 'gpt-image-2.5-flare-2026-09-08', label: 'gpt-image-2.5-flare-2026-09-08', note: 'Frozen 2026-09-08.' },
+    { id: 'gpt-image-2', label: 'gpt-image-2' },
+    { id: 'gpt-image-2-2026-04-21', label: 'gpt-image-2-2026-04-21', note: 'Frozen 2026-04-21.' },
+    { id: 'gpt-image-1.5', label: 'gpt-image-1.5' },
+    { id: 'gpt-image-1', label: 'gpt-image-1' },
+    { id: 'gpt-image-1-mini', label: 'gpt-image-1-mini', note: 'Cheaper, rougher.' },
   ],
 };
+
+const PARAMS_KEY = 'drafts.image_edit.openai_options';
+
+/** The ChatGPT picture settings, checked against what each one allows, with the defaults (Medium quality, JPEG) filled in. */
+export function cleanParams(input = {}) {
+  const out = {};
+  for (const [key, def] of Object.entries(OPENAI_IMAGE_PARAMS)) {
+    const v = input?.[key];
+    if (key === 'n') { out.n = Math.min(def.max, Math.max(def.min, Math.round(Number(v ?? def.def)) || def.def)); continue; }
+    if (key === 'outputCompression') {
+      const n = Math.round(Number(v));
+      out.outputCompression = v === '' || v === undefined || v === null || !Number.isFinite(n) ? '' : Math.min(100, Math.max(1, n));
+      continue;
+    }
+    out[key] = def.choices.some((c) => c.id === v) ? v : def.def;
+  }
+  if (out.background === 'transparent' && out.outputFormat === 'jpeg') out.outputFormat = 'png'; // JPEG cannot be transparent
+  return out;
+}
+
+function savedParams() {
+  try { return cleanParams(JSON.parse(readSetting(PARAMS_KEY) || '{}')); } catch { return cleanParams({}); }
+}
 
 /** What the picture-editing box offers, and what it starts with. */
 export function options() {
@@ -55,11 +87,13 @@ export function options() {
       { id: 'manus', label: 'Manus', configured: status.manus.configured, models: MODELS.manus, note: 'An agent: it can take a minute or two.' },
       { id: 'openai', label: 'ChatGPT', configured: status.openai.configured, models: openaiModels, note: 'Usually ready in under a minute.' },
     ],
+    openaiParams: OPENAI_IMAGE_PARAMS,
     defaults: {
       provider: readSetting('drafts.image_edit.provider') || 'manus',
       manusModel: readSetting('drafts.image_edit.manus_model') || 'lite',
       openaiModel: openaiDefault,
       prompt: readSetting('drafts.image_edit.prompt') || DEFAULT_PROMPT,
+      params: savedParams(),
     },
     defaultPrompt: DEFAULT_PROMPT,
   };
@@ -97,20 +131,24 @@ async function sourceOf(listingId, mediaId) {
 const jobs = new Map();
 const JOB_TTL_MS = 60 * 60 * 1000;
 
+function dropFiles(j) {
+  for (const r of j.results ?? []) { try { fs.unlinkSync(r.file); } catch { /* gone */ } }
+  j.results = [];
+}
+
 function sweep() {
   for (const [id, j] of jobs) {
-    if (Date.now() - j.createdAt > JOB_TTL_MS) {
-      if (j.file) { try { fs.unlinkSync(j.file); } catch { /* gone */ } }
-      jobs.delete(id);
-    }
+    if (Date.now() - j.createdAt > JOB_TTL_MS) { dropFiles(j); jobs.delete(id); }
   }
 }
 
 const publicJob = (j) => ({
   jobId: j.id, status: j.status, error: j.error ?? null, provider: j.provider, model: j.model,
   progress: j.progress ?? null, taskUrl: j.taskUrl ?? null,
-  previewUrl: j.status === 'done' ? `/api/drafts/image-edit/jobs/${j.id}/file` : null,
-  width: j.width ?? null, height: j.height ?? null, seconds: Math.round(((j.finishedAt ?? Date.now()) - j.createdAt) / 1000),
+  previews: j.status === 'done' ? j.results.map((r, i) => ({ index: i, url: `/api/drafts/image-edit/jobs/${j.id}/file?i=${i}`, width: r.width, height: r.height, mime: r.mime, bytes: r.bytes })) : [],
+  previewUrl: j.status === 'done' ? `/api/drafts/image-edit/jobs/${j.id}/file?i=0` : null,
+  width: j.results?.[0]?.width ?? null, height: j.results?.[0]?.height ?? null,
+  ignored: j.ignored ?? [], seconds: Math.round(((j.finishedAt ?? Date.now()) - j.createdAt) / 1000),
 });
 
 export function job(id) {
@@ -119,10 +157,21 @@ export function job(id) {
   return publicJob(j);
 }
 
-export function jobFile(id) {
+export function jobFile(id, index = 0) {
   const j = jobs.get(String(id));
-  if (!j || j.status !== 'done' || !j.file) throw notFound('That edited picture is not ready.');
-  return { path: j.file, mime: j.mime };
+  const r = j?.status === 'done' ? j.results[Number(index) || 0] : null;
+  if (!r) throw notFound('That edited picture is not ready.');
+  return { path: r.file, mime: r.mime };
+}
+
+function keepResult(j, i, buffer) {
+  const kind = sniff(buffer);
+  if (!kind) throw badRequest('The AI did not return a picture this app can use.');
+  fs.mkdirSync(tmpDir(), { recursive: true });
+  const file = path.join(tmpDir(), `${j.id}-${i}${kind.ext}`);
+  fs.writeFileSync(file, buffer);
+  const dims = decodeImage(buffer);
+  j.results.push({ file, mime: kind.mime, width: dims?.width ?? null, height: dims?.height ?? null, bytes: buffer.length });
 }
 
 async function run(j, src) {
@@ -130,31 +179,24 @@ async function run(j, src) {
     const before = decodeImage(src.buffer);
     const sniffed = sniff(src.buffer);
     const image = { buffer: src.buffer, mime: sniffed?.mime || 'image/jpeg', filename: src.filename };
-    let out;
     if (j.provider === 'manus') {
-      out = await ai.manusEditImage({
+      const out = await ai.manusEditImage({
         prompt: j.prompt, image, profile: j.model,
         onProgress: (p) => { j.progress = p.stage; if (p.taskUrl) j.taskUrl = p.taskUrl; },
       });
+      keepResult(j, 0, out.buffer);
     } else {
       const size = before ? `${before.width}x${before.height}` : '1024x1024';
-      const r = await ai.editImage({ prompt: j.prompt, image, size, model: j.model });
-      const first = r.images?.[0];
-      if (!first) throw badRequest('ChatGPT returned no picture.');
-      let buffer;
-      if (first.b64) buffer = Buffer.from(first.b64, 'base64');
-      else if (first.url) buffer = Buffer.from(await (await outboundFetch(first.url)).arrayBuffer());
-      else throw badRequest('ChatGPT returned no picture.');
-      out = { buffer, mime: 'image/png' };
+      const r = await ai.editImage({ prompt: j.prompt, image, size, model: j.model, options: j.params });
+      j.ignored = r.ignored ?? [];
+      const list = (r.images ?? []).filter((x) => x.b64 || x.url);
+      if (!list.length) throw badRequest('ChatGPT returned no picture.');
+      for (let i = 0; i < list.length; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const buffer = list[i].b64 ? Buffer.from(list[i].b64, 'base64') : Buffer.from(await (await outboundFetch(list[i].url)).arrayBuffer());
+        keepResult(j, i, buffer);
+      }
     }
-    const kind = sniff(out.buffer);
-    if (!kind) throw badRequest('The AI did not return a picture this app can use.');
-    fs.mkdirSync(tmpDir(), { recursive: true });
-    j.file = path.join(tmpDir(), `${j.id}${kind.ext}`);
-    fs.writeFileSync(j.file, out.buffer);
-    j.mime = kind.mime;
-    const dims = decodeImage(out.buffer);
-    j.width = dims?.width ?? null; j.height = dims?.height ?? null;
     j.status = 'done';
   } catch (err) {
     log.warn(`picture edit ${j.id} failed: ${err.message}`);
@@ -166,7 +208,7 @@ async function run(j, src) {
 }
 
 /** Start an edit of one picture. Returns the job to poll at once; the work goes on behind it. */
-export async function start({ listingId, mediaId, provider, model, prompt, remember = true } = {}) {
+export async function start({ listingId, mediaId, provider, model, prompt, params, remember = true } = {}) {
   sweep();
   const id = Number(listingId);
   if (!/^(1|true|yes|on)$/i.test(String(readSetting('privacy.share_ai')))) {
@@ -177,12 +219,13 @@ export async function start({ listingId, mediaId, provider, model, prompt, remem
   if (!status[provider].configured) throw badRequest(`${provider === 'manus' ? 'Manus' : 'ChatGPT (OpenAI)'} has no API key yet - add it in Settings > AI.`);
   const text = String(prompt ?? '').trim() || DEFAULT_PROMPT;
   const chosen = String(model || '').trim() || (provider === 'manus' ? 'lite' : (readSetting('ai.openai.image_model') || 'gpt-image-2'));
+  const cleaned = cleanParams(params ?? savedParams());
 
   const src = await sourceOf(id, mediaId);
   if (!sniff(src.buffer)) throw badRequest('That file is not a picture the AI can edit.');
   const j = {
     id: crypto.randomBytes(8).toString('hex'), status: 'running', createdAt: Date.now(), provider, model: chosen, prompt: text,
-    listingId: id, mediaId: Number(mediaId), rank: src.rank,
+    params: cleaned, listingId: id, mediaId: Number(mediaId), rank: src.rank, results: [],
   };
   jobs.set(j.id, j);
 
@@ -190,50 +233,85 @@ export async function start({ listingId, mediaId, provider, model, prompt, remem
     writeSetting('drafts.image_edit.provider', provider);
     writeSetting(provider === 'manus' ? 'drafts.image_edit.manus_model' : 'drafts.image_edit.openai_model', chosen);
     writeSetting('drafts.image_edit.prompt', text === DEFAULT_PROMPT ? '' : text);
+    if (provider === 'openai') writeSetting(PARAMS_KEY, JSON.stringify(cleaned));
   }
-  audit('draft.image_edit_start', { entity: 'listing', entityId: id, detail: { mediaId, provider, model: chosen } });
+  audit('draft.image_edit_start', { entity: 'listing', entityId: id, detail: { mediaId, provider, model: chosen, params: provider === 'openai' ? cleaned : undefined } });
   run(j, src); // not awaited - the page polls
   return publicJob(j);
 }
 
 /**
- * Accept an edit. 'replace' puts the edited picture where the original was (same place in the order); 'add' puts it
- * next to the original, which stays. A local draft keeps it staged; a draft that is already on Etsy uploads it there.
+ * Accept an edit (`index` says which one when ChatGPT made several). 'replace' puts the edited picture where the original
+ * was (same place in the order); 'add' puts it next to the original, which stays. A local draft keeps it staged here, as
+ * this app's own picture; a draft that is already on Etsy gets it uploaded there at once. Either way it can be taken back:
+ * the original stays on disk, and for Etsy it is uploaded again.
  */
-export async function apply(jobId, { mode = 'replace' } = {}) {
+export async function apply(jobId, { mode = 'replace', index = 0 } = {}) {
   const j = jobs.get(String(jobId));
-  if (!j || j.status !== 'done' || !j.file) throw notFound('That edited picture is not ready (or is gone - edits are kept for an hour).');
+  const result = j?.status === 'done' ? j.results[Number(index) || 0] : null;
+  if (!result) throw notFound('That edited picture is not ready (or is gone - edits are kept for an hour).');
   if (!['replace', 'add'].includes(mode)) throw badRequest('mode must be "replace" or "add".');
-  const buffer = fs.readFileSync(j.file);
-  const kind = sniff(buffer);
+  if (result.mime === 'image/webp') throw badRequest('Etsy does not accept WebP pictures. Edit again with JPEG or PNG as the output format.');
+  const buffer = fs.readFileSync(result.file);
   const original = await sourceOf(j.listingId, j.mediaId).catch(() => null);
   if (!original) throw notFound('The original picture is no longer on this draft.');
   const base = String(original.filename || 'image').replace(/\.[^.]+$/, '');
-  const filename = `${base}-en${kind.ext}`;
+  const ext = path.extname(result.file);
+  const filename = `${base}-en${ext}`;
+  const what = mode === 'replace' ? 'AI-edited picture replaced the original' : 'AI-edited picture added next to the original';
 
   if (j.listingId < 0) {
     if (mode === 'add') {
-      draftmedia.addUpload(j.listingId, { kind: 'image', buffer, filename, mime: kind.mime });
+      draftmedia.addUpload(j.listingId, { kind: 'image', buffer, filename, mime: result.mime, label: `${what} (draft)`, undoNote: 'Removes the added picture; the original was never touched.' });
     } else {
-      draftmedia.replaceImage(j.listingId, j.mediaId, { buffer, filename, mime: kind.mime });
+      draftmedia.replaceImage(j.listingId, j.mediaId, { buffer, filename, mime: result.mime, note: `${what} (draft)` });
     }
   } else {
-    await listings.uploadImage(j.listingId, {
-      buffer, filename, mime: kind.mime,
-      rank: mode === 'replace' ? (original.rank || 1) : Math.min(20, (getDb().prepare('SELECT COUNT(*) c FROM listing_images WHERE listing_id = ?').get(j.listingId).c || 0) + 1),
-      overwrite: mode === 'replace',
-    });
+    // the original is kept (as a file) so it can be put back on Etsy
+    fs.mkdirSync(tmpDir(), { recursive: true });
+    const sn = sniff(original.buffer);
+    const backup = path.join(tmpDir(), `original-${crypto.randomBytes(6).toString('hex')}${sn?.ext || '.jpg'}`);
+    fs.writeFileSync(backup, original.buffer);
+    const rank = mode === 'replace' ? (original.rank || 1) : Math.min(20, (getDb().prepare('SELECT COUNT(*) c FROM listing_images WHERE listing_id = ?').get(j.listingId).c || 0) + 1);
+    const res = await listings.uploadImage(j.listingId, { buffer, filename, mime: result.mime, rank, overwrite: mode === 'replace' });
     await drafts.refreshSnapshot(j.listingId);
+    undo.commit(undo.begin({
+      label: `${what} (on Etsy)`, kind: 'draft.picture.etsy',
+      note: mode === 'replace' ? 'Also changes Etsy: the original picture is uploaded to the listing again, in the same place.' : 'Also changes Etsy: the added picture is deleted from the listing there.',
+    }), {
+      affected: 1,
+      detail: { handler: 'draftPicture.restore', args: { listingId: j.listingId, mode, rank, imageId: res?.listing_image_id ?? null, backup, filename: original.filename, mime: sn?.mime || 'image/jpeg' } },
+    });
   }
-  audit('draft.image_edit_apply', { entity: 'listing', entityId: j.listingId, detail: { mediaId: j.mediaId, mode, provider: j.provider } });
-  try { fs.unlinkSync(j.file); } catch { /* gone */ }
+  audit('draft.image_edit_apply', { entity: 'listing', entityId: j.listingId, detail: { mediaId: j.mediaId, mode, provider: j.provider, index: Number(index) || 0 } });
+  dropFiles(j);
   jobs.delete(j.id);
+  draftmedia.sweepFiles();
   return { applied: mode };
 }
 
 export function discard(jobId) {
   const j = jobs.get(String(jobId));
-  if (j?.file) { try { fs.unlinkSync(j.file); } catch { /* gone */ } }
+  if (j) dropFiles(j);
   jobs.delete(String(jobId));
   return { discarded: true };
 }
+
+// ------------------------------------------------- taking a picture change back (Etsy side)
+
+undo.registerHandler('draftPicture.restore', async ({ listingId, mode, rank, imageId, backup, filename, mime }) => {
+  if (mode === 'add') {
+    if (imageId) await listings.deleteImage(listingId, imageId);
+  } else {
+    if (!backup || !fs.existsSync(backup)) throw badRequest('The original picture is no longer on this machine, so it cannot be put back on Etsy.');
+    await listings.uploadImage(listingId, { buffer: fs.readFileSync(backup), filename: filename || 'image.jpg', mime, rank: rank || 1, overwrite: true });
+  }
+  await drafts.refreshSnapshot(listingId);
+  return { message: mode === 'add' ? 'The added picture was deleted from the Etsy listing.' : 'The original picture is back on the Etsy listing.' };
+});
+
+undo.registerHandler('draftPicture.deleteImage', async ({ listingId, imageId }) => {
+  await listings.deleteImage(listingId, imageId);
+  await drafts.refreshSnapshot(listingId);
+  return { message: 'The picture was deleted from the Etsy listing.' };
+});

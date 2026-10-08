@@ -13,7 +13,7 @@ router.get('/', asyncRoute(async (req, res) => {
 }));
 
 /** Take back the last change, or a named one. */
-router.post('/', asyncRoute(async (req, res) => res.json(undo.undo(req.body?.id ?? null))));
+router.post('/', asyncRoute(async (req, res) => res.json(await undo.undo(req.body?.id ?? null))));
 
 router.delete('/', asyncRoute(async (req, res) => res.json(undo.clear())));
 

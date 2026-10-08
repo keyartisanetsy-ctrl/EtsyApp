@@ -400,12 +400,15 @@ export function remove(listingId) {
   const handle = undo.begin({
     label: `Remove draft ${id} from the desk`,
     kind: 'draft.remove',
-    targets: [{ table: 'listing_drafts', where: 'listing_id = ?', params: [id] }],
+    note: 'Brings the draft back with its pictures and your edits.',
+    targets: [
+      { table: 'listing_drafts', where: 'listing_id = ?', params: [id] },
+      { table: 'draft_media', where: 'listing_id = ?', params: [id] },
+    ],
   });
-  // Cleared explicitly (not just left to the ON DELETE CASCADE below) so a
-  // photo uploaded from this machine has its file removed too, not just its
-  // row -- the cascade only reaches the database.
-  draftmedia.clear(id);
+  // The pictures' rows go with the draft (the cascade below); their files stay on disk so taking the delete back can
+  // bring the pictures too - draftmedia.sweepFiles() removes them once nothing can.
+  draftmedia.clear(id, { keepFiles: true });
   const n = getDb().prepare('DELETE FROM listing_drafts WHERE listing_id = ? AND shop_id IS ?')
     .run(id, activeShopId()).changes;
   undo.commit(handle, { affected: n });

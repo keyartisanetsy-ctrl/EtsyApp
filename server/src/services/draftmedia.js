@@ -24,6 +24,7 @@ import { badRequest, notFound } from '../lib/errors.js';
 import { outboundFetch } from '../lib/outbound.js';
 import { createLogger } from '../lib/logger.js';
 import * as listings from './listings.js';
+import * as undo from './undo.js';
 
 const log = createLogger('draft-media');
 
@@ -88,15 +89,17 @@ export function addUrl(listingId, { kind, url, altText = '' } = {}) {
   if (!/^https?:\/\//i.test(String(url ?? ''))) throw badRequest('That does not look like a URL.');
   assertRoom(id, kind);
 
+  const handle = undo.begin({ label: `${kind === 'image' ? 'Picture' : 'Video'} added to a draft by its link`, kind: 'draft.media', targets: [{ table: 'draft_media', where: 'listing_id = ?', params: [id] }] });
   const info = getDb().prepare(`
     INSERT INTO draft_media (listing_id, kind, rank, source_url, alt_text)
     VALUES (?,?,?,?,?)`)
     .run(id, kind, nextRank(id, kind), String(url), String(altText || '').slice(0, 500));
+  undo.commit(handle, { affected: 1 });
   return shape(getDb().prepare('SELECT * FROM draft_media WHERE id = ?').get(info.lastInsertRowid));
 }
 
 /** Stage a photo/video uploaded from this machine. */
-export function addUpload(listingId, { kind, buffer, filename, mime, altText = '' } = {}) {
+export function addUpload(listingId, { kind, buffer, filename, mime, altText = '', label = '', undoNote = null } = {}) {
   const id = Number(listingId);
   if (!['image', 'video'].includes(kind)) throw badRequest('kind must be "image" or "video".');
   if (!buffer?.length) throw badRequest('No file was received.');
@@ -108,11 +111,13 @@ export function addUpload(listingId, { kind, buffer, filename, mime, altText = '
   const stored = `${crypto.randomBytes(8).toString('hex')}${ext}`;
   fs.writeFileSync(path.join(dir, stored), buffer);
 
+  const handle = undo.begin({ label: label || `${kind === 'image' ? 'Picture' : 'Video'} added to a draft`, kind: 'draft.media', note: undoNote, targets: [{ table: 'draft_media', where: 'listing_id = ?', params: [id] }] });
   const info = getDb().prepare(`
     INSERT INTO draft_media (listing_id, kind, rank, file_path, filename, mime, alt_text)
     VALUES (?,?,?,?,?,?,?)`)
     .run(id, kind, nextRank(id, kind), path.join(dir, stored), filename || stored,
          mime || (kind === 'image' ? 'image/jpeg' : 'video/mp4'), String(altText || '').slice(0, 500));
+  undo.commit(handle, { affected: 1 });
   return shape(getDb().prepare('SELECT * FROM draft_media WHERE id = ?').get(info.lastInsertRowid));
 }
 
@@ -147,16 +152,8 @@ export function pictureKind(buf) {
   return null;
 }
 
-/** Stage a picture found at a link: downloaded now, kept here. */
-export async function addImageFromUrl(listingId, url, altText = '') {
-  const pic = await fetchPicture(url);
-  const added = addUpload(listingId, { kind: 'image', buffer: pic.buffer, filename: pic.filename, mime: pic.mime, altText });
-  getDb().prepare('UPDATE draft_media SET source_url = ? WHERE id = ?').run(String(url).slice(0, 2000), added.id);
-  return added;
-}
-
 /** Put a different picture where this one is, keeping its place in the order. */
-export function replaceImage(listingId, mediaId, { buffer, filename, mime } = {}) {
+export function replaceImage(listingId, mediaId, { buffer, filename, mime, note = '' } = {}) {
   const db = getDb();
   const row = db.prepare("SELECT * FROM draft_media WHERE id = ? AND listing_id = ? AND kind = 'image'").get(Number(mediaId), Number(listingId));
   if (!row) throw notFound('That picture is not staged on this draft.');
@@ -165,8 +162,13 @@ export function replaceImage(listingId, mediaId, { buffer, filename, mime } = {}
   const ext = path.extname(filename || '') || '.png';
   const stored = path.join(dir, `${crypto.randomBytes(8).toString('hex')}${ext}`);
   fs.writeFileSync(stored, buffer);
-  if (row.file_path) { try { fs.unlinkSync(row.file_path); } catch { /* already gone */ } }
-  db.prepare('UPDATE draft_media SET file_path = ?, filename = ?, mime = ? WHERE id = ?').run(stored, filename || path.basename(stored), mime || 'image/png', row.id);
+  // the picture it replaces stays on disk (and in the undo entry) so the replacement can be taken back
+  const handle = undo.begin({
+    label: note || 'Draft picture replaced', kind: 'draft.media', note: 'Puts the earlier picture back in its place; the new one is dropped.',
+    targets: [{ table: 'draft_media', where: 'listing_id = ?', params: [row.listing_id] }],
+  });
+  db.prepare('UPDATE draft_media SET file_path = ?, filename = ?, mime = ?, source_url = NULL WHERE id = ?').run(stored, filename || path.basename(stored), mime || 'image/png', row.id);
+  undo.commit(handle, { affected: 1 });
   return shape(db.prepare('SELECT * FROM draft_media WHERE id = ?').get(row.id));
 }
 
@@ -183,8 +185,10 @@ export function remove(listingId, mediaId) {
   const row = db.prepare('SELECT * FROM draft_media WHERE id = ? AND listing_id = ?')
     .get(Number(mediaId), Number(listingId));
   if (!row) throw notFound('That photo/video is not staged on this draft.');
-  if (row.file_path) { try { fs.unlinkSync(row.file_path); } catch { /* already gone */ } }
+  // the file stays on disk so the removal can be taken back; sweepFiles() clears it once nothing can bring it back
+  const handle = undo.begin({ label: `${row.kind === 'image' ? 'Picture' : 'Video'} removed from a draft`, kind: 'draft.media', targets: [{ table: 'draft_media', where: 'listing_id = ?', params: [row.listing_id] }] });
   db.prepare('DELETE FROM draft_media WHERE id = ?').run(row.id);
+  undo.commit(handle, { affected: 1 });
   return { removed: row.id };
 }
 
@@ -201,18 +205,20 @@ export function move(listingId, mediaId, direction) {
     .get(row.listing_id, row.kind, row.rank);
   if (!neighbour) return list(listingId);
 
+  const handle = undo.begin({ label: 'Picture moved on a draft', kind: 'draft.media', targets: [{ table: 'draft_media', where: 'listing_id = ?', params: [row.listing_id] }] });
   db.transaction(() => {
     db.prepare('UPDATE draft_media SET rank = ? WHERE id = ?').run(neighbour.rank, row.id);
     db.prepare('UPDATE draft_media SET rank = ? WHERE id = ?').run(row.rank, neighbour.id);
   })();
+  undo.commit(handle, { affected: 2 });
   return list(listingId);
 }
 
 /** Drop everything staged for a draft -- used when Product Studio resends the same product. */
-export function clear(listingId) {
+export function clear(listingId, { keepFiles = false } = {}) {
   const db = getDb();
   const rows = db.prepare('SELECT * FROM draft_media WHERE listing_id = ?').all(Number(listingId));
-  for (const row of rows) if (row.file_path) { try { fs.unlinkSync(row.file_path); } catch { /* already gone */ } }
+  if (!keepFiles) for (const row of rows) if (row.file_path) { try { fs.unlinkSync(row.file_path); } catch { /* already gone */ } }
   db.prepare('DELETE FROM draft_media WHERE listing_id = ?').run(Number(listingId));
 }
 
@@ -260,4 +266,51 @@ export async function pushToEtsy(localListingId, realListingId) {
     }
   }
   return result;
+}
+
+/**
+ * Delete staged files nothing refers to any more: not a picture on a draft, not something an undo entry could bring
+ * back (or restore to Etsy), not an edit still waiting for a decision. Only files over an hour old are looked at.
+ */
+export function sweepFiles({ keep = [] } = {}) {
+  const dirs = [storeDir(), path.join(storeDir(), 'ai-edits')];
+  const db = getDb();
+  const used = new Set(db.prepare('SELECT file_path FROM draft_media WHERE file_path IS NOT NULL').all().map((r) => r.file_path));
+  const memory = db.prepare('SELECT snapshots, detail FROM undo_log').all().map((r) => `${r.snapshots ?? ''}${r.detail ?? ''}`).join('\n');
+  let removed = 0;
+  for (const dir of dirs) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const name of names) {
+      const file = path.join(dir, name);
+      try {
+        const st = fs.statSync(file);
+        if (!st.isFile() || Date.now() - st.mtimeMs < 3_600_000) continue;
+        if (used.has(file) || keep.includes(file) || memory.includes(JSON.stringify(file).slice(1, -1))) continue;
+        fs.unlinkSync(file);
+        removed += 1;
+      } catch { /* leave it */ }
+    }
+  }
+  return removed;
+}
+
+/**
+ * A picture found at a link, put on a draft that already is a real Etsy listing: copied once and uploaded to Etsy at
+ * once (Etsy only takes uploaded files). Taking it back deletes that picture on Etsy again.
+ */
+export async function addUrlToEtsy(listingId, url, altText = '') {
+  const id = Number(listingId);
+  const pic = await fetchPicture(url);
+  const have = getDb().prepare('SELECT COUNT(*) AS c FROM listing_images WHERE listing_id = ?').get(id).c;
+  if (have >= MAX_IMAGES) throw badRequest(`Etsy allows up to ${MAX_IMAGES} images on a listing, and this one already has ${have}.`);
+  const res = await listings.uploadImage(id, { buffer: pic.buffer, filename: pic.filename, mime: pic.mime, rank: have + 1, altText });
+  const imageId = res?.listing_image_id ?? null;
+  if (imageId) {
+    undo.commit(undo.begin({
+      label: 'Picture added to an Etsy draft by its link', kind: 'draft.picture.etsy',
+      note: 'Also changes Etsy: the picture is deleted from the listing there.',
+    }), { affected: 1, detail: { handler: 'draftPicture.deleteImage', args: { listingId: id, imageId } } });
+  }
+  return { uploaded: true, imageId };
 }

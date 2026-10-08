@@ -24,6 +24,13 @@ import { badRequest, notFound } from '../lib/errors.js';
 const DEPTH = 200;
 
 /**
+ * Changes that are more than rows (a picture that was put on Etsy) are taken back by a named handler that does the
+ * opposite thing. Services register theirs here; an entry says which one to run and with what, in its `detail`.
+ */
+const handlers = new Map();
+export const registerHandler = (name, fn) => { handlers.set(name, fn); };
+
+/**
  * Copy the rows a change is about to touch.
  *
  * `where` is a fragment and `params` its values, e.g.
@@ -85,13 +92,15 @@ export function tracked({ label, kind, targets = [], undoable = true, note = nul
 /** The history, newest first. */
 export function history({ limit = 50 } = {}) {
   return getDb().prepare(`
-    SELECT id, label, kind, undoable, undone, note, affected, created_at, undone_at
+    SELECT id, label, kind, undoable, undone, note, affected, created_at, undone_at, detail
     FROM undo_log WHERE shop_id IS ? ORDER BY id DESC LIMIT ?`).all(activeShopId(), limit)
     .map((r) => ({
       id: r.id,
       label: r.label,
       kind: r.kind,
       canUndo: !!r.undoable && !r.undone,
+      warning: r.undoable && !r.undone ? (r.note ?? null) : null,
+      touchesEtsy: /"handler"/.test(r.detail ?? ''),
       undone: !!r.undone,
       note: r.note,
       affected: r.affected,
@@ -103,10 +112,10 @@ export function history({ limit = 50 } = {}) {
 /** The change Ctrl+Z would take back, or null when there is nothing to undo. */
 export function next() {
   const row = getDb().prepare(`
-    SELECT id, label, kind, affected, created_at FROM undo_log
+    SELECT id, label, kind, affected, created_at, note, detail FROM undo_log
     WHERE shop_id IS ? AND undoable = 1 AND COALESCE(undone, 0) = 0
     ORDER BY id DESC LIMIT 1`).get(activeShopId());
-  return row ? { id: row.id, label: row.label, kind: row.kind, affected: row.affected, at: row.created_at } : null;
+  return row ? { id: row.id, label: row.label, kind: row.kind, affected: row.affected, at: row.created_at, warning: row.note ?? null, touchesEtsy: /"handler"/.test(row.detail ?? '') } : null;
 }
 
 /**
@@ -128,6 +137,18 @@ export function undo(id = null) {
     throw badRequest(`"${entry.label}" cannot be undone here. ${entry.note ?? 'It went to another service, so it has to be changed there.'}`);
   }
   if (entry.undone) throw badRequest(`"${entry.label}" has already been undone.`);
+
+  const detail = entry.detail ? JSON.parse(entry.detail) : null;
+  if (detail?.handler) {
+    const run = handlers.get(detail.handler);
+    if (!run) throw badRequest(`"${entry.label}" cannot be taken back any more (its handler is missing).`);
+    return (async () => {
+      const outcome = await run(detail.args ?? {});
+      db.prepare("UPDATE undo_log SET undone = 1, undone_at = datetime('now') WHERE id = ?").run(entry.id);
+      audit('undo', { detail: { id: entry.id, label: entry.label, handler: detail.handler } });
+      return { id: entry.id, label: entry.label, restored: 0, removed: 0, message: outcome?.message ?? `Took back "${entry.label}".` };
+    })();
+  }
 
   const snapshots = JSON.parse(entry.snapshots ?? '[]');
   let restored = 0;

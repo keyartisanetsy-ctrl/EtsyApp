@@ -60,6 +60,7 @@ export const SETTING_DEFS = {
   'drafts.image_edit.provider': { env: '', def: 'manus', label: 'Picture editing: provider (manus | openai)' },
   'drafts.image_edit.manus_model': { env: '', def: 'lite', label: 'Picture editing: Manus model (lite = Manus 2.0 Lite | standard | max)' },
   'drafts.image_edit.openai_model': { env: '', def: '', label: 'Picture editing: ChatGPT image model (blank = the OpenAI image model above)' },
+  'drafts.image_edit.openai_options': { env: '', def: '', label: 'Picture editing: ChatGPT settings (JSON, kept by the picture box)' },
   'drafts.image_edit.prompt': { env: '', def: '', label: 'Picture editing: starting instruction (blank = translate the text, keep product and background)' },
   'integrations.product_studio.key': { env: '', def: '', secret: true, label: 'Product Studio pairing key' },
   'ai.address.provider':   { env: '', def: '', label: 'AI provider for address checks (blank = the default one)' },
