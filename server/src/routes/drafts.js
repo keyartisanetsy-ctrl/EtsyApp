@@ -36,6 +36,7 @@ router.post('/choices/processing-profile', asyncRoute(async (req, res) => {
  * materials, who/when-made, shipping/return/section and settings. Ahead of
  * the /:id routes so "defaults" is never swallowed as a listing id.
  */
+router.post('/:id/finish', asyncRoute(async (req, res) => res.json(await drafts.finishPending(Number(req.params.id)))));
 router.get('/defaults', asyncRoute(async (req, res) => res.json(drafts.getDraftDefaults())));
 router.put('/defaults', asyncRoute(async (req, res) => res.json(drafts.setDraftDefaults(req.body ?? {}))));
 

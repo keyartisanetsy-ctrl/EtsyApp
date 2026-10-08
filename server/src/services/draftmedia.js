@@ -225,14 +225,14 @@ export function clear(listingId, { keepFiles = false } = {}) {
  * in rank order, then drop the staging rows -- listing_images/listing_videos
  * carry them from here on.
  */
-export async function pushToEtsy(localListingId, realListingId) {
+export async function pushToEtsy(localListingId, realListingId, { startRank = 1 } = {}) {
   const db = getDb();
   const rows = db.prepare(
     'SELECT * FROM draft_media WHERE listing_id = ? ORDER BY kind, rank, id',
   ).all(Number(localListingId));
 
   const result = { uploadedImages: 0, uploadedVideos: 0, failed: [] };
-  let imgRank = 1;
+  let imgRank = startRank;
   for (const row of rows) {
     try {
       let buffer;

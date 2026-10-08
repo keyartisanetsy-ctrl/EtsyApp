@@ -372,7 +372,29 @@ function logCall(entry) {
   } catch { /* logging must never break a request */ }
 }
 
+const COMMA_LIST_FIELDS = new Set(['tags', 'materials', 'styles', 'image_ids', 'production_partner_ids']);
 const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
+
+/**
+ * Etsy's request allowance is per app key and per day. When it runs out Etsy answers 429 with a Retry-After of hours.
+ * Sleeping that long (as a short rate-limit pause would) froze every request behind it, so instead the key is put on a
+ * cooldown: calls fail at once with the time it comes back, and the background jobs stand still until then.
+ */
+const cooldowns = new Map();   // keystring -> epoch ms
+const SHORT_WAIT_MS = 60_000;  // a pause up to this is an ordinary rate limit and is simply waited out
+
+export function etsyCooldown(account = null) {
+  const key = String(getCredentials(account ?? getStoredToken()).keystring ?? '');
+  const until = cooldowns.get(key) ?? 0;
+  return { active: until > Date.now(), until, key };
+}
+
+const clock = (ms) => new Date(ms).toISOString().slice(11, 16);
+function cooldownError(until, operationId, url) {
+  const mins = Math.max(1, Math.round((until - Date.now()) / 60_000));
+  const left = mins >= 90 ? `${Math.floor(mins / 60)} h ${mins % 60} min` : `${mins} min`;
+  return new EtsyApiError(429, `Etsy's request limit for this app is used up. It opens again in about ${left} (around ${clock(until)} UTC). Nothing is lost - what could not be sent is finished on its own as soon as Etsy allows it.`, { operationId, url, cooldownUntil: until });
+}
 
 /**
  * Perform one Etsy request with backoff. `auth: false` uses only the app
@@ -452,6 +474,9 @@ async function performRequest(pathname, {
     else url.searchParams.append(k, String(v));
   }
 
+  const cool = etsyCooldown(account);
+  if (cool.active) throw cooldownError(cool.until, operationId, url.toString());
+
   let attempt = 0;
   for (;;) {
     attempt += 1;
@@ -471,8 +496,10 @@ async function performRequest(pathname, {
         const p = new URLSearchParams();
         for (const [k, v] of Object.entries(body)) {
           if (v === undefined || v === null) continue;
-          // Etsy expects repeated keys for array form fields (tags, materials...).
-          if (Array.isArray(v)) v.forEach((i) => p.append(k, String(i)));
+          // Etsy reads tags, materials, styles and the id lists as ONE comma-separated value; repeated keys left a
+          // listing with a single tag. Other array fields keep repeated keys.
+          if (Array.isArray(v) && COMMA_LIST_FIELDS.has(k)) p.append(k, v.map(String).join(','));
+          else if (Array.isArray(v)) v.forEach((i) => p.append(k, String(i)));
           else p.append(k, typeof v === 'boolean' ? String(v) : String(v));
         }
         payload = p;
@@ -506,6 +533,13 @@ async function performRequest(pathname, {
       const wait = Number.isFinite(retryAfter) && retryAfter > 0
         ? retryAfter * 1000
         : Math.min(10_000, 2 ** attempt * 300);
+      if (res.status === 429 && wait > SHORT_WAIT_MS) {
+        // the day's allowance is gone - do not sit on it, put the key on cooldown
+        cooldowns.set(cool.key, Date.now() + wait);
+        log.warn(`Etsy request limit used up; this app key rests until ${clock(Date.now() + wait)} UTC`);
+        logCall({ operationId, method, url: url.toString(), status: res.status, durationMs, error: 'daily limit' });
+        throw cooldownError(Date.now() + wait, operationId, url.toString());
+      }
       log.warn(`${res.status} on ${operationId || pathname}, retry ${attempt} in ${wait}ms`);
       logCall({ operationId, method, url: url.toString(), status: res.status, durationMs, error: 'retrying' });
       await sleep(wait);

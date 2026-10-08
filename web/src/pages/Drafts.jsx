@@ -464,6 +464,25 @@ function DraftEditor({ id, onClose, onChanged, onDelete }) {
         // Keyed so "Drop my edits" can force every field below to forget
         // whatever was typed and reseed from what Etsy actually has.
         <div key={revertTick}>
+          {draft.pending?.any && (
+            <Banner kind="warn">
+              <div>
+                Not everything reached Etsy yet:
+                {draft.pending.media > 0 ? ` ${draft.pending.media} picture(s)` : ''}
+                {draft.pending.tags ? ' · tags' : ''}{draft.pending.materials ? ' · materials' : ''}.
+                This finishes by itself every few minutes (Etsy may be pausing this app for the day); you can also push it now.
+              </div>
+              <button className="btn xs mt8" disabled={busy} onClick={async () => {
+                setBusy(true);
+                try {
+                  const r = await api.post(`/drafts/${id}/finish`, {});
+                  if (r.waiting) toast({ kind: 'warn', title: 'Etsy is not answering yet', body: r.waiting, duration: 15000 });
+                  else toast({ kind: 'ok', title: r.uploaded ? `${r.uploaded} picture(s) sent` : 'Checked with Etsy', body: r.warnings?.join(' · ') || undefined });
+                  reload(); onChanged();
+                } catch (err) { showError(err, 'Could not finish it'); } finally { setBusy(false); }
+              }}>{busy ? <Spinner /> : 'Finish it now'}</button>
+            </Banner>
+          )}
           {plan?.problems?.length > 0 && (
             <Banner kind="warn">
               <div>Etsy will refuse this until these are sorted:</div>

@@ -6,7 +6,10 @@
 import { createLogger } from './lib/logger.js';
 import config, { ROOT } from './config.js';
 import { readSetting } from './services/settings.js';
-import { getStoredToken, refreshAllAccounts, listAccounts, withShop } from './etsy/client.js';
+import { getStoredToken, refreshAllAccounts, listAccounts, withShop, etsyCooldown } from './etsy/client.js';
+import { getSetting, setSetting } from './db/index.js';
+import { activeShopId } from './etsy/shop.js';
+import { finishAllPending } from './services/drafts.js';
 import { listShopifyAccounts, withShopifyShop } from './shopify/client.js';
 import { syncTracking, refreshStaleFlags } from './services/tracking/index.js';
 import { syncReceipts, syncAll, syncLedgerEntries } from './services/sync.js';
@@ -30,6 +33,8 @@ const timers = [];
 async function forEachConnectedShop(label, job) {
   for (const { shopId, shopName } of listAccounts()) {
     try {
+      // while Etsy's daily allowance is used up every call would fail at once - nothing to do until it reopens
+      if (await withShop(shopId, () => etsyCooldown().active)) { log.info(`${label} waits: Etsy's request limit is used up`); return; }
       await withShop(shopId, job);
     } catch (err) {
       log.warn(`${label} failed for shop ${shopName || shopId}: ${err.message}`);
@@ -93,10 +98,22 @@ export function startScheduler() {
   // never catch - a listing edited straight on Etsy, a renamed section - is
   // never more than this many hours stale even if nobody opens the app.
   const fullSyncHours = Math.max(1, Number(readSetting('etsy.auto_sync_hours')) || 4);
-  setTimeout(() => forEachConnectedShop('full sync', () => syncAll({})), 20_000).unref();
-  timers.push(setInterval(() => {
-    forEachConnectedShop('full sync', () => syncAll({}));
-  }, fullSyncHours * 60 * 60_000).unref());
+  // A restart (every deploy) must not start a whole pass again: it is only run at boot when the last one is old.
+  const fullSync = () => forEachConnectedShop('full sync', async () => {
+    const shopId = activeShopId();
+    await syncAll({ auto: true });
+    try { setSetting(`sync.last_full.${shopId ?? 'x'}`, String(Date.now())); } catch { /* the stamp is only an optimisation */ }
+  });
+  setTimeout(async () => {
+    const stale = listAccounts().some(({ shopId }) => Date.now() - Number(getSetting(`sync.last_full.${shopId}`, 0) || 0) > fullSyncHours * 3600_000);
+    if (stale) fullSync();
+  }, 20_000).unref();
+  timers.push(setInterval(fullSync, fullSyncHours * 60 * 60_000).unref());
+
+  // Pictures / tags that did not reach Etsy when a draft was sent (its allowance was used up, or Etsy hiccuped) are
+  // finished here on their own, as soon as Etsy answers again.
+  timers.push(setInterval(() => { finishAllPending().catch((err) => log.warn(`finishing drafts: ${err.message}`)); }, 5 * 60_000).unref());
+  setTimeout(() => { finishAllPending().catch(() => {}); }, 60_000).unref();
 
   // Etsy's own ledger: real per-order net and shop-level items (Etsy Ads,
   // listing fees). Used to be a manual "Sync ledger" button only; runs on its

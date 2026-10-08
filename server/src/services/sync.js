@@ -4,7 +4,7 @@
  */
 import { call, callAll } from '../etsy/client.js';
 import { requireShopId, activeShopId } from '../etsy/shop.js';
-import { getDb, json, audit } from '../db/index.js';
+import { getDb, json, audit, getSetting, setSetting } from '../db/index.js';
 import { money } from '../lib/money.js';
 import { createLogger } from '../lib/logger.js';
 import { readSetting } from './settings.js';
@@ -285,11 +285,14 @@ export async function syncAllVariationImages({ onProgress } = {}) {
  * variation/SKU, which is what the SKU manager reads.
  */
 export async function syncListings({
-  states = LISTING_STATES, withInventory = true, withVariationImages = true, onProgress,
+  states = LISTING_STATES, withInventory = true, withVariationImages = true, onProgress, auto = false,
 } = {}) {
   const shopId = requireShopId();
-  const summary = { shopId, states: {}, listings: 0, products: 0, errors: [], removed: 0 };
+  const summary = { shopId, states: {}, listings: 0, products: 0, errors: [], removed: 0, skippedUnchanged: 0 };
   const seen = new Set();
+  // What was cached before this pass, so a background pass can leave alone what Etsy says has not changed
+  const before = new Map(getDb().prepare('SELECT listing_id, updated_ts FROM listings WHERE shop_id IS ?').all(shopId).map((r) => [r.listing_id, r.updated_ts]));
+  const hasProducts = new Set(getDb().prepare('SELECT DISTINCT listing_id FROM listing_products').all().map((r) => r.listing_id));
 
   for (const state of states) {
     const listings = await callAll('getListingsByShop',
@@ -317,7 +320,18 @@ export async function syncListings({
     // once, and asking Etsy for another shop's inventory under this shop_id
     // just 404s, wasting calls and (until this shop's own listings happen to
     // come after them in the loop) never getting to variation images at all.
-    const ids = getDb().prepare('SELECT listing_id FROM listings WHERE shop_id IS ?').all(shopId).map((r) => r.listing_id);
+    let ids = getDb().prepare('SELECT listing_id, updated_ts FROM listings WHERE shop_id IS ?').all(shopId);
+    // Each listing costs two requests out of Etsy's daily allowance. A background pass only asks again for listings that
+    // are new, changed since the last pass, or have no variations cached - plus everything once a day, as a safety net.
+    const fullKey = `sync.inventory_full.${shopId}`;
+    const lastFull = Date.parse(getSetting(fullKey, '') || '') || 0;
+    const fullDue = Date.now() - lastFull > 24 * 3600_000;
+    if (auto && !fullDue) {
+      const all = ids.length;
+      ids = ids.filter((r) => !before.has(r.listing_id) || before.get(r.listing_id) !== r.updated_ts || !hasProducts.has(r.listing_id));
+      summary.skippedUnchanged = all - ids.length;
+    } else if (auto) setSetting(fullKey, new Date().toISOString());
+    ids = ids.map((r) => r.listing_id);
     for (const listingId of ids) {
       try {
         const inv = await call('getListingInventory', { listing_id: listingId });
@@ -332,7 +346,7 @@ export async function syncListings({
   }
 
   audit('sync.listings', { entity: 'listing', detail: summary });
-  log.info(`listings synced: ${summary.listings} listings, ${summary.products} variations`);
+  log.info(`listings synced: ${summary.listings} listings, ${summary.products} variations${summary.skippedUnchanged ? `, ${summary.skippedUnchanged} unchanged left alone` : ''}`);
   return summary;
 }
 

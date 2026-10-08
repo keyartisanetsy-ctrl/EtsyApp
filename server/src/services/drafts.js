@@ -355,6 +355,7 @@ export function get(listingId) {
     changed,
     extras,
     etsyChecklist: etsyChecklist(extras),
+    pending: pendingFor(row.listing_id),
     etsyEditUrl: row.listing_id > 0 ? `https://www.etsy.com/your/shops/me/listing-editor/edit/${row.listing_id}` : null,
     images: (etsy.images?.length ? etsy.images : localImages(row.listing_id)).map((i) => ({
       imageId: i.listing_image_id, rank: i.rank,
@@ -1128,9 +1129,24 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
     // Read it back: what Etsy kept is what counts. A tag or material that did not stick is sent again in the other
     // list format Etsy understands (one comma-separated value), and anything still missing is reported, not hidden.
     const warnings = [...tagsNote];
+    let failedRead = false;
     try {
       warnings.push(...await verifyListFields(result.listing_id ?? id, { tags: body.tags, materials: body.materials }, caller, shopId, draft.isLocalOnly || draft.changed));
-    } catch (err) { log.warn(`draft ${id}: could not read the listing back: ${err.message}`); }
+    } catch (err) {
+      log.warn(`draft ${id}: could not read the listing back: ${err.message}`);
+      warnings.push(`Could not confirm the tags with Etsy yet (${err.message}). They are sent again on their own.`);
+      failedRead = true;
+    }
+    // Whatever Etsy did not keep is remembered and finished by itself (see finishPending)
+    {
+      const finalId = result.listing_id ?? id;
+      const owed = {};
+      if (failedRead || warnings.some((w) => /^tags:/.test(w))) owed.tags = body.tags ?? null;
+      if (failedRead || warnings.some((w) => /^materials:/.test(w))) owed.materials = body.materials ?? null;
+      if (Object.keys(owed).length) {
+        const kept = readExtras(finalId); kept.pending = { ...(kept.pending ?? {}), ...owed }; writeExtras(finalId, kept);
+      }
+    }
 
     if (activate) {
       try { await listings.setState(result.listing_id ?? id, 'active'); }
@@ -1164,6 +1180,106 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
   } catch (err) {
     db.prepare('UPDATE listing_drafts SET push_error = ? WHERE listing_id = ?').run(err.message, id);
     throw err;
+  }
+}
+
+/** Staged pictures and owed tags/materials of one real listing. */
+export function pendingFor(listingId) {
+  const id = Number(listingId);
+  const media = id > 0 ? getDb().prepare('SELECT COUNT(*) c FROM draft_media WHERE listing_id = ?').get(id).c : 0;
+  const owed = readExtras(id).pending ?? null;
+  return { media, tags: !!owed?.tags?.length, materials: !!owed?.materials?.length, any: media > 0 || !!(owed?.tags?.length || owed?.materials?.length) };
+}
+
+/**
+ * One-time repair for a listing that was sent before the tags were sent correctly (Etsy kept a single tag): the tags
+ * that were typed are still in the undo history of the draft's earlier life, found by its title.
+ */
+function recoverLostTags(listingId) {
+  const db = getDb();
+  const extras = readExtras(listingId);
+  if (extras.tags_recovered) return null;
+  const row = db.prepare('SELECT etsy_snapshot, pushed_at FROM listing_drafts WHERE listing_id = ?').get(Number(listingId));
+  const snap = parse(row?.etsy_snapshot, {}) ?? {};
+  const recent = row?.pushed_at && Date.now() - Date.parse(`${row.pushed_at}Z`) < 48 * 3600_000;
+  if (!recent || !snap.title || (snap.tags?.length ?? 0) >= 13) return null;
+  const entries = db.prepare("SELECT snapshots FROM undo_log WHERE kind IN ('draft.stage', 'draft.revert') ORDER BY id DESC LIMIT 400").all();
+  for (const e of entries) {
+    for (const sn of parse(e.snapshots, []) ?? []) {
+      if (sn.table !== 'listing_drafts') continue;
+      for (const r of sn.rows ?? []) {
+        const st = parse(r.staged, {}) ?? {};
+        if (st.title === snap.title && Array.isArray(st.tags) && cleanTags(st.tags).length === 13) {
+          writeExtras(listingId, { ...extras, tags_recovered: true });
+          return cleanTags(st.tags);
+        }
+      }
+    }
+  }
+  writeExtras(listingId, { ...extras, tags_recovered: true });
+  return null;
+}
+
+/**
+ * Finish what did not reach Etsy for one listing: pictures still staged here, and tags/materials Etsy did not keep.
+ * Safe to run any time; if Etsy's allowance is used up it just says so and leaves everything where it is.
+ */
+export async function finishPending(listingId, { caller = call } = {}) {
+  const id = Number(listingId);
+  if (id < 0) return { skipped: 'not on Etsy yet' };
+  const shopId = requireShopId();
+  const out = { uploaded: 0, failed: [], warnings: [], waiting: null };
+  try {
+    // 1. pictures
+    if (getDb().prepare('SELECT COUNT(*) c FROM draft_media WHERE listing_id = ?').get(id).c) {
+      const have = getDb().prepare('SELECT COUNT(*) c FROM listing_images WHERE listing_id = ?').get(id).c || 0;
+      const m = await draftmedia.pushToEtsy(id, id, { startRank: have + 1 });
+      out.uploaded = m.uploadedImages; out.failed = m.failed;
+      if (m.uploadedImages) { try { await refreshSnapshot(id); } catch { /* next pull */ } }
+    }
+    // 2. tags / materials
+    let owed = readExtras(id).pending ?? {};
+    if (!owed.tags?.length) {
+      const found = recoverLostTags(id);
+      if (found) owed = { ...owed, tags: found };
+    }
+    const want = {};
+    if (owed.tags?.length) want.tags = owed.tags;
+    if (owed.materials?.length) want.materials = owed.materials;
+    if (Object.keys(want).length) {
+      const warn = await verifyListFields(id, want, caller, shopId, true);
+      out.warnings = warn;
+      const kept = readExtras(id);
+      if (!warn.length) { delete kept.pending; writeExtras(id, kept); try { await refreshSnapshot(id); } catch { /* next pull */ } }
+      else { kept.pending = want; writeExtras(id, kept); }
+    }
+  } catch (err) {
+    if (err.status === 429) out.waiting = err.message; else throw err;
+  }
+  return out;
+}
+
+/** The background job: every draft that owes Etsy something, for every connected shop. */
+export async function finishAllPending() {
+  const rows = getDb().prepare(`
+    SELECT d.listing_id, d.shop_id FROM listing_drafts d
+    WHERE d.listing_id > 0 AND (
+      EXISTS (SELECT 1 FROM draft_media m WHERE m.listing_id = d.listing_id)
+      OR EXISTS (SELECT 1 FROM draft_extras x WHERE x.listing_id = d.listing_id AND x.data LIKE '%"pending"%')
+      OR (d.pushed_at IS NOT NULL AND d.pushed_at > datetime('now', '-2 days') AND d.etsy_snapshot LIKE '%"tags"%'
+          AND NOT EXISTS (SELECT 1 FROM draft_extras x WHERE x.listing_id = d.listing_id AND x.data LIKE '%tags_recovered%')))`).all();
+  const { withShop, etsyCooldown } = await import('../etsy/client.js');
+  for (const r of rows) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const stop = await withShop(r.shop_id, async () => {
+        if (etsyCooldown().active) return true;
+        const res = await finishPending(r.listing_id);
+        if (res.uploaded || res.warnings?.length === 0) log.info(`draft ${r.listing_id}: finished ${res.uploaded} picture(s)`);
+        return !!res.waiting;
+      });
+      if (stop) return;
+    } catch (err) { log.warn(`draft ${r.listing_id}: could not finish yet: ${err.message}`); }
   }
 }
 
