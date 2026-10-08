@@ -20,6 +20,8 @@
 import { getDb } from '../db/index.js';
 import { activeShopId } from '../etsy/shop.js';
 import { activeShopifyShopId } from '../shopify/shop.js';
+import { withShop } from '../etsy/client.js';
+import { withShopifyShop } from '../shopify/client.js';
 import { readSetting } from './settings.js';
 import { DEFAULT_TEMPLATE, DEFAULT_TIMEZONE, formatCode as format, todayInZone } from '../lib/codeformat.js';
 
@@ -69,6 +71,49 @@ export function releaseIfUnused(channel, orderId) {
   return r.changes > 0;
 }
 
+/**
+ * A code stamped on an earlier day is dropped when the order has nothing at the warehouse from that day or before:
+ * every parcel of it arrived after the day on its code (or none is on the list), and none is packed yet. The next
+ * code it is given carries today's date and the next number of today. An order that already has a parcel from the
+ * day of its code keeps it - all its parcels carry one code. Returns { shopId } when a code was dropped.
+ */
+export function dropStaleCode(channel, orderId, { receivedOn = null } = {}) {
+  const db = getDb();
+  const today = codeDay();
+  const row = channel === 'etsy'
+    ? db.prepare('SELECT shop_id, day FROM order_codes WHERE receipt_id = ?').get(Number(orderId))
+    : db.prepare('SELECT shop_id, day FROM shopify_order_codes WHERE order_id = ?').get(String(orderId));
+  if (!row || !(row.day < today)) return null;
+  if (receivedOn && String(receivedOn) <= row.day) return null; // the parcel being matched is itself from the code's day
+  const parcels = db.prepare('SELECT received_on, packed_at FROM inbound_parcels WHERE match_channel = ? AND match_order_id = ?').all(channel, String(orderId));
+  if (parcels.some((p) => p.packed_at || !(String(p.received_on) > row.day))) return null;
+  if (channel === 'etsy') db.prepare('DELETE FROM order_codes WHERE receipt_id = ?').run(Number(orderId));
+  else db.prepare('DELETE FROM shopify_order_codes WHERE order_id = ?').run(String(orderId));
+  return { shopId: row.shop_id };
+}
+
+/**
+ * Give the orders on the packing list today's codes when their old ones are from an earlier day (see dropStaleCode),
+ * oldest arrival first so the numbers follow the order the parcels came in. Returns how many orders got a new code.
+ */
+export function restampStaleCodes() {
+  const db = getDb();
+  let n = 0;
+  const orders = db.prepare(`SELECT match_channel AS channel, match_order_id AS orderId FROM inbound_parcels
+                             WHERE match_channel IS NOT NULL GROUP BY match_channel, match_order_id ORDER BY MIN(id)`).all();
+  for (const o of orders) {
+    const dropped = dropStaleCode(o.channel, o.orderId);
+    if (!dropped) continue;
+    const issue = () => ensureOrderCode(o.channel, o.orderId);
+    const code = o.channel === 'etsy' ? withShop(dropped.shopId, issue) : withShopifyShop(dropped.shopId, issue);
+    if (code) {
+      db.prepare('UPDATE inbound_parcels SET match_code = ? WHERE match_channel = ? AND match_order_id = ?').run(code, o.channel, String(o.orderId));
+      n += 1;
+    }
+  }
+  return n;
+}
+
 // ------------------------------------------------------------------- lookup
 
 /** An Etsy order's code, or null while it has none (no parcel has been matched to it yet). */
@@ -109,13 +154,13 @@ export function shopifyCodesFor(orderIds = [], shopId = activeShopifyShopId()) {
  * The order's code, handing one out if it has none: today's date and the next
  * number of the day. Returns null only when the order is not in the local mirror.
  */
-export function ensureOrderCode(channel, orderId) {
+export function ensureOrderCode(channel, orderId, { receivedOn = null } = {}) {
   const db = getDb();
   if (channel === 'etsy') {
     const shopId = activeShopId();
     const id = Number(orderId);
     const existing = codeFor(id, { shopId });
-    if (existing) return existing;
+    if (existing && !dropStaleCode('etsy', id, { receivedOn })) return existing;
     if (!db.prepare('SELECT 1 FROM receipts WHERE receipt_id = ? AND shop_id IS ?').get(id, shopId)) return null;
     const day = codeDay();
     const seq = nextSeq(db, day);
@@ -129,7 +174,7 @@ export function ensureOrderCode(channel, orderId) {
     const shopId = activeShopifyShopId();
     const id = String(orderId);
     const existing = shopifyCodeFor(id, { shopId });
-    if (existing) return existing;
+    if (existing && !dropStaleCode('shopify', id, { receivedOn })) return existing;
     if (!db.prepare('SELECT 1 FROM shopify_orders WHERE order_id = ?').get(id)) return null;
     const day = codeDay();
     const seq = nextSeq(db, day);

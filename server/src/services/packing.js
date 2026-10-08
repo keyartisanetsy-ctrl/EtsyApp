@@ -25,7 +25,7 @@ import { activeShopifyShopId } from '../shopify/shop.js';
 import { readSetting } from './settings.js';
 import { run, parseJsonish } from './ai/index.js';
 import { resolveForTransaction } from './productimages.js';
-import { codesFor, shopifyCodesFor, ensureOrderCode, releaseIfUnused } from './ordercode.js';
+import { codesFor, shopifyCodesFor, ensureOrderCode, releaseIfUnused, restampStaleCodes } from './ordercode.js';
 import { cachedProductImageId } from './warehousecheck.js';
 import * as holds from './holds.js';
 import { supplyForOrders, supplyFor } from './ordersupply.js';
@@ -192,6 +192,7 @@ export function getParcel(id) {
 export function syncMatchedParcels() {
   const db = getDb();
   let fixed = 0;
+  try { fixed += restampStaleCodes(); } catch (err) { console.warn(`[codes] restamp: ${err.message}`); }
   for (const p of db.prepare('SELECT * FROM inbound_parcels WHERE match_channel IS NOT NULL').all()) {
     try {
       const photo = p.match_channel === 'etsy'
@@ -619,7 +620,7 @@ export async function matchParcel(id, { channels, from, to, provider, model, run
 
 // ------------------------------------------------------------ confirm/undo
 
-function lookupItem(channel, orderId, itemId) {
+function lookupItem(channel, orderId, itemId, receivedOn = null) {
   const db = getDb();
   if (channel === 'etsy') {
     const row = db.prepare(`
@@ -629,7 +630,7 @@ function lookupItem(channel, orderId, itemId) {
       .get(Number(itemId), Number(orderId), activeShopId());
     if (!row) throw notFound(`Item ${itemId} is not on Etsy order ${orderId}.`);
     // The order's first parcel is what gives it a code (today's date, next number of the day).
-    return { code: ensureOrderCode('etsy', row.receipt_id) || String(row.receipt_id), warehousePhotoId: row.warehouse_photo_id };
+    return { code: ensureOrderCode('etsy', row.receipt_id, { receivedOn }) || String(row.receipt_id), warehousePhotoId: row.warehouse_photo_id };
   }
   if (channel === 'shopify') {
     const row = db.prepare(`
@@ -638,7 +639,7 @@ function lookupItem(channel, orderId, itemId) {
       WHERE x.line_item_id = ? AND x.order_id = ? AND o.shop_id = ?`)
       .get(String(itemId), String(orderId), activeShopifyShopId());
     if (!row) throw notFound(`Item ${itemId} is not on Shopify order ${orderId}.`);
-    return { code: ensureOrderCode('shopify', row.order_id) || row.name || row.order_id, warehousePhotoId: row.warehouse_photo_id };
+    return { code: ensureOrderCode('shopify', row.order_id, { receivedOn }) || row.name || row.order_id, warehousePhotoId: row.warehouse_photo_id };
   }
   throw badRequest('channel must be "etsy" or "shopify".');
 }
@@ -703,7 +704,7 @@ export function confirmMatch(id, { channel, orderId, itemId, source = 'manual', 
   const db = getDb();
   const parcel = getRow(id);
   if (!channel || orderId == null || itemId == null) throw badRequest('channel, orderId and itemId are required.');
-  const target = lookupItem(channel, orderId, itemId);
+  const target = lookupItem(channel, orderId, itemId, parcel.received_on);
   if (parcel.match_channel) undoMatchEffects(parcel);
 
   // The photo may have just been cleared if this parcel's own photo was on the old item.
