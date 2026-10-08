@@ -22,6 +22,7 @@ import * as etsyOrders from './orders.js';
 import * as shopifyOrders from './shopify.js';
 import * as airtable from './airtable.js';
 import * as at from '../airtable/client.js';
+import { inOrderShop } from '../lib/ordershop.js';
 
 const log = createLogger('ordersupply');
 
@@ -65,7 +66,11 @@ export const supplyFor = (channel, orderId) => supplyForOrders([{ channel, order
 const clean = (v) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
 
 /** Save what was typed. A field that is left out (undefined) is not touched; an empty one clears it. */
-export function saveSupply(channel, orderId, { taobaoOrder, cost, currency } = {}) {
+export function saveSupply(channel, orderId, values = {}) {
+  return inOrderShop(channel, orderId, () => saveSupplyHere(channel, orderId, values));
+}
+
+function saveSupplyHere(channel, orderId, { taobaoOrder, cost, currency } = {}) {
   if (channel !== 'etsy' && channel !== 'shopify') throw badRequest('channel must be "etsy" or "shopify".');
   const ccy = String(currency || readSetting('orders.supply_cost_currency') || 'CNY').trim().toUpperCase().slice(0, 6) || 'CNY';
   if (taobaoOrder !== undefined) {
@@ -233,7 +238,12 @@ async function applyPlan(plan, { overwrite }) {
  *             'change' - send it, overwriting differing cells
  *             'keep'   - send it, leaving differing cells as they are
  */
-export async function saveAndReflect(channel, orderId, values = {}, { airtable: decision = 'none' } = {}) {
+export function saveAndReflect(channel, orderId, values = {}, opts = {}) {
+  // as the order's own shop, so its own Airtable destinations are the ones used
+  return inOrderShop(channel, orderId, () => saveAndReflectHere(channel, orderId, values, opts));
+}
+
+async function saveAndReflectHere(channel, orderId, values = {}, { airtable: decision = 'none' } = {}) {
   const supply = saveSupply(channel, orderId, values);
   if (decision === 'none') return { supply, airtable: null };
 

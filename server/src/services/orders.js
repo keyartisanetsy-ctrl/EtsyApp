@@ -576,6 +576,35 @@ export function setProblem(receiptIds, { state = 'warning', note = '' } = {}) {
 
 
 
+/**
+ * Orders still to ship in EVERY connected shop - the Etsy shops and the Shopify stores - not only the one that is open,
+ * which is what the other counters are about. An order counts when it is paid, not shipped, not canceled (Etsy's own
+ * cancellation or this app's) and has no tracking number yet - the same test the packing queue uses.
+ */
+export function unshippedByShop() {
+  const db = getDb();
+  const etsyWhere = `r.shop_id IS a.shop_id AND COALESCE(r.was_shipped,0) = 0 AND COALESCE(r.was_canceled,0) = 0
+          AND COALESCE(f.is_canceled,0) = 0 AND COALESCE(r.was_paid,1) = 1
+          AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.receipt_id = r.receipt_id AND s.tracking_code IS NOT NULL AND s.tracking_code <> '')`;
+  const etsy = db.prepare(`
+    SELECT a.shop_id AS shopId, COALESCE(NULLIF(a.label, ''), a.shop_name) AS name, a.is_active AS active,
+      (SELECT COUNT(*) FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id WHERE ${etsyWhere}) AS unshipped,
+      (SELECT MIN(r.created_ts) FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id WHERE ${etsyWhere}) AS oldestTs
+    FROM etsy_accounts a ORDER BY a.id`).all()
+    .map(({ oldestTs, ...r }) => ({ channel: 'etsy', ...r, active: !!r.active, oldest: oldestTs ? new Date(oldestTs * 1000).toISOString().slice(0, 10) : null }));
+  const shopWhere = `o.shop_id = a.id AND o.cancelled_at IS NULL AND COALESCE(f.is_canceled,0) = 0
+          AND UPPER(COALESCE(o.fulfillment_status,'')) NOT IN ('FULFILLED','RESTOCKED')
+          AND UPPER(COALESCE(o.financial_status,'')) NOT IN ('VOIDED','REFUNDED')
+          AND COALESCE(f.tracking_number,'') = ''`;
+  const stores = db.prepare(`
+    SELECT a.id AS shopId, COALESCE(NULLIF(a.label, ''), a.shop_name, a.shop_domain) AS name, a.is_active AS active,
+      (SELECT COUNT(*) FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id WHERE ${shopWhere}) AS unshipped,
+      (SELECT MIN(substr(o.created_at_shopify,1,10)) FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id WHERE ${shopWhere}) AS oldest
+    FROM shopify_accounts a ORDER BY a.id`).all().map((r) => ({ channel: 'shopify', ...r, active: !!r.active }));
+  const shops = [...etsy, ...stores];
+  return { shops, total: shops.reduce((n, x) => n + x.unshipped, 0) };
+}
+
 export function orderCounters() {
   const db = getDb();
   const shop = activeShopId();
@@ -597,6 +626,7 @@ export function orderCounters() {
     noTracking: one(`SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
                      WHERE r.shop_id IS ? AND ${notCanceled}
                      AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.receipt_id = r.receipt_id)`),
+    allShops: unshippedByShop(),
     alerts: one(`SELECT COUNT(*) AS c FROM tracking WHERE shop_id IS ?
                  AND (is_stale = 1 OR status IN ('exception','not_found','returned')) AND alert_ack = 0`),
   };

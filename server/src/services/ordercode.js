@@ -157,11 +157,13 @@ export function shopifyCodesFor(orderIds = [], shopId = activeShopifyShopId()) {
 export function ensureOrderCode(channel, orderId, { receivedOn = null } = {}) {
   const db = getDb();
   if (channel === 'etsy') {
-    const shopId = activeShopId();
+    // the order's own shop - the packing list holds the orders of every shop, whichever one is open
+    const own = db.prepare('SELECT shop_id FROM receipts WHERE receipt_id = ?').get(Number(orderId));
+    if (!own) return null;
+    const shopId = own.shop_id;
     const id = Number(orderId);
     const existing = codeFor(id, { shopId });
     if (existing && !dropStaleCode('etsy', id, { receivedOn })) return existing;
-    if (!db.prepare('SELECT 1 FROM receipts WHERE receipt_id = ? AND shop_id IS ?').get(id, shopId)) return null;
     const day = codeDay();
     const seq = nextSeq(db, day);
     const code = formatCode(day, seq);
@@ -171,11 +173,12 @@ export function ensureOrderCode(channel, orderId, { receivedOn = null } = {}) {
     return codeFor(id, { shopId }) ?? code;
   }
   if (channel === 'shopify') {
-    const shopId = activeShopifyShopId();
+    const own = db.prepare('SELECT shop_id FROM shopify_orders WHERE order_id = ?').get(String(orderId));
+    if (!own) return null;
+    const shopId = own.shop_id;
     const id = String(orderId);
     const existing = shopifyCodeFor(id, { shopId });
     if (existing && !dropStaleCode('shopify', id, { receivedOn })) return existing;
-    if (!db.prepare('SELECT 1 FROM shopify_orders WHERE order_id = ?').get(id)) return null;
     const day = codeDay();
     const seq = nextSeq(db, day);
     const code = formatCode(day, seq);
@@ -188,37 +191,33 @@ export function ensureOrderCode(channel, orderId, { receivedOn = null } = {}) {
 }
 
 /**
- * Whichever order of the active shops this names. Typed by hand, so it is read
+ * Whichever order of any connected shop this names. Typed by hand, so it is read
  * generously: an order code as written on a sheet (any letter case, stray
  * spaces ignored), or - for an order that has no code yet - its own number:
- * Shopify's "#2419", or an Etsy receipt number.
+ * Shopify's "#2419", or an Etsy receipt number. Codes are unique across every shop; a Shopify order
+ * number that two stores share goes to the open store's order.
  */
 export function findOrderByCode(code) {
   const text = String(code ?? '').trim();
   const wanted = text.replace(/\s+/g, '').toLowerCase();
   if (!wanted) return null;
   const db = getDb();
-  const etsyShop = activeShopId();
-  const shopifyShop = activeShopifyShopId();
+  const openStore = activeShopifyShopId();
 
-  const etsy = etsyShop != null
-    ? db.prepare('SELECT receipt_id FROM order_codes WHERE shop_id IS ? AND lower(code) = ?').get(etsyShop, wanted) : null;
+  const etsy = db.prepare('SELECT receipt_id FROM order_codes WHERE lower(code) = ?').get(wanted);
   if (etsy) return { channel: 'etsy', orderId: String(etsy.receipt_id) };
-  const shopify = shopifyShop != null
-    ? db.prepare('SELECT order_id FROM shopify_order_codes WHERE shop_id IS ? AND lower(code) = ?').get(shopifyShop, wanted) : null;
+  const shopify = db.prepare('SELECT order_id FROM shopify_order_codes WHERE lower(code) = ?').get(wanted);
   if (shopify) return { channel: 'shopify', orderId: shopify.order_id };
 
   // Not a code: an order number.
   const digits = wanted.replace(/^#/, '');
   if (!/^\d{1,15}$/.test(digits)) return null;
-  const byName = () => (shopifyShop != null
-    ? db.prepare('SELECT order_id FROM shopify_orders WHERE shop_id = ? AND name = ?').get(shopifyShop, `#${digits}`) : null);
+  const byName = () => db.prepare('SELECT order_id FROM shopify_orders WHERE name = ? ORDER BY (shop_id = ?) DESC, created_at_shopify DESC').get(`#${digits}`, openStore ?? -1);
   if (wanted.startsWith('#')) {
     const o = byName();
     return o ? { channel: 'shopify', orderId: o.order_id } : null;
   }
-  const receipt = etsyShop != null
-    ? db.prepare('SELECT receipt_id FROM receipts WHERE shop_id IS ? AND receipt_id = ?').get(etsyShop, Number(digits)) : null;
+  const receipt = db.prepare('SELECT receipt_id FROM receipts WHERE receipt_id = ?').get(Number(digits));
   if (receipt) return { channel: 'etsy', orderId: String(receipt.receipt_id) };
   const o = byName();
   return o ? { channel: 'shopify', orderId: o.order_id } : null;

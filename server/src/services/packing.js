@@ -30,7 +30,9 @@ import { cachedProductImageId } from './warehousecheck.js';
 import * as holds from './holds.js';
 import { supplyForOrders, supplyFor } from './ordersupply.js';
 import { briefFor } from './itemsupply.js';
+import { inOrderShop } from '../lib/ordershop.js';
 import * as etsyOrders from './orders.js';
+import { unshippedByShop } from './orders.js';
 import * as shopifyOrders from './shopify.js';
 
 const photoUrl = (id) => (id ? `/api/ai/attachments/${id}` : null);
@@ -359,8 +361,10 @@ export function loadDemand(range, only = null) {
   const received = receivedByItem(db);
   const out = [];
 
-  const etsyShop = activeShopId();
-  if ((only ? only.channel === 'etsy' : range.channels.includes('etsy')) && etsyShop != null) {
+  // every connected shop, not only the one that is open: an order is waiting for its parcel whichever shop it came from
+  const etsyShops = db.prepare('SELECT shop_id, COALESCE(NULLIF(label, \'\'), shop_name) AS name FROM etsy_accounts ORDER BY id').all();
+  if (only ? only.channel === 'etsy' : range.channels.includes('etsy')) for (const shop of etsyShops) {
+    const etsyShop = shop.shop_id;
     const where = only
       ? 'r.shop_id IS ? AND r.receipt_id = ?'
       : `r.shop_id IS ? AND COALESCE(r.was_shipped,0) = 0 AND COALESCE(r.was_canceled,0) = 0
@@ -384,7 +388,7 @@ export function loadDemand(range, only = null) {
     for (const r of rows) {
       const got = received.get(`etsy:${r.transaction_id}`) || 0;
       out.push({
-        channel: 'etsy', orderId: String(r.receipt_id), orderRef: codes[r.receipt_id] || String(r.receipt_id),
+        channel: 'etsy', shopId: etsyShop, shopName: shop.name || '', orderId: String(r.receipt_id), orderRef: codes[r.receipt_id] || String(r.receipt_id),
         orderedTs: r.created_ts, orderedAt: new Date(r.created_ts * 1000).toISOString(), buyer: r.buyer || '',
         itemId: String(r.transaction_id), sku: r.sku || '', title: r.title || '', variant: variationText(r.variations),
         quantity: r.quantity || 1, received: got, remaining: (r.quantity || 1) - got,
@@ -396,8 +400,9 @@ export function loadDemand(range, only = null) {
     }
   }
 
-  const shopifyShop = activeShopifyShopId();
-  if ((only ? only.channel === 'shopify' : range.channels.includes('shopify')) && shopifyShop != null) {
+  const stores = db.prepare('SELECT id, COALESCE(NULLIF(label, \'\'), shop_name, shop_domain) AS name FROM shopify_accounts ORDER BY id').all();
+  if (only ? only.channel === 'shopify' : range.channels.includes('shopify')) for (const store of stores) {
+    const shopifyShop = store.id;
     const where = only
       ? 'o.shop_id = ? AND o.order_id = ?'
       : `o.shop_id = ? AND o.cancelled_at IS NULL AND COALESCE(f.is_canceled,0) = 0
@@ -419,7 +424,7 @@ export function loadDemand(range, only = null) {
     for (const r of rows) {
       const got = received.get(`shopify:${r.line_item_id}`) || 0;
       out.push({
-        channel: 'shopify', orderId: r.order_id, orderRef: codes[r.order_id] || r.name || r.order_id,
+        channel: 'shopify', shopId: shopifyShop, shopName: store.name || '', orderId: r.order_id, orderRef: codes[r.order_id] || r.name || r.order_id,
         orderName: r.name || '',
         orderedTs: Math.floor(Date.parse(r.created_at_shopify) / 1000) || 0, orderedAt: r.created_at_shopify,
         buyer: r.customer_name || '', itemId: r.line_item_id, sku: r.sku || '', title: r.title || '',
@@ -626,8 +631,8 @@ function lookupItem(channel, orderId, itemId, receivedOn = null) {
     const row = db.prepare(`
       SELECT r.receipt_id, r.created_ts, x.transaction_id, x.warehouse_photo_id
       FROM receipt_transactions x JOIN receipts r ON r.receipt_id = x.receipt_id
-      WHERE x.transaction_id = ? AND x.receipt_id = ? AND r.shop_id IS ?`)
-      .get(Number(itemId), Number(orderId), activeShopId());
+      WHERE x.transaction_id = ? AND x.receipt_id = ?`)
+      .get(Number(itemId), Number(orderId));
     if (!row) throw notFound(`Item ${itemId} is not on Etsy order ${orderId}.`);
     // The order's first parcel is what gives it a code (today's date, next number of the day).
     return { code: ensureOrderCode('etsy', row.receipt_id, { receivedOn }) || String(row.receipt_id), warehousePhotoId: row.warehouse_photo_id };
@@ -636,8 +641,8 @@ function lookupItem(channel, orderId, itemId, receivedOn = null) {
     const row = db.prepare(`
       SELECT o.order_id, o.name, x.line_item_id, x.warehouse_photo_id
       FROM shopify_order_line_items x JOIN shopify_orders o ON o.order_id = x.order_id
-      WHERE x.line_item_id = ? AND x.order_id = ? AND o.shop_id = ?`)
-      .get(String(itemId), String(orderId), activeShopifyShopId());
+      WHERE x.line_item_id = ? AND x.order_id = ?`)
+      .get(String(itemId), String(orderId));
     if (!row) throw notFound(`Item ${itemId} is not on Shopify order ${orderId}.`);
     return { code: ensureOrderCode('shopify', row.order_id, { receivedOn }) || row.name || row.order_id, warehousePhotoId: row.warehouse_photo_id };
   }
@@ -671,6 +676,10 @@ function setItemPhoto(channel, orderId, itemId, attachmentId) {
  * and feed the AI warehouse check without anyone typing them twice.
  */
 function applyMatchEffects(parcel, channel, orderId, itemId, existingPhotoId) {
+  return inOrderShop(channel, orderId, () => applyMatchEffectsHere(parcel, channel, orderId, itemId, existingPhotoId));
+}
+
+function applyMatchEffectsHere(parcel, channel, orderId, itemId, existingPhotoId) {
   if (parcel.attachment_id && !existingPhotoId) setItemPhoto(channel, orderId, itemId, parcel.attachment_id);
   const token = trackingToken(parcel);
   if (token) {
@@ -680,6 +689,10 @@ function applyMatchEffects(parcel, channel, orderId, itemId, existingPhotoId) {
 }
 
 function undoMatchEffects(parcel) {
+  return inOrderShop(parcel.match_channel, parcel.match_order_id, () => undoMatchEffectsHere(parcel));
+}
+
+function undoMatchEffectsHere(parcel) {
   const db = getDb();
   const { match_channel: channel, match_order_id: orderId, match_item_id: itemId } = parcel;
   try {
@@ -984,6 +997,28 @@ export function packOrder({ channel, orderId, packed = true } = {}) {
  * items: ready to pack (everything is here), partly here, still waiting, or
  * already packed and only waiting for its tracking number.
  */
+/** Orders still to ship, in any connected shop, that were placed before the window starts. */
+function olderUnshipped(range) {
+  const db = getDb();
+  let n = 0;
+  if (range.channels.includes('etsy')) {
+    n += db.prepare(`
+      SELECT COUNT(*) AS c FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id
+      WHERE COALESCE(r.was_shipped,0) = 0 AND COALESCE(r.was_canceled,0) = 0 AND COALESCE(f.is_canceled,0) = 0 AND COALESCE(r.was_paid,1) = 1
+        AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.receipt_id = r.receipt_id AND s.tracking_code IS NOT NULL AND s.tracking_code <> '')
+        AND r.shop_id IN (SELECT shop_id FROM etsy_accounts) AND r.created_ts < ?`).get(range.fromTs).c;
+  }
+  if (range.channels.includes('shopify')) {
+    n += db.prepare(`
+      SELECT COUNT(*) AS c FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id
+      WHERE o.cancelled_at IS NULL AND COALESCE(f.is_canceled,0) = 0
+        AND UPPER(COALESCE(o.fulfillment_status,'')) NOT IN ('FULFILLED','RESTOCKED')
+        AND UPPER(COALESCE(o.financial_status,'')) NOT IN ('VOIDED','REFUNDED') AND COALESCE(f.tracking_number,'') = ''
+        AND o.shop_id IN (SELECT id FROM shopify_accounts) AND substr(o.created_at_shopify,1,10) < ?`).get(range.from).c;
+  }
+  return n;
+}
+
 export function packingQueue(params = {}) {
   const db = getDb();
   const range = resolveRange(params);
@@ -1004,7 +1039,7 @@ export function packingQueue(params = {}) {
     const key = `${d.channel}:${d.orderId}`;
     if (!orders.has(key)) {
       orders.set(key, {
-        channel: d.channel, orderId: d.orderId, ref: d.orderRef, orderedAt: d.orderedAt, buyer: d.buyer, items: [],
+        channel: d.channel, shopId: d.shopId, shopName: d.shopName, orderId: d.orderId, ref: d.orderRef, orderedAt: d.orderedAt, buyer: d.buyer, items: [],
         hold: onHold.get(key) ?? null,
       });
     }
@@ -1031,8 +1066,14 @@ export function packingQueue(params = {}) {
 
   return {
     range: { channels: range.channels, from: range.from, to: range.to },
-    connected: { etsy: activeShopId() != null, shopify: activeShopifyShopId() != null },
+    connected: {
+      etsy: db.prepare('SELECT 1 FROM etsy_accounts LIMIT 1').get() != null,
+      shopify: db.prepare('SELECT 1 FROM shopify_accounts LIMIT 1').get() != null,
+    },
     summary: { ...summary, orders: list.length, unmatchedParcels: unmatched },
+    // every shop the list looks through, and the orders still to ship that are older than the window (so they are not silently missing)
+    shops: unshippedByShop().shops.map((x) => ({ channel: x.channel, shopId: x.shopId, name: x.name, unshipped: x.unshipped, oldest: x.oldest })),
+    olderThanRange: olderUnshipped(range),
     orders: list.slice(0, 500),
   };
 }
