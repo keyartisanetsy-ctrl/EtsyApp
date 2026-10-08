@@ -235,9 +235,14 @@ export async function pushToEtsy(localListingId, realListingId) {
   let imgRank = 1;
   for (const row of rows) {
     try {
-      const buffer = row.file_path
-        ? fs.readFileSync(row.file_path)
-        : Buffer.from(await (await outboundFetch(row.source_url)).arrayBuffer());
+      let buffer;
+      if (row.file_path) buffer = fs.readFileSync(row.file_path);
+      else {
+        // a picture kept as a link is fetched now, as a JPEG/PNG where the host allows it
+        const res = await outboundFetch(row.source_url, { headers: { Accept: row.kind === 'image' ? 'image/jpeg,image/png,image/gif,image/*;q=0.8' : '*/*' } });
+        if (!res.ok) throw new Error(`the link answered ${res.status}`);
+        buffer = Buffer.from(await res.arrayBuffer());
+      }
       if (row.kind === 'image') {
         await listings.uploadImage(realListingId, {
           buffer, filename: row.filename || `image-${imgRank}.jpg`, mime: row.mime, rank: imgRank, altText: row.alt_text,

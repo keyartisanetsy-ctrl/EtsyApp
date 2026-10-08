@@ -10,6 +10,21 @@ import { CategoryPicker } from './NewListing.jsx';
 import { PersonalizationEditor } from '../components/Personalization.jsx';
 import { PictureMenu, ImageAiModal, DeleteDraftsModal, AddByUrlModal } from '../components/DraftPictures.jsx';
 
+const PRODUCTION_METHODS = [
+  { id: 'made_from_scratch', label: 'It’s made from scratch', note: 'My shop makes this item using only raw or basic craft materials, such as fabric, clay, resin, glass, etc.' },
+  { id: 'assembled_from_parts', label: 'It’s assembled from purchased parts', note: 'My shop assembles this item using some commercially available supplies, components, or parts, such as jewelry charms, patches, etc.' },
+  { id: 'altered', label: 'It’s an item that my shop alters', note: 'My shop alters or customizes a commercially available base item, such as a t-shirt or mug.' },
+  { id: 'curated_set', label: 'It’s a curated set of purchased goods', note: 'My shop curates a themed assortment that includes some commercially available goods.' },
+  { id: 'natural_material', label: 'It’s a natural material', note: 'My shop finds or cultivates this item from nature.' },
+];
+const TOOLS_USED = [
+  { id: 'handheld', label: 'Handheld or hand-guided tools', note: 'sewing needles, paintbrush, sewing machine, table saw, etc.' },
+  { id: 'computerized', label: 'Computerized tools or machines', note: 'laser printer, computerized embroidery machine, Cricut machine, CNC machine, 3D printer, etc.' },
+  { id: 'ai_generator', label: 'An AI generator', note: 'Midjourney, DALL-E, Canva AI, Chat-GPT, etc.' },
+  { id: 'none', label: 'None, I don’t use tools' },
+];
+
+
 const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007',
   '2000_2006', '1990s', '1980s', '1970s', '1960s', '1950s', '1940s', '1930s', '1920s', '1910s',
   '1900s', '1800s', '1700s', 'before_1700'];
@@ -365,6 +380,15 @@ function DraftEditor({ id, onClose, onChanged, onDelete }) {
         title: r.created ? `Created on Etsy as ${r.listingId}` : `Sent ${r.pushed.length} change(s) to Etsy`,
         body: activate ? 'It is live now.' : 'It is a draft on Etsy — activate it when you are ready.',
       });
+      for (const w of r.warnings ?? []) toast({ kind: 'warn', title: 'Check this on Etsy', body: w, duration: 15000 });
+      if (r.media?.failed?.length) {
+        toast({ kind: 'warn', title: `${r.media.failed.length} picture(s) did not reach Etsy`, duration: 20000,
+          body: `${r.media.failed.map((f) => f.error).join(' · ')} — they are still on this draft; add them again from the draft.` });
+      }
+      if (r.created && r.etsyChecklist?.length) {
+        toast({ kind: 'info', title: 'Four settings are only on Etsy’s own editor', duration: 20000,
+          body: `${r.etsyChecklist.map((c) => `${c.label}: ${c.value}`).join(' · ')} — open the draft here for the link.` });
+      }
       if (r.skipped?.length) {
         toast({
           kind: 'warn',
@@ -651,6 +675,55 @@ function DraftEditor({ id, onClose, onChanged, onDelete }) {
               </label>
             </div>
           </div>
+          <div className="section-title">Buyer offers, restocks &amp; how it is made</div>
+          <div className="small dim mb8">
+            Etsy’s public API has no field for these four, so they are kept here (every new draft starts with your usual choices)
+            and are listed below as a checklist to tick in Etsy’s own editor once the listing exists.
+          </div>
+          <Checkbox checked={merged.allow_offers !== false} onChange={(v) => save({ allow_offers: v })}
+                    label="Let buyers make offers on this listing" />
+          <Checkbox checked={merged.allow_restock_requests !== false} onChange={(v) => save({ allow_restock_requests: v })}
+                    label="Allow restock requests" />
+          <div className="field" style={{ marginTop: 10 }}>
+            <label>How does your shop produce this item?</label>
+            {PRODUCTION_METHODS.map((m) => (
+              <label key={m.id} className="flex gap8" style={{ alignItems: 'flex-start', marginBottom: 6 }}>
+                <input type="radio" name="production_method" checked={merged.production_method === m.id}
+                       onChange={() => save({ production_method: m.id })} style={{ marginTop: 3 }} />
+                <span><strong>{m.label}</strong><span className="dim small" style={{ display: 'block' }}>{m.note}</span></span>
+              </label>
+            ))}
+          </div>
+          <div className="field">
+            <label>What tools are used to make this item?</label>
+            <div className="small dim mb4">Select all that apply.</div>
+            {TOOLS_USED.map((t) => {
+              const on = (merged.tools_used ?? []).includes(t.id);
+              return (
+                <label key={t.id} className="flex gap8" style={{ alignItems: 'flex-start', marginBottom: 6 }}>
+                  <input type="checkbox" checked={on} style={{ marginTop: 3 }} onChange={() => {
+                    let next = on ? (merged.tools_used ?? []).filter((x) => x !== t.id) : [...(merged.tools_used ?? []), t.id];
+                    if (!on && t.id === 'none') next = ['none'];
+                    else if (!on) next = next.filter((x) => x !== 'none');
+                    save({ tools_used: next });
+                  }} />
+                  <span><strong>{t.label}</strong>{t.note ? <span className="dim small" style={{ display: 'block' }}>Examples: {t.note}</span> : null}</span>
+                </label>
+              );
+            })}
+          </div>
+          {!draft.isLocalOnly && draft.etsyEditUrl && (
+            <div className="card" style={{ padding: 10, margin: '8px 0 16px' }}>
+              <div className="small" style={{ marginBottom: 6 }}><strong>Tick these in Etsy’s editor</strong> (the API cannot):</div>
+              {(draft.etsyChecklist ?? []).map((c) => (
+                <div key={c.key} className="small flex gap8" style={{ justifyContent: 'space-between' }}><span>{c.label}</span><strong>{c.value}</strong></div>
+              ))}
+              <div className="flex gap8 mt8" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                <a className="btn xs" href={draft.etsyEditUrl} target="_blank" rel="noreferrer">Open Etsy’s editor ↗</a>
+                <Checkbox checked={!!merged.etsy_done} onChange={(v) => save({ etsy_done: v })} label="Done on Etsy" />
+              </div>
+            </div>
+          )}
           {draft.isLocalOnly ? (
             <Checkbox checked={merged.is_customizable ?? false} onChange={(v) => save({ is_customizable: v })}
                       label="Buyers may contact you for a customized order" />

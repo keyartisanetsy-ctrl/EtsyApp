@@ -737,6 +737,15 @@ CREATE TABLE IF NOT EXISTS listing_drafts (
 );
 CREATE INDEX IF NOT EXISTS idx_drafts_shop ON listing_drafts(shop_id, updated_at DESC);
 
+-- What this app remembers about a listing that Etsy's public API has no field for (buyer offers, restock requests,
+-- how it is produced, tools used). Kept apart from `staged` so it survives the push (a draft's id changes when it
+-- reaches Etsy, and `staged` is emptied then) and so it never counts as an Etsy-side change.
+CREATE TABLE IF NOT EXISTS draft_extras (
+  listing_id INTEGER PRIMARY KEY,
+  data       TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- The supply book: what you buy, from whom, for how much. This is the Taobao
 -- side of the business folded into the same database, keyed by SKU so it lines
 -- up with everything else rather than living in a second app.

@@ -178,7 +178,7 @@ export async function fullListing(listingId) {
 
   // These are reads, so they can go together.
   await Promise.all([
-    settle('listing', () => call('getListing', { listing_id: id, includes: ['Images', 'Videos', 'Inventory', 'Shipping'] })),
+    settle('listing', () => call('getListing', { listing_id: id, includes: ['Images', 'Videos'] })),
     settle('images', async () => (await call('getListingImages', { listing_id: id }))?.results ?? []),
     settle('videos', async () => (await call('getListingVideos', { listing_id: id }))?.results ?? []),
     settle('properties', async () => (await call('getListingProperties', { shop_id: requireShopId(), listing_id: id }))?.results ?? []),

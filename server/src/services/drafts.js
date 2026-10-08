@@ -67,7 +67,57 @@ export const EDITABLE = [
   // charCountMax, instructions, questionText }, applied by push() once the
   // listing exists.
   'personalization',
+  // Kept by this app only (see LOCAL_FIELDS): Etsy's public API has no field for them.
+  'allow_offers', 'allow_restock_requests', 'production_method', 'tools_used', 'etsy_done',
 ];
+
+/**
+ * Listing settings Etsy shows in its own editor but its public API cannot read or write. The app keeps what you pick
+ * (so every draft starts the way you always want it), never sends them in the listing body, and lists them as a
+ * checklist to tick on Etsy once the listing exists.
+ */
+export const LOCAL_FIELDS = ['allow_offers', 'allow_restock_requests', 'production_method', 'tools_used', 'etsy_done'];
+export const PRODUCTION_METHODS = [
+  { id: 'made_from_scratch', label: 'It\'s made from scratch', note: 'My shop makes this item using only raw or basic craft materials, such as fabric, clay, resin, glass, etc.' },
+  { id: 'assembled_from_parts', label: 'It\'s assembled from purchased parts', note: 'My shop assembles this item using some commercially available supplies, components, or parts, such as jewelry charms, patches, etc.' },
+  { id: 'altered', label: 'It\'s an item that my shop alters', note: 'My shop alters or customizes a commercially available base item, such as a t-shirt or mug.' },
+  { id: 'curated_set', label: 'It\'s a curated set of purchased goods', note: 'My shop curates a themed assortment that includes some commercially available goods.' },
+  { id: 'natural_material', label: 'It\'s a natural material', note: 'My shop finds or cultivates this item from nature.' },
+];
+export const TOOLS_USED = [
+  { id: 'handheld', label: 'Handheld or hand-guided tools', note: 'sewing needles, paintbrush, sewing machine, table saw, etc.' },
+  { id: 'computerized', label: 'Computerized tools or machines', note: 'laser printer, computerized embroidery machine, Cricut machine, CNC machine, 3D printer, etc.' },
+  { id: 'ai_generator', label: 'An AI generator', note: 'Midjourney, DALL-E, Canva AI, Chat-GPT, etc.' },
+  { id: 'none', label: 'None, I don\'t use tools' },
+];
+/** What every listing starts with (the shop's usual choices). The renewal default is applied when a draft is created. */
+export const EXTRA_DEFAULTS = {
+  allow_offers: true, allow_restock_requests: true, production_method: 'assembled_from_parts', tools_used: ['computerized'], etsy_done: false,
+};
+
+const readExtras = (id) => {
+  const row = getDb().prepare('SELECT data FROM draft_extras WHERE listing_id = ?').get(Number(id));
+  return parse(row?.data, {}) ?? {};
+};
+const writeExtras = (id, data) => {
+  getDb().prepare(`INSERT INTO draft_extras (listing_id, data, updated_at) VALUES (?,?, datetime('now'))
+    ON CONFLICT(listing_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`).run(Number(id), json(data));
+};
+
+/** Etsy's tag rule: letters, numbers, spaces, - and ' only, 20 characters at most, no repeats, 13 at most. */
+export function cleanTags(tags = []) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of asList(tags)) {
+    const t = String(raw).normalize('NFKC').replace(/[^\p{L}\p{Nd}\p{Zs}\-'™©®]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 20).trim();
+    if (!t || seen.has(t.toLowerCase())) continue;
+    seen.add(t.toLowerCase());
+    out.push(t);
+    if (out.length === 13) break;
+  }
+  return out;
+}
+const cleanMaterials = (m = []) => asList(m).map((x) => String(x).replace(/[^\p{L}\p{Nd}\p{Zs}]/gu, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, MAX_MATERIALS);
 
 // Etsy's own create-listing screen caps materials at 5 and quantity at 999
 // (its client-side error reads "Enter a quantity from 1 and 999"); neither
@@ -176,11 +226,16 @@ export function createLocal(fields = {}) {
   db.prepare(`
     INSERT INTO listing_drafts (listing_id, shop_id, source, etsy_state, etsy_snapshot, staged, created_at, updated_at)
     VALUES (?,?,?,?,?,?, datetime('now'), datetime('now'))`)
-    .run(listingId, shopId, 'local', 'not on etsy', json({}), json(cleanFields(fields)));
+    // renewal starts on Automatic (what the shop always uses); anything passed in wins
+    .run(listingId, shopId, 'local', 'not on etsy', json({}), json(withoutLocal(cleanFields({ should_auto_renew: true, ...fields }))));
+  { const own = cleanFields(Object.fromEntries(Object.entries(fields).filter(([k]) => LOCAL_FIELDS.includes(k))));
+    if (Object.keys(own).length) writeExtras(listingId, own); }
 
   audit('drafts.create_local', { entity: 'listing', entityId: listingId });
   return get(listingId);
 }
+
+const withoutLocal = (o) => Object.fromEntries(Object.entries(o).filter(([k]) => !LOCAL_FIELDS.includes(k)));
 
 /** Keep only the fields a listing actually has, in the shape Etsy wants. */
 function cleanFields(fields = {}) {
@@ -201,6 +256,14 @@ function cleanFields(fields = {}) {
       // { isPersonalizable, isRequired, charCountMax, instructions,
       // questionText } -- opaque for the same reason attributes is.
       if (value && typeof value === 'object' && Object.keys(value).length) out[key] = value;
+      continue;
+    }
+    if (key === 'allow_offers' || key === 'allow_restock_requests' || key === 'etsy_done') { out[key] = value === true || value === 'true'; continue; }
+    if (key === 'production_method') { if (PRODUCTION_METHODS.some((m) => m.id === value)) out[key] = value; continue; }
+    if (key === 'tools_used') {
+      let list = asList(value).filter((t) => TOOLS_USED.some((x) => x.id === t));
+      if (list.includes('none') && list.length > 1) list = list.at(-1) === 'none' ? ['none'] : list.filter((t) => t !== 'none');
+      if (list.length) out[key] = [...new Set(list)];
       continue;
     }
     if (key === 'tags' || key === 'materials') value = asList(value);
@@ -228,6 +291,7 @@ export function get(listingId) {
 
   const etsy = parse(row.etsy_snapshot, {}) ?? {};
   const staged = parse(row.staged, {}) ?? {};
+  const extras = { ...EXTRA_DEFAULTS, ...readExtras(row.listing_id) };
 
   const fromEtsy = {
     title: etsy.title ?? '',
@@ -287,9 +351,12 @@ export function get(listingId) {
     etsy: fromEtsy,
     staged,
     // What would be live if you pushed now.
-    merged: { ...fromEtsy, ...staged },
+    merged: { ...fromEtsy, ...extras, ...staged },
     changed,
-    images: (etsy.images ?? []).map((i) => ({
+    extras,
+    etsyChecklist: etsyChecklist(extras),
+    etsyEditUrl: row.listing_id > 0 ? `https://www.etsy.com/your/shops/me/listing-editor/edit/${row.listing_id}` : null,
+    images: (etsy.images?.length ? etsy.images : localImages(row.listing_id)).map((i) => ({
       imageId: i.listing_image_id, rank: i.rank,
       url: i.url_fullxfull || i.url_570xN, thumb: i.url_75x75,
     })),
@@ -303,6 +370,24 @@ export function get(listingId) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/** The pictures this app has already cached for a real listing - used when the draft's own snapshot carries none. */
+function localImages(listingId) {
+  if (Number(listingId) < 0) return [];
+  try { return getDb().prepare('SELECT * FROM listing_images WHERE listing_id = ? ORDER BY rank').all(Number(listingId)); } catch { return []; }
+}
+
+/** What to tick in Etsy's own editor, in the words Etsy uses. */
+function etsyChecklist(x) {
+  const method = PRODUCTION_METHODS.find((m) => m.id === x.production_method);
+  const tools = (x.tools_used ?? []).map((t) => TOOLS_USED.find((u) => u.id === t)?.label).filter(Boolean);
+  return [
+    { key: 'allow_offers', label: 'Let buyers make offers on this listing', value: x.allow_offers ? 'On' : 'Off' },
+    { key: 'allow_restock_requests', label: 'Allow restock requests', value: x.allow_restock_requests ? 'On' : 'Off' },
+    { key: 'production_method', label: 'How does your shop produce this item?', value: method?.label ?? 'Not chosen' },
+    { key: 'tools_used', label: 'What tools are used to make this item?', value: tools.length ? tools.join(', ') : 'Not chosen' },
+  ];
 }
 
 /** Every draft on the desk. */
@@ -344,12 +429,25 @@ export function stage(listingId, fields = {}) {
   const handle = undo.begin({
     label: `Edit draft ${id}`,
     kind: 'draft.stage',
-    targets: [{ table: 'listing_drafts', where: 'listing_id = ?', params: [id] }],
+    targets: [{ table: 'listing_drafts', where: 'listing_id = ?', params: [id] }, { table: 'draft_extras', where: 'listing_id = ?', params: [id] }],
   });
 
-  const staged = { ...(parse(row.staged, {}) ?? {}), ...cleanFields(fields) };
+  const cleaned = cleanFields(fields);
+  const staged = { ...(parse(row.staged, {}) ?? {}), ...withoutLocal(cleaned) };
   // An explicit null clears a staged change and goes back to Etsy's value.
   for (const [k, v] of Object.entries(fields)) if (v === null) delete staged[k];
+
+  // The settings Etsy's API cannot take are kept on their own (and survive the push)
+  const own = Object.fromEntries(Object.entries(cleaned).filter(([k]) => LOCAL_FIELDS.includes(k)));
+  const clearOwn = Object.entries(fields).filter(([k, v]) => v === null && LOCAL_FIELDS.includes(k)).map(([k]) => k);
+  if (Object.keys(own).length || clearOwn.length) {
+    const kept = readExtras(id);
+    Object.assign(kept, own);
+    for (const k of clearOwn) delete kept[k];
+    // changing any of them means the Etsy checklist needs doing again
+    if (Object.keys(own).some((k) => k !== 'etsy_done') && !('etsy_done' in own)) delete kept.etsy_done;
+    writeExtras(id, kept);
+  }
 
   db.prepare("UPDATE listing_drafts SET staged = ?, updated_at = datetime('now'), push_error = NULL WHERE listing_id = ?")
     .run(json(staged), id);
@@ -386,7 +484,7 @@ export async function refreshSnapshot(listingId) {
   if (id < 0) return get(id); // nothing on Etsy yet for a local-only draft
 
   const db = getDb();
-  const snapshot = await call('getListing', { listing_id: id, includes: ['Images', 'Videos', 'Shipping', 'Inventory'] });
+  const snapshot = await call('getListing', { listing_id: id, includes: SNAPSHOT_INCLUDES });
   const prevRow = db.prepare('SELECT etsy_snapshot FROM listing_drafts WHERE listing_id = ?').get(id);
   const prevSnapshot = parse(prevRow?.etsy_snapshot, {}) ?? {};
   db.prepare("UPDATE listing_drafts SET etsy_snapshot = ?, updated_at = datetime('now') WHERE listing_id = ?")
@@ -404,8 +502,10 @@ export function remove(listingId) {
     targets: [
       { table: 'listing_drafts', where: 'listing_id = ?', params: [id] },
       { table: 'draft_media', where: 'listing_id = ?', params: [id] },
+      { table: 'draft_extras', where: 'listing_id = ?', params: [id] },
     ],
   });
+  getDb().prepare('DELETE FROM draft_extras WHERE listing_id = ?').run(id);
   // The pictures' rows go with the draft (the cascade below); their files stay on disk so taking the delete back can
   // bring the pictures too - draftmedia.sweepFiles() removes them once nothing can.
   draftmedia.clear(id, { keepFiles: true });
@@ -468,6 +568,9 @@ const DEFAULT_FIELD_LABELS = {
 };
 
 const DEFAULTS_KEY = 'drafts.defaults';
+
+/** What getListing may be asked to bring along: Etsy answers 400 to anything outside its list (it dropped Inventory/Shipping). */
+const SNAPSHOT_INCLUDES = ['Images', 'Videos'];
 
 /**
  * A seller who lists one kind of thing over and over (this shop's keycaps)
@@ -866,6 +969,16 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
   const draft = get(id);
   const body = { ...draft.merged };
   delete body.state;
+  // kept by this app only - Etsy's API has no field for them (see LOCAL_FIELDS)
+  for (const k of LOCAL_FIELDS) delete body[k];
+  // Etsy refuses (or quietly drops) a tag or material with a character it does not allow, so they are cleaned first
+  const tagsNote = [];
+  if (Array.isArray(body.tags)) {
+    const clean = cleanTags(body.tags);
+    if (clean.join('|') !== body.tags.join('|')) tagsNote.push(`tags tidied for Etsy (${body.tags.length} -> ${clean.length})`);
+    body.tags = clean;
+  }
+  if (Array.isArray(body.materials)) body.materials = cleanMaterials(body.materials);
   // Not a real ShopListing field -- Etsy takes category attributes one
   // property at a time via updateListingProperty, once the listing itself
   // exists, never as part of the create/update body.
@@ -946,7 +1059,7 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
       media = await draftmedia.pushToEtsy(id, newId);
       let snapshot = result;
       try {
-        snapshot = await caller('getListing', { listing_id: newId, includes: ['Images', 'Videos', 'Shipping', 'Inventory'] });
+        snapshot = await caller('getListing', { listing_id: newId, includes: SNAPSHOT_INCLUDES });
         saveListing(snapshot);
       } catch (err) { log.warn(`could not re-fetch listing ${newId} with images/video after creating it: ${err.message}`); }
 
@@ -962,6 +1075,7 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
       db.transaction(() => {
         db.pragma('defer_foreign_keys = ON');
         db.prepare('UPDATE draft_media SET listing_id = ? WHERE listing_id = ?').run(newId, id);
+        db.prepare('UPDATE draft_extras SET listing_id = ? WHERE listing_id = ?').run(newId, id);
         db.prepare(`UPDATE listing_drafts SET listing_id = ?, source = 'etsy', etsy_state = ?,
                     etsy_snapshot = ?, staged = '{}', pushed_at = datetime('now'), push_error = NULL
                     WHERE listing_id = ?`)
@@ -982,7 +1096,8 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
         if (key === 'attributes' || key === 'personalization') continue;
         if (key === 'readiness_state_id') { pendingReadinessStateId = draft.merged[key]; continue; }
         if (UPDATE_UNSUPPORTED.includes(key)) { skipped.push(key); continue; }
-        onlyChanged[key] = draft.merged[key];
+        if (LOCAL_FIELDS.includes(key)) continue;
+        onlyChanged[key] = key === 'tags' ? body.tags : key === 'materials' ? body.materials : draft.merged[key];
       }
       if (Object.keys(onlyChanged).length) {
         result = await listings.updateListing(id, onlyChanged, { caller });
@@ -1010,6 +1125,13 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
         .run(json({ ...prevSnapshot, ...result }), result.state ?? draft.etsyState, id);
     }
 
+    // Read it back: what Etsy kept is what counts. A tag or material that did not stick is sent again in the other
+    // list format Etsy understands (one comma-separated value), and anything still missing is reported, not hidden.
+    const warnings = [...tagsNote];
+    try {
+      warnings.push(...await verifyListFields(result.listing_id ?? id, { tags: body.tags, materials: body.materials }, caller, shopId, draft.isLocalOnly || draft.changed));
+    } catch (err) { log.warn(`draft ${id}: could not read the listing back: ${err.message}`); }
+
     if (activate) {
       try { await listings.setState(result.listing_id ?? id, 'active'); }
       catch (err) { log.warn(`could not activate ${result.listing_id ?? id}: ${err.message}`); }
@@ -1034,11 +1156,44 @@ export async function push(listingId, { activate = false, caller = call } = {}) 
       state: result.state ?? null,
       url: result.url ?? `https://www.etsy.com/listing/${result.listing_id ?? id}`,
       media,
+      warnings,
+      // the settings only Etsy's own editor can take, with the link to it
+      etsyChecklist: etsyChecklist({ ...EXTRA_DEFAULTS, ...readExtras(result.listing_id ?? id) }),
+      etsyEditUrl: `https://www.etsy.com/your/shops/me/listing-editor/edit/${result.listing_id ?? id}`,
     };
   } catch (err) {
     db.prepare('UPDATE listing_drafts SET push_error = ? WHERE listing_id = ?').run(err.message, id);
     throw err;
   }
+}
+
+const sameSet = (a = [], b = []) => {
+  const x = new Set(a.map((t) => String(t).toLowerCase()));
+  return x.size === new Set(b.map((t) => String(t).toLowerCase())).size && [...x].every((t) => b.some((u) => String(u).toLowerCase() === t));
+};
+
+/**
+ * After a push: ask Etsy what it actually kept for tags/materials, repair once if short, and say so if it is still off.
+ * Returns human-readable warnings (empty when everything stuck).
+ */
+async function verifyListFields(listingId, sent, caller, shopId, touched) {
+  const out = [];
+  const wasSent = (k) => Array.isArray(sent[k]) && sent[k].length && (touched === true || (Array.isArray(touched) && touched.includes(k)));
+  const fields = ['tags', 'materials'].filter(wasSent);
+  if (!fields.length) return out;
+  let live = await caller('getListing', { listing_id: listingId });
+  for (const k of fields) {
+    if (sameSet(live?.[k] ?? [], sent[k])) continue;
+    try {
+      await caller('updateListing', { shop_id: shopId, listing_id: listingId }, { body: { [k]: sent[k].join(',') } });
+    } catch (err) { log.warn(`listing ${listingId}: resending ${k} failed: ${err.message}`); }
+    live = await caller('getListing', { listing_id: listingId });
+    if (!sameSet(live?.[k] ?? [], sent[k])) {
+      out.push(`${k}: Etsy kept ${(live?.[k] ?? []).length} of ${sent[k].length}. Add the missing ones on Etsy.`);
+    }
+  }
+  if (fields.length && !out.length) { try { await refreshSnapshot(listingId); } catch { /* the desk refreshes on its next pull */ } }
+  return out;
 }
 
 /**

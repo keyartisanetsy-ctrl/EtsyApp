@@ -520,7 +520,7 @@ export const deleteProperty = (listingId, propertyId) =>
 
 /** Pull one listing fresh from Etsy, including everything attached to it. */
 export async function refreshListing(listingId) {
-  const listing = await call('getListing', { listing_id: listingId, includes: ['Images', 'Videos', 'Inventory', 'Shipping'] });
+  const listing = await call('getListing', { listing_id: listingId, includes: ['Images', 'Videos'] });
   saveListing(listing);
   try { await syncVariationImages(listingId); } catch { /* optional */ }
   return localListing(listingId);
