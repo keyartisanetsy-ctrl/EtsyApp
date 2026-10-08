@@ -19,6 +19,9 @@ function loadFilters() {
   try { return { ...fallback, ...JSON.parse(localStorage.getItem(FILTER_KEY) || '{}'), to: localDay(new Date()) }; } catch { return fallback; }
 }
 
+/** An example code for today, like 26-1008-01 - the shape the app hands out. */
+const exampleCode = () => { const d = new Date(); return `${String(d.getFullYear()).slice(2)}-${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-01`; };
+
 const scoreKind = (s) => (s >= 0.8 ? 'green' : s >= 0.55 ? 'amber' : 'grey');
 
 /** Whichever look for an order ran last - the AI's or the free matcher's. */
@@ -111,7 +114,7 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
       <div className="card-head"><h3>New arrival</h3></div>
       <div className="card-sub">
         Paste the photo from WeChat (Ctrl+V), then the line under it - carrier, last 4 digits and piece count, like 中通 3324 1件.
-        Know the order already? Type its code (like 26-1007-01) - or its order number (#2419) if it has no code yet - and the arrival goes straight onto that order.
+        Know the order already? Type its code (like {exampleCode()}) - or its order number (#2419) if it has no code yet - and the arrival goes straight onto that order.
         An order gets its code the moment its first parcel is added (today's date, numbered 01, 02, 03...).
         Otherwise the free matcher looks for the order as soon as you add it - tracking number, order state, text read off the photo and colours, no AI credits.
         The AI only runs when you press Find match - and, while "Split photos with several products" is on, once on each new photo to see whether it shows more than one product (then each product becomes its own arrival, ready to match). Split one by hand with ✂ Split on its row.
@@ -136,7 +139,7 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
           <input ref={textRef} className="input" value={text} placeholder="中通 3324 1件"
                  onChange={(e) => setText(e.target.value)}
                  onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
-          <input className="input mono" value={code} placeholder="Order code or number (optional) - 26-1007-01 / #2419"
+          <input className="input mono" value={code} placeholder={`Order code or number (optional) - ${exampleCode()} / #2419`}
                  onChange={(e) => setCode(e.target.value)}
                  onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
           <input className="input" value={warehouse} placeholder="Warehouse (仓库) - optional, remembered"
@@ -440,7 +443,7 @@ function CodeCell({ parcel, busy, onCode }) {
   return (
     <div>
       <input className="input sm mono" style={{ width: 118, fontWeight: parcel.code ? 700 : 400, borderColor: bad ? 'var(--bad)' : undefined }}
-             value={value} placeholder="26-0710-01" disabled={busy} aria-label={`Order code for ${parcel.label}`}
+             value={value} placeholder={exampleCode()} disabled={busy} aria-label={`Order code for ${parcel.label}`}
              title="Type the order code (or the order number, #2419) and press Enter. Clear it to release this arrival."
              onChange={(e) => { setValue(e.target.value); setBad(false); }}
              onKeyDown={(e) => {
