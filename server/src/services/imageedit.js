@@ -117,7 +117,9 @@ async function sourceOf(listingId, mediaId) {
     }
     const res = await outboundFetch(row.source_url);
     if (!res.ok) throw badRequest(`The picture could not be fetched (${res.status}).`);
-    return { buffer: Buffer.from(await res.arrayBuffer()), filename: 'image.jpg', row, rank: row.rank };
+    let name = 'image.jpg';
+    try { name = decodeURIComponent(path.basename(new URL(row.source_url).pathname)) || name; } catch { /* keep the generic name */ }
+    return { buffer: Buffer.from(await res.arrayBuffer()), filename: row.filename || name, row, rank: row.rank };
   }
   const row = db.prepare('SELECT * FROM listing_images WHERE listing_image_id = ? AND listing_id = ?').get(Number(mediaId), listingId);
   if (!row) throw notFound('That picture is not on this listing.');
