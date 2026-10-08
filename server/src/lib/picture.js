@@ -5,6 +5,8 @@
  * address ends in .jpg and the server still answers with WebP - so anything else is converted here, once, on the way in:
  * to JPEG, or to PNG when the picture has see-through parts. The picture itself is not touched beyond that.
  */
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { badRequest } from './errors.js';
 
 /** What kind of picture these bytes are (from their first bytes), or null. */
@@ -25,16 +27,36 @@ export function pictureKind(buf) {
 const ETSY_OK = new Set(['image/jpeg', 'image/png', 'image/gif']);
 export const isEtsyPicture = (kind) => !!kind && ETSY_OK.has(kind.mime);
 
-let sharpLoaded;
-async function loadSharp() {
-  if (sharpLoaded === undefined) {
-    try { sharpLoaded = (await import('sharp')).default; } catch { sharpLoaded = null; }
-  }
-  return sharpLoaded;
+const WORKER = fileURLToPath(new URL('./picture-worker.mjs', import.meta.url));
+const MAX_INPUT = 40 * 1024 * 1024;
+
+// one conversion at a time: each one briefly needs a couple of hundred MB, and this server has little to spare
+let lane = Promise.resolve();
+const oneAtATime = (job) => { const run = lane.then(job, job); lane = run.catch(() => {}); return run; };
+
+/** Run the conversion in its own process: if a picture is too big for the memory this server has, only that process dies. */
+function convertInChild(buffer) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--max-old-space-size=160', WORKER], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const out = [];
+    let err = '';
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('it took too long')); }, 60_000);
+    child.stdout.on('data', (d) => out.push(d));
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0 && out.length) return resolve(Buffer.concat(out));
+      return reject(new Error(signal ? 'it is too large to convert here' : (err.trim().slice(0, 200) || `the converter stopped (${code})`)));
+    });
+    child.stdin.on('error', () => { /* the child ended early; close handles it */ });
+    child.stdin.end(buffer);
+  });
 }
 
 /**
- * Bytes that Etsy will take: JPEG, PNG and GIF pass through unchanged, everything else is converted.
+ * Bytes that Etsy will take: JPEG, PNG and GIF pass through unchanged, everything else is converted (to JPEG, or to PNG
+ * when the picture has see-through parts; very large ones are scaled to 4096 px on the long side).
  * Returns { buffer, mime, ext, converted, from }. `filename` (if given) comes back with the right extension.
  */
 export async function forEtsy(buffer, filename = '') {
@@ -42,20 +64,13 @@ export async function forEtsy(buffer, filename = '') {
   if (!kind) throw badRequest('That file is not a picture (JPG, PNG, GIF or WebP).');
   const withExt = (ext) => (filename ? `${String(filename).replace(/\.[A-Za-z0-9_]+$/, '')}${ext}` : `image${ext}`);
   if (isEtsyPicture(kind)) return { buffer, mime: kind.mime, ext: kind.ext, filename: filename || `image${kind.ext}`, converted: false, from: kind.mime };
+  if (buffer.length > MAX_INPUT) throw badRequest(`That ${kind.mime.replace('image/', '').toUpperCase()} picture is over 40 MB - too large to convert.`);
 
-  const sharp = await loadSharp();
-  if (!sharp) throw badRequest(`This server cannot convert ${kind.mime.replace('image/', '').toUpperCase()} pictures (the image library is missing). Save it as JPG or PNG first.`);
-  try {
-    // page 0 only: an animated WebP becomes its first frame
-    const img = sharp(buffer, { failOn: 'none', pages: 1 }).rotate();   // .rotate() applies the camera's orientation
-    const meta = await img.metadata();
-    const clear = !!meta.hasAlpha;
-    const out = clear
-      ? await img.png({ compressionLevel: 9 }).toBuffer()
-      : await img.flatten({ background: '#ffffff' }).jpeg({ quality: 93, chromaSubsampling: '4:4:4', mozjpeg: true }).toBuffer();
-    const ext = clear ? '.png' : '.jpg';
-    return { buffer: out, mime: clear ? 'image/png' : 'image/jpeg', ext, filename: withExt(ext), converted: true, from: kind.mime };
-  } catch (err) {
-    throw badRequest(`That ${kind.mime.replace('image/', '').toUpperCase()} picture could not be converted: ${err.message}`);
+  let res;
+  try { res = await oneAtATime(() => convertInChild(buffer)); } catch (err) {
+    throw badRequest(`That ${kind.mime.replace('image/', '').toUpperCase()} picture could not be converted: ${err.message}. Save it as JPG or PNG and use + Upload.`);
   }
+  const clear = res[0] === 'P'.charCodeAt(0);
+  const ext = clear ? '.png' : '.jpg';
+  return { buffer: res.subarray(1), mime: clear ? 'image/png' : 'image/jpeg', ext, filename: withExt(ext), converted: true, from: kind.mime };
 }
