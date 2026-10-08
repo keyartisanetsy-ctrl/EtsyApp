@@ -874,6 +874,10 @@ export default function Packing() {
   /** What the answer from Airtable means to the person who pressed the button. */
   const reportAirtable = (parcel, a) => {
     if (!a) { toast({ kind: 'ok', title: 'Saved' }); return; }
+    if (a.autoMapped?.length) {
+      toast({ kind: 'ok', title: 'Airtable columns mapped for you', duration: 12000,
+        body: a.autoMapped.map((m) => `${m.field} → "${m.column}" (${m.destination})`).join(' · ') });
+    }
     const where = (a.destinations ?? []).filter((d) => d.status === 'sent').map((d) => d.destination).join(', ');
     if (a.status === 'sent') toast({ kind: 'ok', title: 'Saved and sent to Airtable', body: where });
     else if (a.status === 'nothing_to_change') toast({ kind: 'ok', title: 'Saved', body: a.kept?.length ? 'Airtable was left as it is.' : 'Airtable already has exactly these values.' });

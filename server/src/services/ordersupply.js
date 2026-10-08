@@ -95,6 +95,42 @@ const sameValue = (a, b) => {
 };
 const show = (v) => (Array.isArray(v) ? v.join(', ') : String(v ?? ''));
 
+// The Airtable columns people already keep these in, by name, best first. A destination that has no column mapped for the
+// Taobao order number or the cost is given one when a column with one of these names exists (and is free to write to).
+const COLUMN_NAMES = {
+  [SOURCE.taobao]: ['taoworld sipariş kodu', 'taobao order no', 'taobao order number', 'taobao order', 'taobao sipariş no', 'taobao sipariş',
+    'çin order no', 'çin sipariş no', 'supplier order', 'supplier order no', 'tedarik sipariş no'],
+  [SOURCE.cost]: ['product cost (¥)', 'product cost (yuan)', 'taobao cost', 'supply cost', 'tedarik maliyeti', 'payment', 'ali payment'],
+};
+const TEXT_TYPES = new Set(['singleLineText', 'multilineText']);
+const NUMBER_TYPES = new Set(['currency', 'number']);
+
+/**
+ * Map the Taobao order number and the supply cost of a destination that lacks them, by the names of its columns, and
+ * keep the mapping. Never takes a column that is already mapped to something else. Returns what was added.
+ */
+async function autoMapSupply(dest) {
+  const missing = [SOURCE.taobao, SOURCE.cost].filter((src) => !dest.fieldMap.some((e) => e.source === src));
+  if (!missing.length) return [];
+  const table = await at.getTable(dest.baseId, dest.tableId);
+  const taken = new Set(dest.fieldMap.map((e) => e.target));
+  const added = [];
+  for (const src of missing) {
+    const okType = src === SOURCE.taobao ? TEXT_TYPES : NUMBER_TYPES;
+    const field = COLUMN_NAMES[src].map((name) => table.fields.find((f) => f.writable && okType.has(f.type) && !taken.has(f.name)
+      && f.name.trim().toLowerCase() === name)).find(Boolean);
+    if (!field) continue;
+    taken.add(field.name);
+    added.push({ target: field.name, source: src, confidence: 1, why: 'matched by the column name when the Taobao order / cost was first sent' });
+  }
+  if (added.length) {
+    getDb().prepare("UPDATE airtable_destinations SET field_map = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(JSON.stringify([...dest.fieldMap, ...added]), dest.id);
+    log.info(`mapped ${added.map((a) => `${a.source} -> ${a.target}`).join(', ')} on destination ${dest.id}`);
+  }
+  return added;
+}
+
 /**
  * What would be written to Airtable for this order, per destination, per
  * Airtable row, and what each target cell holds right now.
@@ -103,9 +139,17 @@ async function planFor(channel, orderId) {
   const key = channel === 'etsy' ? Number(orderId) : String(orderId);
   const destinations = airtable.listDestinations().filter((d) => d.channel === channel);
   const out = [];
-  for (const dest of destinations) {
+  for (let dest of destinations) {
+    let autoMapped = [];
+    if (!dest.fieldMap.some((e) => e.source === SOURCE.taobao) || !dest.fieldMap.some((e) => e.source === SOURCE.cost)) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        autoMapped = await autoMapSupply(dest);
+        if (autoMapped.length) dest = airtable.getDestination(dest.id);
+      } catch (err) { log.warn(`could not look for the Taobao/cost columns of ${dest.label}: ${err.message}`); }
+    }
     const mapped = dest.fieldMap.filter((e) => Object.values(SOURCE).includes(e.source));
-    const base = { id: dest.id, label: dest.label, baseId: dest.baseId, tableId: dest.tableId, rows: [] };
+    const base = { id: dest.id, label: dest.label, baseId: dest.baseId, tableId: dest.tableId, rows: [], autoMapped };
     if (!mapped.some((e) => CORE.has(e.source))) { out.push({ ...base, status: 'not_mapped' }); continue; }
 
     const links = airtable.linksFor(dest.id, [key]);
@@ -199,19 +243,21 @@ export async function saveAndReflect(channel, orderId, values = {}, { airtable: 
     return { supply, airtable: { status: 'error', message: err.message } };
   }
   if (!plan.length) return { supply, airtable: { status: 'no_destination' } };
+  const autoMapped = plan.flatMap((d) => (d.autoMapped ?? []).map((m) => ({ destination: d.label, column: m.target, field: LABEL[m.source] })));
+
   const ready = plan.filter((d) => d.status === 'ready');
   if (!ready.length) {
     const status = plan.some((d) => d.status === 'not_in_airtable') ? 'not_in_airtable' : 'not_mapped';
-    return { supply, airtable: { status, destinations: plan.map((d) => ({ destination: d.label, status: d.status })) } };
+    return { supply, airtable: { status, destinations: plan.map((d) => ({ destination: d.label, status: d.status })), autoMapped } };
   }
 
   const conflicts = conflictsOf(ready);
-  if (decision === 'check' && conflicts.length) return { supply, airtable: { status: 'needs_decision', conflicts } };
+  if (decision === 'check' && conflicts.length) return { supply, airtable: { status: 'needs_decision', conflicts, autoMapped } };
 
   try {
     const summary = await applyPlan(plan, { overwrite: decision === 'change' });
     const sent = summary.some((s) => s.status === 'sent');
-    return { supply, airtable: { status: sent ? 'sent' : 'nothing_to_change', destinations: summary, kept: conflicts.length && decision === 'keep' ? conflicts : [] } };
+    return { supply, airtable: { status: sent ? 'sent' : 'nothing_to_change', destinations: summary, kept: conflicts.length && decision === 'keep' ? conflicts : [], autoMapped } };
   } catch (err) {
     log.warn(`Airtable supply update failed: ${err.message}`);
     return { supply, airtable: { status: 'error', message: err.message } };
