@@ -45,6 +45,8 @@ export function ImageAiModal({ listingId, image, autoRun = false, onClose, onApp
   const [provider, setProvider] = useState('manus');
   const [model, setModel] = useState('lite');
   const [prompt, setPrompt] = useState('');
+  const [params, setParams] = useState({});
+  const [pick, setPick] = useState(0);
   const [job, setJob] = useState(null);
   const [busy, setBusy] = useState(false);
   const started = useRef(false);
@@ -57,6 +59,7 @@ export function ImageAiModal({ listingId, image, autoRun = false, onClose, onApp
       setProvider(o.defaults.provider);
       setModel(o.defaults.provider === 'manus' ? o.defaults.manusModel : o.defaults.openaiModel);
       setPrompt(o.defaults.prompt);
+      setParams(o.defaults.params ?? {});
     }).catch((err) => showError(err, 'Could not load the AI choices'));
     return () => { live = false; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -71,14 +74,15 @@ export function ImageAiModal({ listingId, image, autoRun = false, onClose, onApp
   const start = async (override = {}) => {
     setBusy(true);
     try {
-      const j = await api.post(`/drafts/${listingId}/media/${image.id}/ai-edit`, { provider, model, prompt, ...override });
+      const j = await api.post(`/drafts/${listingId}/media/${image.id}/ai-edit`, { provider, model, prompt, params, ...override });
+      setPick(0);
       setJob(j);
     } catch (err) { showError(err, 'Could not start the edit'); } finally { setBusy(false); }
   };
 
   // "Translate" from the menu starts straight away with what was used last time.
   useEffect(() => {
-    if (autoRun && opts && !started.current) { started.current = true; start({ provider: opts.defaults.provider, model: opts.defaults.provider === 'manus' ? opts.defaults.manusModel : opts.defaults.openaiModel, prompt: opts.defaults.prompt }); }
+    if (autoRun && opts && !started.current) { started.current = true; start({ provider: opts.defaults.provider, model: opts.defaults.provider === 'manus' ? opts.defaults.manusModel : opts.defaults.openaiModel, prompt: opts.defaults.prompt, params: opts.defaults.params }); }
   }, [opts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -92,7 +96,7 @@ export function ImageAiModal({ listingId, image, autoRun = false, onClose, onApp
   const apply = async (mode) => {
     setBusy(true);
     try {
-      await api.post(`/drafts/image-edit/jobs/${job.jobId}/apply`, { mode });
+      await api.post(`/drafts/image-edit/jobs/${job.jobId}/apply`, { mode, index: pick });
       toast({ kind: 'ok', title: mode === 'replace' ? 'Picture replaced' : 'Edited picture added' });
       onApplied();
       onClose();
@@ -133,8 +137,17 @@ export function ImageAiModal({ listingId, image, autoRun = false, onClose, onApp
             {done ? (
               <>
                 <div className="small muted mb4">Edited · {job.provider === 'manus' ? 'Manus' : 'ChatGPT'} {job.model} · {seconds(job.seconds)}</div>
-                <img src={withBase(job.previewUrl)} alt="Edited" style={{ width: '100%', borderRadius: 8, border: '1px solid var(--border)', background: '#000' }} />
-                <div className="small muted mt4">Look it over - nothing changes until you choose one of the buttons below.</div>
+                <img src={withBase(job.previews?.[pick]?.url ?? job.previewUrl)} alt="Edited" style={{ width: '100%', borderRadius: 8, border: '1px solid var(--border)', background: '#000' }} />
+                {(job.previews?.length ?? 0) > 1 && (
+                  <div className="flex gap4 mt4" style={{ flexWrap: 'wrap' }}>
+                    {job.previews.map((pv, i) => (
+                      <button key={pv.index} className={`btn xs ${pick === i ? 'primary' : ''}`} aria-pressed={pick === i} onClick={() => setPick(i)}>Version {i + 1}</button>
+                    ))}
+                  </div>
+                )}
+                {job.previews?.[pick] && <div className="small muted mt4">{job.previews[pick].width}×{job.previews[pick].height} · {String(job.previews[pick].mime || '').replace('image/', '').toUpperCase()} · {Math.round(job.previews[pick].bytes / 1024)} KB</div>}
+                {job.ignored?.length > 0 && <Banner kind="warn">This model does not take: {job.ignored.join(', ')} - it was left out.</Banner>}
+                <div className="small muted mt4">Look it over - nothing changes until you choose one of the buttons below. Afterwards it can be taken back (Ctrl+Z).</div>
               </>
             ) : running ? (
               <div className="card" style={{ padding: 16 }}>
@@ -160,6 +173,27 @@ export function ImageAiModal({ listingId, image, autoRun = false, onClose, onApp
                   </select>
                 </label>
                 {!configured && <Banner kind="warn">This one has no API key yet - add it in Settings &gt; AI, or pick the other.</Banner>}
+                {provider === 'openai' && opts.openaiParams && (
+                  <fieldset style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', margin: '0 0 8px' }}>
+                    <legend className="small muted" style={{ padding: '0 4px' }}>Picture settings</legend>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 8 }}>
+                      {Object.entries(opts.openaiParams).map(([key, def]) => (def.choices ? (
+                        <label key={key} className="flex col small">{def.label}
+                          <select className="input" aria-label={def.label.split(' (')[0]} value={params[key] ?? def.def} onChange={(e) => setParams({ ...params, [key]: e.target.value })}>
+                            {def.choices.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+                          </select>
+                        </label>
+                      ) : (
+                        <label key={key} className="flex col small">{def.label}
+                          <input className="input" type="number" aria-label={key === 'n' ? 'Number of images' : 'Compression'} min={def.min ?? 1} max={def.max ?? 100}
+                                 value={params[key] ?? def.def} placeholder={key === 'outputCompression' ? 'default' : undefined}
+                                 onChange={(e) => setParams({ ...params, [key]: e.target.value })} />
+                        </label>
+                      )))}
+                    </div>
+                    <div className="small muted mt4">Medium quality and JPEG are the standard. Etsy takes JPEG, PNG and GIF - not WebP. A setting the chosen model does not know is left out.</div>
+                  </fieldset>
+                )}
                 <label className="flex col small">What to do with the picture
                   <textarea className="input" rows={6} value={prompt} onChange={(e) => setPrompt(e.target.value)} aria-label="Instruction" />
                 </label>
@@ -255,7 +289,7 @@ export function AddByUrlModal({ kind, listingId, room, onClose, onDone }) {
                 aria-label={kind === 'image' ? 'Picture links' : 'Video link'} onChange={(e) => setText(e.target.value)} />
       <div className="small muted mt8">
         {kind === 'image'
-          ? 'Each picture is copied to this app and kept under this site\'s own address - it carries on from here whatever happens to the original link, and it is this copy that goes to Etsy. JPG, PNG or GIF.'
+          ? 'On a draft that exists only here the picture stays a link until the draft is sent to Etsy; on a draft that is already on Etsy it is uploaded there at once. Either way you can take it back (Ctrl+Z). JPG, PNG or GIF.'
           : 'A video stays a link until the draft is sent.'}
       </div>
       {results.map((r) => <div key={r.url} className="small" style={{ color: r.ok ? 'var(--good)' : 'var(--bad)' }}>{r.ok ? '✓' : '✕'} {r.url.slice(0, 70)}{r.error ? ` - ${r.error}` : ''}</div>)}

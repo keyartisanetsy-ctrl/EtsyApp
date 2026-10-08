@@ -1005,7 +1005,7 @@ function MediaManager({ draft, onChanged }) {
       { label: '✦ Translate the text to English (AI)', run: () => setAiEdit({ image: it, autoRun: true }) },
       { label: '✦ Edit with AI…', run: () => setAiEdit({ image: it, autoRun: false }) },
       { sep: true },
-      { label: 'Open the picture', run: () => window.open(withBase(it.url), '_blank', 'noreferrer') },
+      { label: 'Open the picture', run: () => window.open(it.url.startsWith('/') ? withBase(it.url) : it.url, '_blank', 'noreferrer') },
       { label: 'Move earlier', disabled: index === 0, run: () => moveImage(items, index, -1) },
       { label: 'Move later', disabled: index === items.length - 1, run: () => moveImage(items, index, 1) },
       { sep: true },

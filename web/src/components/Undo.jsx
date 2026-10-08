@@ -17,6 +17,7 @@ export default function UndoHost() {
   const [open, setOpen] = useState(false);
   const [history, setHistory] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState(null); // the change about to be taken back, until the user agrees
   const toast = useToast();
   const showError = useErrorToast();
 
@@ -38,6 +39,7 @@ export default function UndoHost() {
   const doUndo = useCallback(async (id = null) => {
     setBusy(true);
     try {
+      setConfirm(null);
       const r = await api.post('/undo', { id });
       toast({ kind: 'ok', title: 'Undone', body: r.message });
       refresh();
@@ -59,12 +61,12 @@ export default function UndoHost() {
 
       e.preventDefault();
       if (e.shiftKey) { setOpen(true); return; }   // Ctrl+Shift+Z opens the list
-      if (next) doUndo(null);
+      if (next) setConfirm({ id: null, ...next });   // always ask first
       else toast({ kind: 'info', title: 'Nothing to undo' });
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [next, doUndo, toast]);
+  }, [next, toast]);
 
   return (
     <>
@@ -101,7 +103,7 @@ export default function UndoHost() {
                     {h.undone
                       ? <span className="badge grey">undone</span>
                       : h.canUndo
-                        ? <button className="btn xs" disabled={busy} onClick={() => doUndo(h.id)}>
+                        ? <button className="btn xs" disabled={busy} onClick={() => setConfirm(h)}>
                             {busy ? <Spinner /> : 'Take back'}
                           </button>
                         : <span className="badge amber" title={h.note || 'This went to another service.'}>elsewhere</span>}
@@ -111,6 +113,23 @@ export default function UndoHost() {
             </tbody>
           </table>
         )}
+      </Modal>
+
+      <Modal open={!!confirm} onClose={() => !busy && setConfirm(null)} title="Take this back?"
+             footer={(
+               <>
+                 <button className="btn" disabled={busy} onClick={() => setConfirm(null)}>No, keep it</button>
+                 <button className="btn danger" disabled={busy} onClick={() => doUndo(confirm?.id ?? null)}>{busy ? <Spinner /> : 'Yes, take it back'}</button>
+               </>
+             )}>
+        <p style={{ margin: '0 0 8px' }}><strong>{confirm?.label}</strong></p>
+        {confirm?.touchesEtsy && (
+          <p className="small" style={{ margin: '0 0 8px', color: 'var(--warn)' }}>
+            This also changes the listing on Etsy.{confirm.warning ? ` ${confirm.warning}` : ''}
+          </p>
+        )}
+        {!confirm?.touchesEtsy && confirm?.warning && <p className="small" style={{ margin: '0 0 8px' }}>{confirm.warning}</p>}
+        <p className="small muted" style={{ margin: 0 }}>It goes back to how it was before this change. Anything you did after it stays.</p>
       </Modal>
     </>
   );
