@@ -6,6 +6,7 @@ import {
 } from '../components/ui.jsx';
 import SplitPhoto from '../components/SplitPhoto.jsx';
 import ItemSupplyBox from '../components/ItemSupply.jsx';
+import UnshippedShops from '../components/UnshippedShops.jsx';
 import { normalizePhoto, splitPhoto } from '../lib/photo.js';
 
 const FILTER_KEY = 'packing.filters';
@@ -600,6 +601,7 @@ function QueueOrder({ order, busy, onPack }) {
     <div className="card mb12" style={{ padding: 12 }}>
       <div className="flex gap8" style={{ flexWrap: 'wrap' }}>
         <ChannelBadge channel={order.channel} />
+        {order.shopName && <span className="badge grey">{order.shopName}</span>}
         <strong className="mono">{order.ref}</strong>
         <span className="muted small">{order.buyer} · {shortDay(order.orderedAt)}</span>
         <span className={`badge ${STATUS_KIND[order.status]}`}>{STATUS_LABEL[order.status]}</span>
@@ -993,10 +995,11 @@ export default function Packing() {
           </span>
         </div>
         <div className="small muted mt4">
-          Only orders placed in this range that have not shipped (no tracking yet, not canceled) are compared. Oldest orders come first.
+          Orders of every connected shop placed in this range that have not shipped (no tracking yet, not canceled) are compared. Oldest orders come first.
           {queue.data && !queue.data.connected.etsy && filters.etsy && ' Etsy is not connected.'}
           {queue.data && !queue.data.connected.shopify && filters.shopify && ' Shopify is not connected.'}
         </div>
+        {queue.data?.shops?.length > 0 && <div className="mt8"><UnshippedShops shops={queue.data.shops} olderThanRange={queue.data.olderThanRange} compact /></div>}
       </div>
 
       <div className="grid c5 mb16">

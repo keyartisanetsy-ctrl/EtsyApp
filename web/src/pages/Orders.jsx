@@ -10,6 +10,7 @@ import {
 import { SendToAirtable } from './Airtable.jsx';
 import WarehousePhotoCell from '../components/WarehousePhoto.jsx';
 import { OrderCode, ArrivalChip, ArrivalParcels } from '../components/OrderCode.jsx';
+import UnshippedShops from '../components/UnshippedShops.jsx';
 import { SupplyCell, WarehouseCell, ProductImageCell } from '../components/OrderSupplyPreview.jsx';
 import MessagePreviewModal from '../components/MessagePreview.jsx';
 import MessageTemplatesModal from '../components/MessageTemplates.jsx';
@@ -203,7 +204,7 @@ export default function Orders() {
   return (
     <TablePage
       title="Orders"
-      subtitle={counters ? `${counters.newOrders} new · ${counters.notDone} not done · ${counters.noTracking} without tracking` : ''}
+      subtitle={counters ? `${counters.newOrders} new · ${counters.notDone} not done · ${counters.noTracking} without tracking (this shop)` : ''}
       actions={
         <>
           <button className="btn sm" disabled={busy} onClick={chaseEmails}
@@ -227,6 +228,7 @@ export default function Orders() {
       }
       toolbar={
         <>
+          {counters?.allShops?.shops?.length > 1 && <div style={{ flexBasis: '100%' }}><UnshippedShops shops={counters.allShops.shops} compact /></div>}
           <input className="input search" placeholder="Search order id, buyer, city, SKU, tracking…"
                  value={search} onChange={(e) => { setSearch(e.target.value); setOffset(0); }} />
           <Filter label="Done" value={done} onChange={setDone} />
