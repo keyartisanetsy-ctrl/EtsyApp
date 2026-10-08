@@ -27,12 +27,14 @@ import ShopSettings from './pages/ShopSettings.jsx';
 import Settings from './pages/Settings.jsx';
 import ApiExplorer from './pages/ApiExplorer.jsx';
 import NewListing from './pages/NewListing.jsx';
+import EtsyRequests from './pages/EtsyRequests.jsx';
 
 const NAV = [
   {
     label: 'Overview',
     items: [
       { to: '/', icon: '◆', label: 'Dashboard', end: true },
+      { to: '/etsy-requests', icon: '⇅', label: 'Etsy requests' },
       { to: '/analytics', icon: '📈', label: 'Shop data' },
     ],
   },
@@ -212,6 +214,7 @@ export default function App() {
         <main className="main">
           <Routes>
             <Route path="/" element={<Dashboard summary={summary} onRefresh={refresh} />} />
+            <Route path="/etsy-requests" element={<EtsyRequests />} />
             <Route path="/listings" element={<Listings />} />
             <Route path="/listings/new" element={<NewListing />} />
             <Route path="/skus" element={<Skus />} />

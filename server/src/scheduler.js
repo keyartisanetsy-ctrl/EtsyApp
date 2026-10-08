@@ -6,13 +6,10 @@
 import { createLogger } from './lib/logger.js';
 import config, { ROOT } from './config.js';
 import { readSetting } from './services/settings.js';
-import { getStoredToken, refreshAllAccounts, listAccounts, withShop, etsyCooldown } from './etsy/client.js';
-import { getSetting, setSetting } from './db/index.js';
-import { activeShopId } from './etsy/shop.js';
-import { finishAllPending } from './services/drafts.js';
+import { getStoredToken, refreshAllAccounts, listAccounts, withShop } from './etsy/client.js';
+import { autoTick } from './services/etsyrequests.js';
 import { listShopifyAccounts, withShopifyShop } from './shopify/client.js';
 import { syncTracking, refreshStaleFlags } from './services/tracking/index.js';
-import { syncReceipts, syncAll, syncLedgerEntries } from './services/sync.js';
 import { syncProducts as syncShopifyProducts, syncOrders as syncShopifyOrders, syncBalanceTransactions as syncShopifyBalanceTransactions } from './services/shopify.js';
 import { ensureRates } from './services/fx.js';
 import { applyOrders as applyOrdersToStock } from './services/stock.js';
@@ -22,27 +19,7 @@ import { checkForUpdate, applyUpdate } from '../../scripts/self-update.mjs';
 const log = createLogger('scheduler');
 const timers = [];
 
-/**
- * Runs `job` once per connected shop, each under withShop() so it resolves
- * that shop's own credentials regardless of which one is active in the
- * browser right now - a shop sitting idle in the switcher must keep syncing
- * in the background exactly like the one currently open, not go stale until
- * someone happens to click over to it. One shop's failure is logged and
- * skipped rather than stopping the rest.
- */
-async function forEachConnectedShop(label, job) {
-  for (const { shopId, shopName } of listAccounts()) {
-    try {
-      // while Etsy's daily allowance is used up every call would fail at once - nothing to do until it reopens
-      if (await withShop(shopId, () => etsyCooldown().active)) { log.info(`${label} waits: Etsy's request limit is used up`); return; }
-      await withShop(shopId, job);
-    } catch (err) {
-      log.warn(`${label} failed for shop ${shopName || shopId}: ${err.message}`);
-    }
-  }
-}
-
-/** Same idea as forEachConnectedShop(), for Shopify's own multi-store accounts. */
+/** Runs `job` once per connected Shopify store, each under withShopifyShop(); one store's failure is logged and skipped. */
 async function forEachConnectedShopifyStore(label, job) {
   for (const { id, shopDomain } of listShopifyAccounts()) {
     try {
@@ -84,46 +61,10 @@ export function startScheduler() {
     }
   }, Math.max(15, trackingMinutes) * 60_000).unref());
 
-  // Orders only ever fetch what changed since the last watermark
-  // (syncReceipts' own min_last_modified), so a check that finds nothing new
-  // is a small, cheap call - there is no reason to make a new order wait for
-  // a slow interval, so this runs often, for every connected shop.
-  const orderSyncMinutes = Math.max(2, Number(readSetting('orders.sync_minutes')) || 5);
-  timers.push(setInterval(() => {
-    forEachConnectedShop('order sync', () => syncReceipts({}));
-  }, orderSyncMinutes * 60_000).unref());
-
-  // The floor under that fast check: a full pass (listings, sections, orders)
-  // for every connected shop, so anything the incremental order check could
-  // never catch - a listing edited straight on Etsy, a renamed section - is
-  // never more than this many hours stale even if nobody opens the app.
-  const fullSyncHours = Math.max(1, Number(readSetting('etsy.auto_sync_hours')) || 4);
-  // A restart (every deploy) must not start a whole pass again: it is only run at boot when the last one is old.
-  const fullSync = () => forEachConnectedShop('full sync', async () => {
-    const shopId = activeShopId();
-    await syncAll({ auto: true });
-    try { setSetting(`sync.last_full.${shopId ?? 'x'}`, String(Date.now())); } catch { /* the stamp is only an optimisation */ }
-  });
-  setTimeout(async () => {
-    const stale = listAccounts().some(({ shopId }) => Date.now() - Number(getSetting(`sync.last_full.${shopId}`, 0) || 0) > fullSyncHours * 3600_000);
-    if (stale) fullSync();
-  }, 20_000).unref();
-  timers.push(setInterval(fullSync, fullSyncHours * 60 * 60_000).unref());
-
-  // Pictures / tags that did not reach Etsy when a draft was sent (its allowance was used up, or Etsy hiccuped) are
-  // finished here on their own, as soon as Etsy answers again.
-  timers.push(setInterval(() => { finishAllPending().catch((err) => log.warn(`finishing drafts: ${err.message}`)); }, 5 * 60_000).unref());
-  setTimeout(() => { finishAllPending().catch(() => {}); }, 60_000).unref();
-
-  // Etsy's own ledger: real per-order net and shop-level items (Etsy Ads,
-  // listing fees). Used to be a manual "Sync ledger" button only; runs on its
-  // own now, the same way order sync already did, so the numbers on the
-  // Orders page are never more than this many minutes behind Etsy's own.
-  const ledgerSyncMinutes = Math.max(10, Number(readSetting('etsy.ledger_sync_minutes')) || 30);
-  setTimeout(() => forEachConnectedShop('ledger sync', () => syncLedgerEntries({})), 30_000).unref();
-  timers.push(setInterval(() => {
-    forEachConnectedShop('ledger sync', () => syncLedgerEntries({}));
-  }, ledgerSyncMinutes * 60_000).unref());
+  // Nothing here talks to Etsy by itself any more. Orders, ledger, listings, drafts... are "Etsy requests" you press (for
+  // every shop at once, from the dashboard or the Etsy requests page) - or switch to repeat there, each with its own
+  // interval. This only wakes once a minute to run whatever you set to repeat; with nothing switched on it does nothing.
+  timers.push(setInterval(() => { autoTick().catch((err) => log.warn(`Etsy requests: ${err.message}`)); }, 60_000).unref());
 
   // Shopify's own version of the two jobs above, for every connected store -
   // Shopify sync had no schedule at all before this, so every store had to be
@@ -158,10 +99,6 @@ export function startScheduler() {
   timers.push(setInterval(() => {
     refreshAllAccounts().catch((err) => log.warn(`account refresh sweep failed: ${err.message}`));
   }, 60 * 60_000).unref());
-
-  if (config.features.autoSyncOnStart && getStoredToken()) {
-    setTimeout(() => syncReceipts({}).catch((e) => log.warn(`startup sync: ${e.message}`)), 5000).unref();
-  }
 
   // Exchange rates: once at startup and once a day. Cheap, and every order
   // pushed afterwards can be valued at the rate of its own day.
@@ -215,8 +152,8 @@ export function startScheduler() {
     }, 30 * 60_000).unref());
   }
 
-  log.info(`scheduler started (tracking every ${trackingMinutes}m, orders every ${orderSyncMinutes}m, `
-    + `ledger every ${ledgerSyncMinutes}m, full sync every ${fullSyncHours}h, Shopify orders every ${shopifyOrderSyncMinutes}m, `
+  log.info(`scheduler started (Etsy: only what you switched on under "Etsy requests"; tracking every ${trackingMinutes}m, `
+    + `Shopify orders every ${shopifyOrderSyncMinutes}m, `
     + `Shopify full sync every ${shopifyFullSyncHours}h, Shopify balance ledger every ${shopifyLedgerSyncMinutes}m, drop folder every 20s)`);
 }
 

@@ -1,8 +1,9 @@
-import React, { useSyncExternalStore } from 'react';
+import React, { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../lib/api.js';
 import Page from '../components/Page.jsx';
 import { Stat, Banner, Spinner, useToast, useErrorToast, fmtAgo, fmtMoney } from '../components/ui.jsx';
+import EtsyRequestCard, { useRunRequest } from '../components/EtsyRequestCard.jsx';
 import { beginSync, endSync, getActiveSync, subscribeSync } from '../lib/syncTracker.js';
 
 export default function Dashboard({ summary, onRefresh }) {
@@ -14,6 +15,13 @@ export default function Dashboard({ summary, onRefresh }) {
   const nav = useNavigate();
   const toast = useToast();
   const showError = useErrorToast();
+
+  // The Etsy requests you starred - one click sends each to every shop. Nothing else talks to Etsy by itself.
+  const [reqs, setReqs] = useState(null);
+  const loadReqs = useCallback(async () => { try { setReqs(await api.get('/etsy-requests')); } catch { /* the dashboard still works */ } }, []);
+  useEffect(() => { loadReqs(); }, [loadReqs]);
+  const { run: runReq, running: runningReq } = useRunRequest(() => { loadReqs(); onRefresh(); });
+  const unstar = async (req) => { try { await api.put(`/etsy-requests/${req.id}/star`, { on: false }); loadReqs(); } catch (err) { showError(err, 'Could not change the star'); } };
 
   const runSync = async (kind) => {
     beginSync(kind);
@@ -59,15 +67,10 @@ export default function Dashboard({ summary, onRefresh }) {
       subtitle={summary.shop?.shopName ? `${summary.shop.shopName} · ${summary.operationCount} API operations` : `${summary.operationCount} API operations`}
       actions={
         <>
-          <button className="btn sm" disabled={!!syncing} onClick={() => runSync('orders')}>
-            {syncing === 'orders' ? <Spinner /> : '↻'} Orders
-          </button>
           <button className="btn sm" disabled={!!syncing} onClick={() => runSync('tracking')}>
             {syncing === 'tracking' ? <Spinner /> : '➤'} Tracking
           </button>
-          <button className="btn sm primary" disabled={!!syncing} onClick={() => runSync('all')}>
-            {syncing === 'all' ? <Spinner /> : '⟳'} Sync everything
-          </button>
+          <button className="btn sm" onClick={() => nav('/etsy-requests')}>⇅ Etsy requests</button>
         </>
       }
     >
@@ -79,6 +82,21 @@ export default function Dashboard({ summary, onRefresh }) {
             <div className="mt8"><button className="btn sm" onClick={() => nav('/settings')}>Open Settings</button></div>
           </div>
         </Banner>
+      )}
+
+      <div className="section-title">Etsy requests <span className="dim small" style={{ fontWeight: 400 }}>
+        {reqs ? `· ${reqs.usage.today.toLocaleString()} of ${reqs.usage.cap.toLocaleString()} requests used today` : ''}</span></div>
+      {!reqs ? <div className="flex"><Spinner /></div> : !reqs.requests.some((r) => r.starred) ? (
+        <div className="card" style={{ padding: 12 }}>
+          <span className="dim">Nothing starred yet. </span>
+          <button className="btn xs" onClick={() => nav('/etsy-requests')}>Pick the Etsy requests you want here</button>
+        </div>
+      ) : (
+        <div className="grid c3" data-testid="starred-requests">
+          {reqs.requests.filter((r) => r.starred).map((r) => (
+            <EtsyRequestCard key={r.id} req={r} run={runReq} running={runningReq} onStar={unstar} />
+          ))}
+        </div>
       )}
 
       <div className="section-title">Orders</div>

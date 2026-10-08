@@ -12,6 +12,7 @@ import { OPERATION_COUNT } from './etsy/operations.generated.js';
 import authRoutes from './routes/auth.js';
 import settingsRoutes from './routes/settings.js';
 import dashboardRoutes from './routes/dashboard.js';
+import etsyRequestRoutes from './routes/etsyrequests.js';
 import listingRoutes from './routes/listings.js';
 import skuRoutes from './routes/skus.js';
 import catalogRoutes from './routes/catalog.js';
@@ -105,6 +106,7 @@ router.get('/api/health', (req, res) => res.json({
 router.use('/api/auth', authRoutes);
 router.use('/api/settings', settingsRoutes);
 router.use('/api/dashboard', dashboardRoutes);
+router.use('/api/etsy-requests', etsyRequestRoutes);
 router.use('/api/listings', listingRoutes);
 router.use('/api/skus', skuRoutes);
 router.use('/api/catalog', catalogRoutes);

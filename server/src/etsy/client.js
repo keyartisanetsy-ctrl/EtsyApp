@@ -364,8 +364,28 @@ export async function refreshAllAccounts() {
 
 // ------------------------------------------------------------ request core
 
+// How many requests this app has sent to Etsy today (UTC day) - kept in memory, seeded from the call log on first use
+let usageDay = '';
+let usageCount = 0;
+const todayKey = () => new Date().toISOString().slice(0, 10);
+function usageNow() {
+  const day = todayKey();
+  if (usageDay !== day) {
+    usageDay = day;
+    try { usageCount = getDb().prepare("SELECT COUNT(*) c FROM api_calls WHERE ts >= date('now') AND url LIKE '%etsy.com%'").get().c; } catch { usageCount = 0; }
+  }
+  return usageCount;
+}
+export const DEFAULT_DAILY_CAP = 4000;
+export function etsyUsage() {
+  const cap = Number(getSetting('etsy.daily_cap', '')) || DEFAULT_DAILY_CAP;
+  const cool = etsyCooldown();
+  return { today: usageNow(), cap, cooldownUntil: cool.active ? cool.until : null };
+}
+
 function logCall(entry) {
   try {
+    if (String(entry.url ?? '').includes('etsy.com')) { usageNow(); usageCount += 1; }
     getDb()
       .prepare('INSERT INTO api_calls (operation_id, method, url, status, duration_ms, error) VALUES (?,?,?,?,?,?)')
       .run(entry.operationId ?? null, entry.method, entry.url, entry.status ?? null, entry.durationMs, entry.error ?? null);
@@ -476,6 +496,9 @@ async function performRequest(pathname, {
 
   const cool = etsyCooldown(account);
   if (cool.active) throw cooldownError(cool.until, operationId, url.toString());
+  // This app's own brake, well under Etsy's daily allowance: a bug or a busy day can never use the whole of it up
+  { const u = etsyUsage();
+    if (u.today >= u.cap) throw new EtsyApiError(429, `The app's own daily safety limit for Etsy requests is reached (${u.today} of ${u.cap} today). It starts again after midnight UTC, or raise the limit on the Etsy requests page.`, { operationId, url: url.toString(), safetyCap: true }); }
 
   let attempt = 0;
   for (;;) {
