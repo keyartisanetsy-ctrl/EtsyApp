@@ -6,7 +6,7 @@ import {
 } from '../components/ui.jsx';
 import SplitPhoto from '../components/SplitPhoto.jsx';
 import ItemSupplyBox from '../components/ItemSupply.jsx';
-import { normalizePhoto } from '../lib/photo.js';
+import { normalizePhoto, splitPhoto } from '../lib/photo.js';
 
 const FILTER_KEY = 'packing.filters';
 
@@ -15,7 +15,7 @@ const daysAgo = (n) => localDay(new Date(Date.now() - n * 86_400_000));
 const shortDay = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '');
 
 function loadFilters() {
-  const fallback = { etsy: true, shopify: true, from: daysAgo(30), to: localDay(new Date()), autoAssign: false, warehouse: '' };
+  const fallback = { etsy: true, shopify: true, from: daysAgo(30), to: localDay(new Date()), autoAssign: false, autoSplit: true, warehouse: '' };
   try { return { ...fallback, ...JSON.parse(localStorage.getItem(FILTER_KEY) || '{}'), to: localDay(new Date()) }; } catch { return fallback; }
 }
 
@@ -114,7 +114,7 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
         Know the order already? Type its code (like 26-1007-01) - or its order number (#2419) if it has no code yet - and the arrival goes straight onto that order.
         An order gets its code the moment its first parcel is added (today's date, numbered 01, 02, 03...).
         Otherwise the free matcher looks for the order as soon as you add it - tracking number, order state, text read off the photo and colours, no AI credits.
-        The AI only runs when you press Find match. One photo with products for several customers? Use ✂ Split on its row.
+        The AI only runs when you press Find match - and, while "Split photos with several products" is on, once on each new photo to see whether it shows more than one product (then each product becomes its own arrival, ready to match). Split one by hand with ✂ Split on its row.
       </div>
       <div className="flex" style={{ alignItems: 'flex-start', flexWrap: 'wrap', gap: 14 }}>
         <label
@@ -732,6 +732,63 @@ export default function Packing() {
     } finally { flag(parcel.id, false); parcels.reload(); queue.reload(); }
   }, [quickOne, readText]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /**
+   * One photo, several products: ask the AI to find them (strictly - only products it is sure of, none inside
+   * another), and when there are two or more cut each out into its own arrival. Resolves to the new arrivals,
+   * or null when the photo shows one product (or could not be looked at).
+   */
+  const autoSplitOne = useCallback(async (parcel, { quiet = true } = {}) => {
+    if (!parcel.photoUrl || parcel.status !== 'unmatched' || parcel.quantity < 1) return null;
+    flag(parcel.id, true);
+    try {
+      const d = await api.post(`/packing/parcels/${parcel.id}/detect`, { auto: true });
+      if (!d.auto?.split) {
+        if (!quiet) toast({ kind: 'info', title: `${parcel.label}: ${d.auto?.reason ?? 'nothing to split'}`, duration: 7000 });
+        return null;
+      }
+      const { crops } = await splitPhoto(withBase(parcel.photoUrl), d.regions);
+      const form = new FormData();
+      form.append('regions', JSON.stringify(d.regions.map(({ x, y, w, h }) => ({ x, y, w, h }))));
+      form.append('done', '1');
+      crops.forEach((blob, i) => form.append('crops', blob, `piece-${i + 1}.jpg`));
+      const r = await api.upload(`/packing/parcels/${parcel.id}/split`, form);
+      toast({ kind: 'ok', title: `${parcel.label}: ${r.children.length} products found and split`, body: d.regions.map((x) => x.label).filter(Boolean).join(' · ') || undefined, duration: 8000 });
+      return r.children;
+    } catch (err) {
+      toast({ kind: 'info', title: `Could not check ${parcel.label} for several products`, body: `${err?.message ?? err} - use ✂ Split on its row if the photo shows more than one.`, duration: 9000 });
+      return null;
+    } finally { flag(parcel.id, false); parcels.reload(); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Split an arrival if its photo shows several products, then run the free match on what is left (each product on its own). */
+  const splitThenMatch = useCallback(async (parcel, { quiet = true, split = true } = {}) => {
+    const kids = split ? await autoSplitOne(parcel, { quiet }) : null;
+    if (!kids?.length) return channels.length ? freeOne(parcel, { quiet }) : null;
+    for (const kid of channels.length ? kids : []) {
+      // eslint-disable-next-line no-await-in-loop
+      await freeOne(kid, { quiet: true });
+    }
+    return null;
+  }, [autoSplitOne, freeOne, channels.length]);
+
+  const splitAll = async () => {
+    const todo = (parcels.data?.rows ?? []).filter((p) => p.status === 'unmatched' && p.photoUrl && !p.parentId && !p.canRestore);
+    if (!todo.length) return;
+    cancelRef.current = false;
+    for (let i = 0; i < todo.length; i += 1) {
+      if (cancelRef.current) break;
+      setProgress({ done: i, total: todo.length, split: true });
+      // eslint-disable-next-line no-await-in-loop
+      const kids = await autoSplitOne(todo[i], { quiet: true });
+      for (const kid of channels.length ? kids ?? [] : []) {
+        // eslint-disable-next-line no-await-in-loop
+        await freeOne(kid, { quiet: true });
+      }
+    }
+    setProgress(null);
+    refresh();
+  };
+
   const freeAll = async () => {
     const todo = (parcels.data?.rows ?? []).filter((p) => p.status === 'unmatched');
     if (!todo.length) return;
@@ -808,7 +865,7 @@ export default function Packing() {
     }
     if (parcel.code) { toast({ kind: 'ok', title: `Added ${parcel.label} → ${parcel.code}`, body: parcel.match?.item?.title }); holdToast(parcel); return; }
     toast({ kind: 'ok', title: `Added ${parcel.label}` });
-    if (channels.length) freeOne(parcel, { quiet: true });
+    if (channels.length || (filters.autoSplit && parcel.photoUrl)) splitThenMatch(parcel, { quiet: true, split: filters.autoSplit });
   };
 
   /** What the answer from Airtable means to the person who pressed the button. */
@@ -904,6 +961,7 @@ export default function Packing() {
   const summary = queue.data?.summary;
   const counts = parcels.data?.counts;
   const unmatchedWithPhoto = (parcels.data?.rows ?? []).filter((p) => p.status === 'unmatched' && p.photoUrl).length;
+  const splittable = (parcels.data?.rows ?? []).filter((p) => p.status === 'unmatched' && p.photoUrl && !p.parentId && !p.canRestore).length;
   const orders = (queue.data?.orders ?? []).filter((o) => queueFilter === 'all' || o.status === queueFilter);
 
   return (
@@ -920,6 +978,9 @@ export default function Packing() {
             <button key={n} className="btn xs ghost" onClick={() => setFilter({ from: daysAgo(n), to: localDay(new Date()) })}>{n}d</button>
           ))}
           <div style={{ flex: 1 }} />
+          <span title="When a new photo shows two or more different products, each one is cut out into its own arrival and matched on its own. The AI looks at each new photo once (a small cost); it only splits products it is sure of - never the table, a hand, a label or packing.">
+            <Checkbox checked={filters.autoSplit} onChange={(v) => setFilter({ autoSplit: v })} label="Split photos with several products" />
+          </span>
           <span title="A tracking number that names one order is always assigned straight away. Off by default for everything else: the AI's and the free matcher's best guesses are shown and nothing is assigned until you press Assign. Turn on to also assign when text and colours both clearly agree, or the AI is very confident.">
             <Checkbox checked={filters.autoAssign} onChange={(v) => setFilter({ autoAssign: v })} label="Also assign when the match is very sure" />
           </span>
@@ -954,11 +1015,13 @@ export default function Packing() {
               </button>
             ))}
             <div style={{ flex: 1 }} />
-            {progress && <span className="small muted">{progress.free ? 'Free match' : 'Matching'} {progress.done + 1} of {progress.total}…</span>}
+            {progress && <span className="small muted">{progress.split ? 'Looking for several products' : progress.free ? 'Free match' : 'Matching'} {progress.done + 1} of {progress.total}…</span>}
             {progress
               ? <button className="btn sm" onClick={() => { cancelRef.current = true; }}>Stop</button>
               : (
                 <>
+                  <button className="btn sm" disabled={!splittable} onClick={splitAll}
+                          title="Uses AI credits: look at each unmatched photo and cut out every product when it shows several">✂ Split photos ({splittable})</button>
                   <button className="btn sm" disabled={!counts?.unmatched || !channels.length} onClick={freeAll}
                           title="Free, no AI: tracking, order state, text read off the photo, colours">⚡ Free match all ({counts?.unmatched ?? 0})</button>
                   <button className="btn sm primary" disabled={!unmatchedWithPhoto || !channels.length} onClick={matchAll}

@@ -856,8 +856,13 @@ and height - every number from 0 to 100.
 Rules:
 - One box per separate product. A set sold together, or one item in its own retail box, is ONE
   product. Two different products side by side are two.
+- A product inside a display case, frame, clamshell, jar or bag is ONE product: box the whole case
+  or frame - never the thing inside it as well.
 - Box only the product and the box or bag it came in - not the table, the floor, a hand, a shelf,
-  or loose packing material.
+  a label, a receipt, tape, foam, a ruler, a phone, text on the photo, or loose packing material.
+  These are not products and get no box.
+- Only box what you are sure is a product. When something might be rubbish or packing, leave it out
+  and give anything you do box a confidence you honestly believe.
 - Boxes should not overlap one another. When items touch, put the line between them where the
   gap or the edge of the nearer item is.
 - If you can only see one product, return one box around it.
@@ -866,19 +871,41 @@ Rules:
 Reply with JSON only:
 {"items":[{"x":0,"y":0,"w":0,"h":0,"label":"a few words that identify it, like 'black keyboard' or 'blue-haired figure in a box'","confidence":0.0}]}`;
 
+const area = (b) => b.w * b.h;
 const overlap = (a, b) => {
   const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
   const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
   if (w <= 0 || h <= 0) return 0;
   return (w * h) / (a.w * a.h + b.w * b.h - w * h);
 };
+/** The share of `inner` that lies inside `outer` (1 = completely inside). */
+const insideShare = (inner, outer) => {
+  const w = Math.min(inner.x + inner.w, outer.x + outer.w) - Math.max(inner.x, outer.x);
+  const h = Math.min(inner.y + inner.h, outer.y + outer.h) - Math.max(inner.y, outer.y);
+  return w <= 0 || h <= 0 ? 0 : (w * h) / area(inner);
+};
+
+/** A small margin round every box so a crop never clips the product - skipped for boxes that would then overlap. */
+function padBoxes(boxes, pad = 0.012) {
+  const padded = boxes.map((b) => {
+    const x = clamp01(b.x - pad); const y = clamp01(b.y - pad);
+    return { ...b, x, y, w: Math.min(1 - x, b.w + 2 * pad), h: Math.min(1 - y, b.h + 2 * pad) };
+  });
+  return boxes.map((b, i) => (padded.some((p, j) => j !== i && overlap(padded[i], p) > 0) ? b : padded[i]));
+}
 
 /**
  * Ask the AI where each product sits in this arrival's photo. Only a
  * suggestion - the boxes come back to the browser to be moved, resized,
  * added or removed before anything is cut.
+ *
+ * `auto` is the stricter mode used when the photo is split without anyone
+ * looking: only boxes the AI is sure of, each big enough to be a product, none
+ * inside another (the keycap inside its display frame is not a second product),
+ * nothing that fills the whole photo - and it says whether there is anything
+ * to split at all (two products or more).
  */
-export async function detectRegions(id, { provider, model, runner = run } = {}) {
+export async function detectRegions(id, { provider, model, auto = false, runner = run } = {}) {
   const parcel = getRow(id);
   if (!parcel.attachment_id) throw badRequest('This arrival has no photo to look at.');
   if (parcel.quantity < 1) throw badRequest('Every piece of this photo has already been split out.');
@@ -890,7 +917,7 @@ export async function detectRegions(id, { provider, model, runner = run } = {}) 
     promptOverride: DETECT_SYSTEM,
     attachmentIds: [{ id: parcel.attachment_id, detail: 'high' }],
     effort: 'fast',
-    userInput: `The warehouse reported ${parcel.quantity} piece${parcel.quantity === 1 ? '' : 's'} in this photo. JSON only.`,
+    userInput: `The warehouse reported ${parcel.quantity} piece${parcel.quantity === 1 ? '' : 's'} in this photo (that number is often wrong - go by what you see). JSON only.`,
     maxTokens: 900,
   });
   const parsed = parseJsonish(ai.text);
@@ -901,6 +928,8 @@ export async function detectRegions(id, { provider, model, runner = run } = {}) 
   // Told percentages, a model sometimes answers in 0-1 fractions; every box then fits inside 1.
   const scale = raw.length && raw.every((i) => i.x + i.w <= 1.05 && i.y + i.h <= 1.05) ? 1 : 100;
 
+  const minConfidence = auto ? 0.5 : 0.3;
+  const minSide = auto ? 0.06 : 0.03;
   const found = raw
     .map((i) => {
       const x = clamp01(i.x / scale);
@@ -911,15 +940,28 @@ export async function detectRegions(id, { provider, model, runner = run } = {}) 
         confidence: Number.isFinite(Number(i.confidence)) ? clamp01(Number(i.confidence)) : null,
       };
     })
-    .filter((b) => b.w >= 0.03 && b.h >= 0.03 && (b.confidence == null || b.confidence >= 0.3))
-    .sort((a, b) => (b.confidence ?? 0.5) - (a.confidence ?? 0.5));
+    .filter((b) => b.w >= minSide && b.h >= minSide && (b.confidence == null ? !auto : b.confidence >= minConfidence))
+    .filter((b) => !(auto && area(b) > 0.9)) // a box round the whole photo is "nothing found", not a product
+    .sort((a, b) => area(b) - area(a));
 
+  // Biggest first: a box that sits inside one already kept (the keycap in its frame) or mostly on top of it is dropped.
   const kept = [];
-  for (const b of found) if (!kept.some((k) => overlap(k, b) > 0.6)) kept.push(b);
-  const regions = kept.slice(0, MAX_REGIONS).sort((a, b) => a.x - b.x || a.y - b.y)
-    .map((b) => ({ ...cleanBox(b), label: b.label, confidence: b.confidence }));
+  for (const b of found) if (!kept.some((k) => overlap(k, b) > 0.5 || insideShare(b, k) > 0.7)) kept.push(b);
+  const limited = kept.slice(0, MAX_REGIONS);
+  const ordered = (auto ? padBoxes(limited) : limited).sort((a, b) => a.x - b.x || a.y - b.y);
+  const regions = ordered.map((b) => ({ ...cleanBox(b), label: b.label, confidence: b.confidence }));
 
-  return { regions, provider: ai.provider, model: ai.model };
+  const out = { regions, provider: ai.provider, model: ai.model };
+  if (auto) {
+    const split = regions.length >= 2 && regions.length <= 6;
+    out.auto = {
+      split,
+      reason: split ? `${regions.length} separate products` : regions.length > 6
+        ? `${regions.length} boxes is more than a photo of parcels usually holds - split it by hand`
+        : regions.length === 1 ? 'one product' : 'no product found',
+    };
+  }
+  return out;
 }
 
 /** Mark every parcel matched to one order as packed (or take that back). */

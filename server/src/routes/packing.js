@@ -105,7 +105,7 @@ router.post('/parcels/:id/unmatch', asyncRoute(async (req, res) => {
 /** Ask the AI where each product sits in the photo. Boxes only - nothing is cut or saved. */
 router.post('/parcels/:id/detect', asyncRoute(async (req, res) => {
   const b = req.body ?? {};
-  res.json(await packing.detectRegions(req.params.id, { provider: b.provider, model: b.model }));
+  res.json(await packing.detectRegions(req.params.id, { provider: b.provider, model: b.model, auto: bool(b.auto) }));
 }));
 
 /**
