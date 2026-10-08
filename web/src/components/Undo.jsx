@@ -118,7 +118,7 @@ export default function UndoHost() {
       <Modal open={!!confirm} onClose={() => !busy && setConfirm(null)} title="Take this back?"
              footer={(
                <>
-                 <button className="btn" disabled={busy} onClick={() => setConfirm(null)}>No, keep it</button>
+                 <button className="btn" disabled={busy} onClick={() => setConfirm(null)}>Keep it</button>
                  <button className="btn danger" disabled={busy} onClick={() => doUndo(confirm?.id ?? null)}>{busy ? <Spinner /> : 'Yes, take it back'}</button>
                </>
              )}>
@@ -129,7 +129,7 @@ export default function UndoHost() {
           </p>
         )}
         {!confirm?.touchesEtsy && confirm?.warning && <p className="small" style={{ margin: '0 0 8px' }}>{confirm.warning}</p>}
-        <p className="small muted" style={{ margin: 0 }}>It goes back to how it was before this change. Anything you did after it stays.</p>
+        <p className="small muted" style={{ margin: 0 }}>Everything it changed is put back as it was before. Anything you did after it stays.</p>
       </Modal>
     </>
   );
