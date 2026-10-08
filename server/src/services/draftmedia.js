@@ -116,6 +116,60 @@ export function addUpload(listingId, { kind, buffer, filename, mime, altText = '
   return shape(getDb().prepare('SELECT * FROM draft_media WHERE id = ?').get(info.lastInsertRowid));
 }
 
+/**
+ * A picture added by its link is copied here and served from this app (not from wherever it was found), so it stays
+ * the same whatever happens to the link, and it is this copy that goes to Etsy. The link is only remembered as where
+ * it came from.
+ */
+export async function fetchPicture(url) {
+  if (!/^https?:\/\//i.test(String(url ?? ''))) throw badRequest('That does not look like a link to a picture.');
+  let res;
+  try { res = await outboundFetch(String(url), { headers: { Accept: 'image/jpeg,image/png,image/gif,image/*;q=0.8' } }); } catch (err) { throw badRequest(`The picture could not be fetched: ${err.message}`); }
+  if (!res.ok) throw badRequest(`The picture could not be fetched (${res.status}). Is the link public?`);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > 20 * 1024 * 1024) throw badRequest('That picture is over 20 MB.');
+  const kind = pictureKind(buffer);
+  if (!kind) throw badRequest('That link is not a picture - open it in a browser and copy the picture address itself.');
+  if (kind.mime === 'image/webp') throw badRequest('That picture is a WebP, which Etsy does not take. Save it as JPG or PNG and use + Upload (or copy the JPG/PNG address).');
+  let name = '';
+  try { name = decodeURIComponent(new URL(url).pathname.split('/').pop() || ''); } catch { /* none */ }
+  name = name.replace(/[^\w.-]+/g, '-').replace(/\.[A-Za-z0-9_]+$/, '').slice(0, 60) || 'image';
+  return { buffer, mime: kind.mime, filename: `${name}${kind.ext}` };
+}
+
+/** What kind of picture these bytes are (from their first bytes), or null. */
+export function pictureKind(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8) return { mime: 'image/jpeg', ext: '.jpg' };
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return { mime: 'image/png', ext: '.png' };
+  if (buf.toString('ascii', 0, 3) === 'GIF') return { mime: 'image/gif', ext: '.gif' };
+  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return { mime: 'image/webp', ext: '.webp' };
+  return null;
+}
+
+/** Stage a picture found at a link: downloaded now, kept here. */
+export async function addImageFromUrl(listingId, url, altText = '') {
+  const pic = await fetchPicture(url);
+  const added = addUpload(listingId, { kind: 'image', buffer: pic.buffer, filename: pic.filename, mime: pic.mime, altText });
+  getDb().prepare('UPDATE draft_media SET source_url = ? WHERE id = ?').run(String(url).slice(0, 2000), added.id);
+  return added;
+}
+
+/** Put a different picture where this one is, keeping its place in the order. */
+export function replaceImage(listingId, mediaId, { buffer, filename, mime } = {}) {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM draft_media WHERE id = ? AND listing_id = ? AND kind = 'image'").get(Number(mediaId), Number(listingId));
+  if (!row) throw notFound('That picture is not staged on this draft.');
+  const dir = storeDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const ext = path.extname(filename || '') || '.png';
+  const stored = path.join(dir, `${crypto.randomBytes(8).toString('hex')}${ext}`);
+  fs.writeFileSync(stored, buffer);
+  if (row.file_path) { try { fs.unlinkSync(row.file_path); } catch { /* already gone */ } }
+  db.prepare('UPDATE draft_media SET file_path = ?, filename = ?, mime = ? WHERE id = ?').run(stored, filename || path.basename(stored), mime || 'image/png', row.id);
+  return shape(db.prepare('SELECT * FROM draft_media WHERE id = ?').get(row.id));
+}
+
 /** The file on disk for a stored-upload row, for the route that serves it back. */
 export function fileFor(listingId, mediaId) {
   const row = getDb().prepare('SELECT * FROM draft_media WHERE id = ? AND listing_id = ?')

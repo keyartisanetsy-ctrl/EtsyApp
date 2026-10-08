@@ -6,10 +6,10 @@ import fs from 'node:fs';
 import { getDb, audit } from '../../db/index.js';
 import { badRequest, notFound } from '../../lib/errors.js';
 import { createLogger } from '../../lib/logger.js';
-import { complete, editImage, providerStatus, resolveProvider, PROVIDERS } from './providers.js';
+import { complete, editImage, manusEditImage, providerStatus, resolveProvider, PROVIDERS } from './providers.js';
 
 const log = createLogger('ai');
-export { providerStatus, PROVIDERS, editImage };
+export { providerStatus, PROVIDERS, editImage, manusEditImage };
 export { MODEL_CATALOGUE, modelOptions } from './providers.js';
 
 export const PROMPT_KINDS = ['reply', 'title', 'description', 'tags', 'listing', 'image', 'research', 'custom'];

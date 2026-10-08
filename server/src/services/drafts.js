@@ -412,6 +412,39 @@ export function remove(listingId) {
   return { removed: n, listingId: id };
 }
 
+/**
+ * Delete several drafts. A draft that only exists here simply goes. One that is a real Etsy draft is taken off the
+ * desk (Etsy keeps it, and "Get drafts from Etsy" would bring it back) - or, with `alsoOnEtsy`, deleted on Etsy as
+ * well. Only a listing Etsy still has in the draft state is ever deleted there: an active or sold listing is refused
+ * and left alone.
+ */
+export async function removeMany(ids = [], { alsoOnEtsy = false, caller } = {}) {
+  const list = [...new Set((Array.isArray(ids) ? ids : []).map(Number).filter((n) => Number.isInteger(n) && n !== 0))];
+  if (!list.length) throw badRequest('Pick at least one draft.');
+  const results = [];
+  for (const id of list) {
+    try {
+      const d = get(id);
+      let onEtsy = false;
+      if (id > 0 && alsoOnEtsy) {
+        if (String(d.etsyState || '').toLowerCase() !== 'draft') {
+          results.push({ listingId: id, ok: false, error: `This one is ${d.etsyState || 'not a draft'} on Etsy, not a draft - it was left alone.` });
+          continue;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await (caller ? caller(id) : listings.deleteListing(id));
+        onEtsy = true;
+      }
+      remove(id);
+      results.push({ listingId: id, ok: true, deletedOnEtsy: onEtsy });
+    } catch (err) {
+      results.push({ listingId: id, ok: false, error: err.message });
+    }
+  }
+  audit('drafts.delete', { entity: 'draft', detail: { ids: list, alsoOnEtsy, removed: results.filter((r) => r.ok).length } });
+  return { results, removed: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length };
+}
+
 /** Which of these a draft can be missing, in the order the button reports them. */
 const AUTOFILL_FIELDS = ['materials', 'tags', 'taxonomy_id', 'attributes', 'description', 'who_made', 'when_made'];
 

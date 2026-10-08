@@ -554,10 +554,10 @@ export function nearestSupportedSize(size) {
  * model supports are honoured by asking for the closest shape and reporting
  * what was actually produced, so the caller can scale it.
  */
-export async function editImage({ prompt, image, size = '1024x1024', n = 1, signal }) {
+export async function editImage({ prompt, image, size = '1024x1024', n = 1, model: modelOverride, signal }) {
   const apiKey = readSetting('ai.openai.api_key');
   if (!apiKey) throw badRequest('Image editing needs an OpenAI API key (Settings > AI).');
-  const model = readSetting('ai.openai.image_model');
+  const model = modelOverride || readSetting('ai.openai.image_model');
   const count = Math.min(Math.max(1, Number(n) || 1), 10);
   const target = nearestSupportedSize(size);
 
@@ -596,6 +596,101 @@ export async function editImage({ prompt, image, size = '1024x1024', n = 1, sign
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new AppError(res.status, `OpenAI image generation failed: ${body?.error?.message || res.statusText}`);
   return shape(body);
+}
+
+
+// -------------------------------------------------------- Manus: edit an image
+//
+// Manus is an agent, not an image endpoint: the picture goes up as an input file (file.upload, then a `file` part in
+// the task message), the agent edits it, and the result comes back as an `image` attachment on an assistant message.
+
+const MANUS_IMAGE_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+
+async function manusJson(res, what) {
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body?.ok === false) {
+    const msg = body?.error?.message || body?.message || res.statusText;
+    if (res.status === 429) throw new AppError(429, `Manus rejected the request: ${msg || 'credit limit exceeded'}. Top up the Manus account or switch to ChatGPT.`);
+    throw new AppError(res.status || 502, `Manus ${what} failed: ${msg}`);
+  }
+  return body;
+}
+
+/** The images an assistant message produced, from task.listMessages. */
+export function manusImageAttachments(messages) {
+  const out = [];
+  for (const m of messages ?? []) {
+    for (const a of m.assistant_message?.attachments ?? []) {
+      if (a?.url && (a.type === 'image' || /^image\//i.test(a.content_type || ''))) out.push(a);
+    }
+  }
+  return out;
+}
+
+/**
+ * Edit one picture with a Manus agent. `profile` is its agent profile (lite | standard | max). Resolves to
+ * { buffer, mime, taskUrl }.
+ */
+export async function manusEditImage({ prompt, image, profile, signal, onProgress }) {
+  const apiKey = readSetting('ai.manus.api_key');
+  if (!apiKey) throw badRequest('Manus needs an API key (Settings > AI).');
+  const base = config.ai.manus.base;
+  const headers = { 'x-manus-api-key': apiKey, 'Content-Type': 'application/json' };
+  const filename = image.filename || `image.${MANUS_IMAGE_EXT[image.mime] || 'jpg'}`;
+
+  // 1. the input file: a record, the bytes to its upload address, then wait for "uploaded"
+  const made = await manusJson(await outboundFetch(`${base}/v2/file.upload`, { method: 'POST', headers, body: JSON.stringify({ filename }), signal }), 'file upload');
+  const fileId = made.file?.id;
+  if (!fileId || !made.upload_url) throw new AppError(502, 'Manus did not give an upload address for the picture.');
+  const put = await outboundFetch(made.upload_url, { method: 'PUT', body: image.buffer, signal });
+  if (!put.ok) throw new AppError(502, `Manus would not take the picture (${put.status}).`);
+  for (let i = 0; ; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const d = await manusJson(await outboundFetch(`${base}/v2/file.detail?file_id=${encodeURIComponent(fileId)}`, { headers: { 'x-manus-api-key': apiKey }, signal }), 'file check');
+    if (d.file?.status === 'uploaded') break;
+    if (d.file?.status === 'error' || d.file?.status === 'deleted' || i > 20) throw new AppError(502, `Manus could not use the picture${d.file?.error_message ? `: ${d.file.error_message}` : ''}.`);
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(1000);
+  }
+
+  // 2. the task: the picture and what to do with it, answered with the edited picture as an attachment
+  const text = `${prompt}\n\nEdit the attached picture exactly as described and give me back the edited picture itself as an image file `
+    + '(same framing and proportions as the original). Do not describe it - just return the finished picture.';
+  const created = await manusJson(await outboundFetch(`${base}/v2/task.create`, {
+    method: 'POST', headers, signal,
+    body: JSON.stringify({
+      message: { content: [{ type: 'text', text }, { type: 'file', file_id: fileId }] },
+      agent_profile: profile || 'lite', hide_in_task_list: false, interactive_mode: false,
+    }),
+  }), 'task');
+  const taskId = created.task_id;
+  if (!taskId) throw new AppError(502, 'Manus did not return a task id.');
+  const taskUrl = created.task_url ?? null;
+  onProgress?.({ stage: 'submitted', taskId, taskUrl });
+
+  // 3. wait for it to finish, then take the picture it produced
+  const deadline = Date.now() + config.ai.manus.timeoutMs;
+  for (;;) {
+    if (Date.now() > deadline) throw new AppError(504, `Manus did not finish editing the picture in time. It may still complete at ${taskUrl ?? 'manus.im'}.`);
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(config.ai.manus.pollIntervalMs);
+    // eslint-disable-next-line no-await-in-loop
+    const task = await manusTaskDetail(base, apiKey, taskId, signal);
+    if (!task) continue;
+    onProgress?.({ stage: task.status, taskId, taskUrl });
+    if (task.status === 'error') throw new AppError(502, `Manus task failed${task.error_message ? `: ${task.error_message}` : ''}`);
+    if (task.status === 'stopped' && task.has_running_background_jobs === false) {
+      // eslint-disable-next-line no-await-in-loop
+      const messages = await manusTaskMessages(base, apiKey, taskId, signal);
+      const pics = manusImageAttachments(messages);
+      if (!pics.length) throw new AppError(502, `Manus finished but did not return a picture${taskUrl ? ` - see ${taskUrl}` : ''}.`);
+      const pic = pics[pics.length - 1];
+      // eslint-disable-next-line no-await-in-loop
+      const dl = await outboundFetch(pic.url, { signal });
+      if (!dl.ok) throw new AppError(502, `Could not download the picture Manus made (${dl.status}).`);
+      return { buffer: Buffer.from(await dl.arrayBuffer()), mime: pic.content_type || dl.headers.get('content-type') || 'image/png', taskUrl };
+    }
+  }
 }
 
 const IMPLS = { manus: manusComplete, anthropic: anthropicComplete, openai: openaiComplete };
