@@ -165,21 +165,25 @@ router.post('/stock/apply-orders', asyncRoute(async (req, res) => res.json(stock
 // ----------------------------------------------------------- automatic SKUs
 
 /** What automatic SKUs would be handed out (nothing is written): the plan, product by product. */
-router.post('/auto-sku/plan', asyncRoute(async (req, res) => {
-  const b = req.body ?? {};
-  res.json(await autosku.plan({
+const planOptions = (b) => ({
     shops: shopsOf(b.shops),
     productKeys: Array.isArray(b.productKeys) ? b.productKeys.slice(0, 5000) : null,
     prefix: String(b.prefix ?? ''),
     numbering: ['1', '01'].includes(String(b.numbering)) ? String(b.numbering) : 'auto',
     includeInactive: bool(b.includeInactive),
     linkMatches: b.linkMatches === undefined ? true : bool(b.linkMatches),
-    imageBudget: Math.min(600, int(b.imageBudget, 300)),
+    imageBudget: Math.min(300, int(b.imageBudget, 120)),
     prefixMode: b.prefixMode === 'single' ? 'single' : 'type',
     types: Array.isArray(b.types) ? b.types.slice(0, 60) : null,
     matchSets: Array.isArray(b.matchSets) ? b.matchSets.slice(0, 500).map((set) => (Array.isArray(set) ? set.slice(0, 12).map(String) : [])) : null,
-  }));
+});
+router.post('/auto-sku/plan', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  // the page asks for a background job (a whole catalogue takes longer than a web request may); a plain call still answers directly
+  if (bool(b.async)) return res.status(202).json(autosku.startPlan(planOptions(b)));
+  return res.json(await autosku.plan(planOptions(b)));
 }));
+router.get('/auto-sku/plan/:jobId', asyncRoute(async (req, res) => res.json(autosku.planJob(req.params.jobId))));
 
 /** The product types (and the SKU letters each gets) the automatic SKUs use. */
 router.get('/auto-sku/types', asyncRoute(async (req, res) => res.json({ types: skutypes.loadTypes(), defaults: skutypes.DEFAULT_TYPES })));

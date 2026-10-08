@@ -146,6 +146,8 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
   const [prefixDraft, setPrefixDraft] = useState('');
   const [plan, setPlan] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [stage, setStage] = useState('');
+  const loadId = useRef(0);
   const [ticked, setTicked] = useState(new Set());
   const [open, setOpen] = useState(new Set());
   const [kindFilter, setKindFilter] = useState('all');
@@ -155,6 +157,8 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
 
   const load = useCallback(async (o) => {
     setLoading(true);
+    const mine = ++loadId.current;
+    setStage('Starting');
     try {
       const body = matchSets ? {
         matchSets, prefix: o.prefix || undefined, prefixMode: o.prefixMode, numbering: o.numbering, linkMatches: true,
@@ -163,15 +167,28 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
         productKeys: o.scope === 'selected' ? selectedProducts : undefined,
         prefix: o.prefix || undefined, prefixMode: o.prefixMode, numbering: o.numbering, includeInactive: o.includeInactive, linkMatches: o.linkMatches,
       };
-      const p = await api.post('/catalog/auto-sku/plan', body);
+      // worked out in the background (a whole catalogue takes longer than one web request may), polled until it is done
+      const started = await api.post('/catalog/auto-sku/plan', { ...body, async: true });
+      let p = null;
+      for (let waited = 0; waited < 20 * 60_000; waited += 1500) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, waited ? 1500 : 400));
+        if (mine !== loadId.current) return;                       // a newer request replaced this one, or the window closed
+        // eslint-disable-next-line no-await-in-loop
+        const j = await api.get(`/catalog/auto-sku/plan/${started.jobId}`);
+        setStage(`${j.stage}${j.seconds > 3 ? ` · ${j.seconds} s` : ''}`);
+        if (j.status === 'error') throw new Error(j.error || 'The calculation failed.');
+        if (j.status === 'done') { p = j.result; break; }
+      }
+      if (!p) throw new Error('This is taking too long - try with fewer shops or products.');
       setPlan(p);
       setTicked(new Set(p.units.filter((u) => u.ticked).map((u) => u.id)));
       setOpen(new Set()); setPage(0);
       if (!o.prefix) setPrefixDraft(p.prefix);
-    } catch (err) { showError(err, 'Could not work out the SKUs'); } finally { setLoading(false); }
+    } catch (err) { showError(err, 'Could not work out the SKUs'); } finally { if (mine === loadId.current) setLoading(false); }
   }, [shops, selectedProducts]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { load(opts); }, [opts]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(opts); return () => { loadId.current += 1; }; }, [opts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const set = (patch) => setOpts((o) => ({ ...o, ...patch }));
   const units = plan?.units ?? [];
@@ -200,12 +217,14 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
         // eslint-disable-next-line no-await-in-loop
         const r = await api.post('/catalog/auto-sku/apply', { units: part.map((u) => ({ id: u.id, edits: u.edits.map(({ key, sku }) => ({ key, sku })), link: u.link })) });
         state.done += part.length; state.written += r.written;
+        if (r.etsyNote) state.etsyNote = r.etsyNote;
         for (const u of r.units.filter((x) => !x.ok)) state.failed.push({ title: part.find((p) => p.id === u.id)?.title, errors: u.errors });
         setRun({ ...state });
       }
     } catch (err) { state.stopped = true; showError(err, 'Writing stopped'); }
     state.finished = true;
     setRun({ ...state });
+    if (state.etsyNote) toast({ kind: 'warn', title: 'Etsy is not taking requests right now', body: state.etsyNote, duration: 20000 });
     toast({ kind: state.failed.length ? 'err' : 'ok', title: `${state.written} SKU${state.written === 1 ? '' : 's'} written`, body: state.failed.length ? `${state.failed.length} product${state.failed.length === 1 ? '' : 's'} had problems - see the list.` : undefined, duration: 8000 });
     onDone?.();
     if (matchSets) setPlan((p) => ({ ...p, units: [], counts: { ...p.counts, units: 0 } })); else load(opts);
@@ -278,7 +297,7 @@ export default function AutoSkuModal({ shops, selectedProducts = [], matchSets =
         )}
 
       {loading ? (
-        <div className="empty"><Spinner /><p className="small muted">Working out the SKUs and looking at the photos of look-alike products…</p></div>
+        <div className="empty"><Spinner /><p className="small muted">Working out the SKUs and looking at the photos of look-alike products…<br /><strong data-testid="auto-stage">{stage}</strong></p></div>
       ) : !plan ? null : !units.length ? (
         <Banner kind="ok">{matchSets ? (run?.finished ? 'All done.' : 'Nothing to confirm.') : `Nothing to give: every variant here already has a SKU${plan.skipped.length ? `, apart from ${plan.skipped.length} left out below` : ''}.`}</Banner>
       ) : (

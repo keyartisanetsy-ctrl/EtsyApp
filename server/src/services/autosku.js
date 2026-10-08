@@ -19,7 +19,9 @@
  * with (KEY011 -> KEY), the next free product number, and the way variants are
  * numbered (KEY011-1 or KEY011-01).
  */
+import crypto from 'node:crypto';
 import { audit } from '../db/index.js';
+import { etsyUsage } from '../etsy/client.js';
 import { badRequest } from '../lib/errors.js';
 import * as catalog from './catalog.js';
 import * as links from './productlinks.js';
@@ -119,8 +121,9 @@ function splitCluster(members, edges) {
  */
 export async function plan({
   shops = null, productKeys = null, prefix = '', numbering = 'auto', includeInactive = false, linkMatches = true, imageBudget = 300,
-  matchSets = null, prefixMode = 'type', types = null,
+  matchSets = null, prefixMode = 'type', types = null, onProgress = () => {},
 } = {}) {
+  onProgress('Reading every product of every shop');
   const all = catalog.productsOf(null);
   const wantKeys = productKeys?.length ? new Set(productKeys) : null;
   // matchSets: products a person has already confirmed as the same one, [[key, key, ...], ...] - planned exactly as given
@@ -213,6 +216,7 @@ export async function plan({
   // 2. products that clearly are the same one as another shop's
   const unlinkedLive = (k) => liveKeys.has(k) && !handled.has(k);
   if (!sets && live.some((p) => p.groupId == null)) {
+    onProgress('Finding the same product in other shops');
     const sg = await links.suggest({ shops: null, minScore: 0.6, imageBudget, limit: 100000 });
     const byKey = new Map(all.map((p) => [p.key, p]));
     for (const s of sg.suggestions) {
@@ -236,7 +240,10 @@ export async function plan({
 
   const units = [];
   const photoBudget = { left: Math.max(60, imageBudget) };   // photos fetched for variant pairing, all units together
+  let doneWork = 0;
   for (const w of work) {
+    if (doneWork % 25 === 0) { onProgress(`Pairing variants and numbering - ${doneWork} of ${work.length} products`); await new Promise((r) => setImmediate(r)); }
+    doneWork += 1;
     const type = typeOf(w.products);
     const unitPrefix = type?.prefix ?? usedPrefix;
     // a product sold on its own next to one with several variants may be one of them: the photo can say which
@@ -302,11 +309,15 @@ export async function applyUnits(units = [], { dryRun = false, writers } = {}) {
   if (units.length > 40) throw badRequest('Write at most 40 products at a time.');
   const edits = [];
   const refused = new Map(); // variant key -> why
+  const waiting = new Set(); // Etsy variants not sent because Etsy cannot take requests right now (they stay empty and are planned again later)
+  const usage = etsyUsage();
+  const etsyShut = !!usage.cooldownUntil || usage.today >= usage.cap;
   for (const unit of units) {
     for (const e of unit.edits ?? []) {
       let row;
       try { row = catalog.getRow(e.key); } catch (err) { refused.set(e.key, err.message); continue; }
       if (row.sku) { refused.set(e.key, `${row.productTitle}${row.variation ? ` (${row.variation})` : ''} already has the SKU ${row.sku} - this only fills empty ones.`); continue; }
+      if (row.channel === 'etsy' && etsyShut && !dryRun) { waiting.add(e.key); continue; }
       edits.push({ key: e.key, sku: e.sku });
     }
   }
@@ -317,17 +328,48 @@ export async function applyUnits(units = [], { dryRun = false, writers } = {}) {
   for (const unit of units) {
     const errors = [];
     let written = 0;
+    let waitingEtsy = 0;
     for (const e of unit.edits ?? []) {
       if (refused.has(e.key)) { errors.push(refused.get(e.key)); continue; }
+      if (waiting.has(e.key)) { waitingEtsy += 1; continue; }
       const r = byKey.get(e.key);
       if (r?.ok) written += r.unchanged ? 0 : 1; else errors.push(r?.error ?? 'Not processed.');
     }
     let linked = false; let linkError = null;
-    if (!dryRun && !errors.length && Array.isArray(unit.link) && unit.link.length > 1) {
+    if (!dryRun && !errors.length && !waitingEtsy && Array.isArray(unit.link) && unit.link.length > 1) {
       try { links.linkProducts(unit.link, { source: 'auto' }); linked = true; } catch (err) { linkError = err.message; }
     }
-    out.push({ id: unit.id, ok: !errors.length, written, errors, linked, linkError });
+    out.push({ id: unit.id, ok: !errors.length, written, errors, linked, linkError, waitingEtsy });
   }
   if (!dryRun) audit('catalog.auto_sku', { entity: 'catalog', entityId: 'auto-sku', detail: { units: units.length, written: out.reduce((n, u) => n + u.written, 0), failed: out.filter((u) => !u.ok).length } });
-  return { dryRun, units: out, written: out.reduce((n, u) => n + u.written, 0), failed: out.filter((u) => !u.ok).length };
+  const waitingEtsy = out.reduce((n, u) => n + u.waitingEtsy, 0);
+  return {
+    dryRun, units: out, written: out.reduce((n, u) => n + u.written, 0), failed: out.filter((u) => !u.ok).length,
+    waitingEtsy, etsyNote: waitingEtsy ? `${waitingEtsy} Etsy SKU${waitingEtsy === 1 ? '' : 's'} not sent: Etsy is not taking requests from this app right now. The Shopify ones were written; run Automatic SKUs again later for the rest.` : null,
+  };
+}
+
+// ----------------------------------------------------------------- the plan as a background job
+//
+// Working out the plan for a whole catalogue (thousands of variants, photos compared) takes longer than a web request
+// may last, so the page starts it, then asks how far it is.
+
+const jobs = new Map();
+const JOB_TTL_MS = 30 * 60_000;
+
+export function startPlan(options = {}) {
+  for (const [id, j] of jobs) if (Date.now() - j.startedAt > JOB_TTL_MS) jobs.delete(id);
+  const id = crypto.randomBytes(8).toString('hex');
+  const job = { id, status: 'running', stage: 'Starting', startedAt: Date.now(), result: null, error: null };
+  jobs.set(id, job);
+  plan({ ...options, onProgress: (stage) => { job.stage = stage; } })
+    .then((result) => { job.result = result; job.status = 'done'; })
+    .catch((err) => { job.error = err.message; job.status = 'error'; });
+  return { jobId: id, status: job.status, stage: job.stage };
+}
+
+export function planJob(id) {
+  const j = jobs.get(String(id));
+  if (!j) throw badRequest('That calculation is gone (they are kept for half an hour). Start it again.');
+  return { jobId: j.id, status: j.status, stage: j.stage, seconds: Math.round((Date.now() - j.startedAt) / 1000), error: j.error, result: j.status === 'done' ? j.result : null };
 }
