@@ -131,13 +131,33 @@ export async function addUpload(listingId, { kind, buffer, filename, mime, altTe
  * the same whatever happens to the link, and it is this copy that goes to Etsy. The link is only remembered as where
  * it came from.
  */
+/**
+ * Download what a staged link points at. Supplier image hosts often refuse a plain request (401/403) but serve the same
+ * file to a browser that arrives from their own site, so a refusal is retried once looking like that.
+ */
+export async function fetchLinked(url, kind = 'image') {
+  const accept = kind === 'image' ? 'image/jpeg,image/png,image/gif,image/*;q=0.8' : '*/*';
+  const attempt = (headers) => outboundFetch(url, { headers: { Accept: accept, ...headers } });
+  let res = await attempt({});
+  if ([401, 403, 404, 429].includes(res.status) || res.status >= 500) {
+    let origin = '';
+    try { origin = new URL(url).origin; } catch { /* keep empty */ }
+    const again = await attempt({
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      Referer: `${origin}/`, 'Accept-Language': 'en-US,en;q=0.9',
+    });
+    if (again.ok) res = again;
+  }
+  if (!res.ok) throw new Error(`the link answered ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > 25 * 1024 * 1024) throw new Error('the file is over 25 MB');
+  return buf;
+}
+
 export async function fetchPicture(url) {
   if (!/^https?:\/\//i.test(String(url ?? ''))) throw badRequest('That does not look like a link to a picture.');
-  let res;
-  try { res = await outboundFetch(String(url), { headers: { Accept: 'image/jpeg,image/png,image/gif,image/*;q=0.8' } }); } catch (err) { throw badRequest(`The picture could not be fetched: ${err.message}`); }
-  if (!res.ok) throw badRequest(`The picture could not be fetched (${res.status}). Is the link public?`);
-  const buffer = Buffer.from(await res.arrayBuffer());
-  if (buffer.length > 20 * 1024 * 1024) throw badRequest('That picture is over 20 MB.');
+  let buffer;
+  try { buffer = await fetchLinked(String(url), 'image'); } catch (err) { throw badRequest(`The picture could not be fetched: ${err.message}. Is the link public?`); }
   if (!pictureKind(buffer)) throw badRequest('That link is not a picture - open it in a browser and copy the picture address itself.');
   let name = '';
   try { name = decodeURIComponent(new URL(url).pathname.split('/').pop() || ''); } catch { /* none */ }
@@ -237,12 +257,7 @@ export async function pushToEtsy(localListingId, realListingId, { startRank = 1 
     try {
       let buffer;
       if (row.file_path) buffer = fs.readFileSync(row.file_path);
-      else {
-        // a picture kept as a link is fetched now, as a JPEG/PNG where the host allows it
-        const res = await outboundFetch(row.source_url, { headers: { Accept: row.kind === 'image' ? 'image/jpeg,image/png,image/gif,image/*;q=0.8' : '*/*' } });
-        if (!res.ok) throw new Error(`the link answered ${res.status}`);
-        buffer = Buffer.from(await res.arrayBuffer());
-      }
+      else buffer = await fetchLinked(row.source_url, row.kind);
       if (row.kind === 'image') {
         await listings.uploadImage(realListingId, {
           buffer, filename: row.filename || `image-${imgRank}.jpg`, mime: row.mime, rank: imgRank, altText: row.alt_text,
