@@ -11,6 +11,7 @@ import { saveListing, saveImages, saveVideos, syncVariationImages, LISTING_STATE
 import { getDiscountPercent } from './settings.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { createLogger } from '../lib/logger.js';
+import { forEtsy } from '../lib/picture.js';
 import * as ai from './ai/index.js';
 
 const log = createLogger('listings');
@@ -287,6 +288,9 @@ export async function createDraft(fields) {
 
 export async function uploadImage(listingId, { buffer, filename, mime, rank = 1, altText, overwrite = false, isWatermarked = false }) {
   const shopId = requireShopId();
+  // Etsy takes JPEG, PNG and GIF only: a WebP (or AVIF...) is converted on the way
+  const pic = await forEtsy(buffer, filename);
+  buffer = pic.buffer; filename = pic.filename; mime = pic.mime;
   const form = new FormData();
   form.append('image', new Blob([buffer], { type: mime || 'image/jpeg' }), filename || 'image.jpg');
   form.append('rank', String(rank));

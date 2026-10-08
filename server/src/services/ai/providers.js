@@ -572,7 +572,7 @@ export const OPENAI_IMAGE_PARAMS = {
     { id: 'auto', label: 'Auto' }, { id: 'low', label: 'Low' }, { id: 'medium', label: 'Medium' }, { id: 'high', label: 'High' },
   ] },
   outputFormat: { label: 'Output format', def: 'jpeg', choices: [
-    { id: 'jpeg', label: 'JPEG' }, { id: 'png', label: 'PNG' }, { id: 'webp', label: 'WebP (Etsy does not accept it)' },
+    { id: 'jpeg', label: 'JPEG' }, { id: 'png', label: 'PNG' }, { id: 'webp', label: 'WebP (turned into JPEG for Etsy)' },
   ] },
   outputCompression: { label: 'JPEG / WebP compression (1-100, blank = the model\'s own)', def: '' },
   n: { label: 'Number of images', def: 1, min: 1, max: 4 },

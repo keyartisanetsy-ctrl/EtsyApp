@@ -22,6 +22,7 @@ import { getDb } from '../db/index.js';
 import { config } from '../config.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { outboundFetch } from '../lib/outbound.js';
+import { forEtsy, pictureKind } from '../lib/picture.js';
 import { createLogger } from '../lib/logger.js';
 import * as listings from './listings.js';
 import * as undo from './undo.js';
@@ -99,11 +100,15 @@ export function addUrl(listingId, { kind, url, altText = '' } = {}) {
 }
 
 /** Stage a photo/video uploaded from this machine. */
-export function addUpload(listingId, { kind, buffer, filename, mime, altText = '', label = '', undoNote = null } = {}) {
+export async function addUpload(listingId, { kind, buffer, filename, mime, altText = '', label = '', undoNote = null } = {}) {
   const id = Number(listingId);
   if (!['image', 'video'].includes(kind)) throw badRequest('kind must be "image" or "video".');
   if (!buffer?.length) throw badRequest('No file was received.');
   assertRoom(id, kind);
+  if (kind === 'image') {   // Etsy takes JPEG/PNG/GIF - a WebP is converted now so what is shown is what is sent
+    const pic = await forEtsy(buffer, filename);
+    buffer = pic.buffer; filename = pic.filename; mime = pic.mime;
+  }
 
   const dir = storeDir();
   fs.mkdirSync(dir, { recursive: true });
@@ -133,28 +138,21 @@ export async function fetchPicture(url) {
   if (!res.ok) throw badRequest(`The picture could not be fetched (${res.status}). Is the link public?`);
   const buffer = Buffer.from(await res.arrayBuffer());
   if (buffer.length > 20 * 1024 * 1024) throw badRequest('That picture is over 20 MB.');
-  const kind = pictureKind(buffer);
-  if (!kind) throw badRequest('That link is not a picture - open it in a browser and copy the picture address itself.');
-  if (kind.mime === 'image/webp') throw badRequest('That picture is a WebP, which Etsy does not take. Save it as JPG or PNG and use + Upload (or copy the JPG/PNG address).');
+  if (!pictureKind(buffer)) throw badRequest('That link is not a picture - open it in a browser and copy the picture address itself.');
   let name = '';
   try { name = decodeURIComponent(new URL(url).pathname.split('/').pop() || ''); } catch { /* none */ }
-  name = name.replace(/[^\w.-]+/g, '-').replace(/\.[A-Za-z0-9_]+$/, '').slice(0, 60) || 'image';
-  return { buffer, mime: kind.mime, filename: `${name}${kind.ext}` };
+  name = name.replace(/[^\w.-]+/g, '-').replace(/\.[A-Za-z0-9_]+$/, '').replace(/\.(jpe?g|png|gif|webp)_?$/i, '').slice(0, 60) || 'image';
+  // a WebP (or AVIF...) is turned into JPEG/PNG here, because Etsy only takes those
+  const pic = await forEtsy(buffer, name);
+  return { buffer: pic.buffer, mime: pic.mime, filename: pic.filename, converted: pic.converted, from: pic.from };
 }
 
-/** What kind of picture these bytes are (from their first bytes), or null. */
-export function pictureKind(buf) {
-  if (!buf || buf.length < 12) return null;
-  if (buf[0] === 0xff && buf[1] === 0xd8) return { mime: 'image/jpeg', ext: '.jpg' };
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return { mime: 'image/png', ext: '.png' };
-  if (buf.toString('ascii', 0, 3) === 'GIF') return { mime: 'image/gif', ext: '.gif' };
-  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return { mime: 'image/webp', ext: '.webp' };
-  return null;
-}
+export { pictureKind };
 
 /** Put a different picture where this one is, keeping its place in the order. */
-export function replaceImage(listingId, mediaId, { buffer, filename, mime, note = '' } = {}) {
+export async function replaceImage(listingId, mediaId, { buffer, filename, mime, note = '' } = {}) {
   const db = getDb();
+  { const pic = await forEtsy(buffer, filename); buffer = pic.buffer; filename = pic.filename; mime = pic.mime; }
   const row = db.prepare("SELECT * FROM draft_media WHERE id = ? AND listing_id = ? AND kind = 'image'").get(Number(mediaId), Number(listingId));
   if (!row) throw notFound('That picture is not staged on this draft.');
   const dir = storeDir();

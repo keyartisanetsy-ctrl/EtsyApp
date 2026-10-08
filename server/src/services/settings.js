@@ -27,7 +27,7 @@ export const SETTING_DEFS = {
       { value: 'openai', label: 'OpenAI (fast, reads images, edits images)' },
     ] },
   'ai.manus.api_key':      { env: config.ai.manus.apiKey,
-    def: 'sk-Htm8Yo3Vv0rzLxD-uFe-GLtJQZ1fguGMdV0lJQ-ZekHDQnbTdBGEvacElCVXQMT791Yj13dk1ekFYz2xwNa-3YjnrCVP',
+    def: '',
     secret: true, label: 'Manus API key' },
   'ai.manus.agent_profile':{ env: config.ai.manus.agentProfile, def: 'standard', label: 'Manus agent profile' },
   'ai.anthropic.api_key':  { env: config.ai.anthropic.apiKey, def: '', secret: true, label: 'Anthropic API key' },

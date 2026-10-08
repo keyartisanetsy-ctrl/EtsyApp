@@ -47,6 +47,7 @@ export function ImageAiModal({ listingId, image, autoRun = false, onClose, onApp
   const [prompt, setPrompt] = useState('');
   const [params, setParams] = useState({});
   const [pick, setPick] = useState(0);
+  const [newKey, setNewKey] = useState('');
   const [job, setJob] = useState(null);
   const [busy, setBusy] = useState(false);
   const started = useRef(false);
@@ -92,6 +93,23 @@ export function ImageAiModal({ listingId, image, autoRun = false, onClose, onApp
     }, 2000);
     return () => clearInterval(t);
   }, [job?.jobId, job?.status]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // a key that was deleted or mistyped: save the new one and go again
+  const saveKey = async (which, then) => {
+    setBusy(true);
+    try {
+      const r = await api.post('/drafts/image-edit/key', { provider: which, apiKey: newKey });
+      setOpts(r.options); setNewKey('');
+      toast({ kind: 'ok', title: `${which === 'manus' ? 'Manus' : 'ChatGPT'} key saved` });
+      if (then) await start({ provider: which, model: which === 'manus' ? r.options.defaults.manusModel : r.options.defaults.openaiModel });
+    } catch (err) { showError(err, 'Could not save the key'); } finally { setBusy(false); }
+  };
+  const useOther = async () => {
+    const other = provider === 'manus' ? 'openai' : 'manus';
+    const m = other === 'manus' ? opts.defaults.manusModel : opts.defaults.openaiModel;
+    setProvider(other); setModel(m);
+    await start({ provider: other, model: m });
+  };
 
   const apply = async (mode) => {
     setBusy(true);
@@ -160,6 +178,18 @@ export function ImageAiModal({ listingId, image, autoRun = false, onClose, onApp
             ) : (
               <>
                 {job?.status === 'error' && <Banner kind="err">{job.error}</Banner>}
+                {job?.status === 'error' && job.keyProblem && (
+                  <div className="card" style={{ padding: 10, marginBottom: 8 }}>
+                    <div className="small mb4"><strong>{job.keyProblem === 'manus' ? 'Manus' : 'ChatGPT'} no longer accepts this API key.</strong> Make a new one ({job.keyProblem === 'manus' ? 'Manus > Settings > API' : 'platform.openai.com > API keys'}), paste it here and it carries on:</div>
+                    <div className="flex gap4">
+                      <input className="input mono" type="password" autoComplete="off" placeholder="New API key" aria-label="New API key" value={newKey} onChange={(e) => setNewKey(e.target.value)} />
+                      <button className="btn primary" disabled={busy || !newKey.trim()} onClick={() => saveKey(job.keyProblem, true)}>{busy ? <Spinner /> : 'Save & try again'}</button>
+                    </div>
+                    {opts.providers.find((p) => p.id !== job.keyProblem)?.configured && (
+                      <div className="mt8"><button className="btn sm" disabled={busy} onClick={useOther}>Or do it with {job.keyProblem === 'manus' ? 'ChatGPT' : 'Manus'} now</button></div>
+                    )}
+                  </div>
+                )}
                 <div className="small muted mb4">Which AI</div>
                 <div className="flex gap4 mb8" role="tablist">
                   {opts.providers.map((p) => (
@@ -172,7 +202,15 @@ export function ImageAiModal({ listingId, image, autoRun = false, onClose, onApp
                     {models.map((m) => <option key={m.id} value={m.id}>{m.label}{m.note ? ` - ${m.note}` : ''}</option>)}
                   </select>
                 </label>
-                {!configured && <Banner kind="warn">This one has no API key yet - add it in Settings &gt; AI, or pick the other.</Banner>}
+                {!configured && (
+                  <div className="card" style={{ padding: 10, marginBottom: 8 }}>
+                    <div className="small mb4"><strong>{provider === 'manus' ? 'Manus' : 'ChatGPT'} has no API key yet.</strong> Paste one here (or pick the other AI):</div>
+                    <div className="flex gap4">
+                      <input className="input mono" type="password" autoComplete="off" placeholder="API key" aria-label="API key" value={newKey} onChange={(e) => setNewKey(e.target.value)} />
+                      <button className="btn" disabled={busy || !newKey.trim()} onClick={() => saveKey(provider, false)}>Save key</button>
+                    </div>
+                  </div>
+                )}
                 {provider === 'openai' && opts.openaiParams && (
                   <fieldset style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', margin: '0 0 8px' }}>
                     <legend className="small muted" style={{ padding: '0 4px' }}>Picture settings</legend>
@@ -191,7 +229,7 @@ export function ImageAiModal({ listingId, image, autoRun = false, onClose, onApp
                         </label>
                       )))}
                     </div>
-                    <div className="small muted mt4">Medium quality and JPEG are the standard. Etsy takes JPEG, PNG and GIF - not WebP. A setting the chosen model does not know is left out.</div>
+                    <div className="small muted mt4">Medium quality and JPEG are the standard. Etsy takes JPEG, PNG and GIF, so a WebP result is turned into JPEG. A setting the chosen model does not know is left out.</div>
                   </fieldset>
                 )}
                 <label className="flex col small">What to do with the picture
@@ -289,7 +327,7 @@ export function AddByUrlModal({ kind, listingId, room, onClose, onDone }) {
                 aria-label={kind === 'image' ? 'Picture links' : 'Video link'} onChange={(e) => setText(e.target.value)} />
       <div className="small muted mt8">
         {kind === 'image'
-          ? 'On a draft that exists only here the picture stays a link until the draft is sent to Etsy; on a draft that is already on Etsy it is uploaded there at once. Either way you can take it back (Ctrl+Z). JPG, PNG or GIF.'
+          ? 'On a draft that exists only here the picture stays a link until the draft is sent to Etsy; on a draft that is already on Etsy it is uploaded there at once. Either way you can take it back (Ctrl+Z). JPG, PNG, GIF or WebP (a WebP is turned into JPEG for Etsy).'
           : 'A video stays a link until the draft is sent.'}
       </div>
       {results.map((r) => <div key={r.url} className="small" style={{ color: r.ok ? 'var(--good)' : 'var(--bad)' }}>{r.ok ? '✓' : '✕'} {r.url.slice(0, 70)}{r.error ? ` - ${r.error}` : ''}</div>)}

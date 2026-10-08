@@ -23,6 +23,7 @@ import * as ai from './ai/index.js';
 import { OPENAI_IMAGE_PARAMS } from './ai/providers.js';
 import * as undo from './undo.js';
 import { decodeImage } from './imagesig.js';
+import { forEtsy } from '../lib/picture.js';
 import * as draftmedia from './draftmedia.js';
 import * as listings from './listings.js';
 import * as drafts from './drafts.js';
@@ -82,6 +83,9 @@ export function options() {
   const status = ai.providerStatus();
   const openaiDefault = readSetting('drafts.image_edit.openai_model') || readSetting('ai.openai.image_model') || 'gpt-image-2';
   const openaiModels = MODELS.openai.some((m) => m.id === openaiDefault) ? MODELS.openai : [{ id: openaiDefault, label: openaiDefault }, ...MODELS.openai];
+  // start with the one that can actually be used: the remembered choice, unless it has no key and the other has
+  const remembered = readSetting('drafts.image_edit.provider') || 'manus';
+  const usable = status[remembered]?.configured ? remembered : (['manus', 'openai'].find((p) => status[p].configured) ?? remembered);
   return {
     providers: [
       { id: 'manus', label: 'Manus', configured: status.manus.configured, models: MODELS.manus, note: 'An agent: it can take a minute or two.' },
@@ -89,7 +93,7 @@ export function options() {
     ],
     openaiParams: OPENAI_IMAGE_PARAMS,
     defaults: {
-      provider: readSetting('drafts.image_edit.provider') || 'manus',
+      provider: usable,
       manusModel: readSetting('drafts.image_edit.manus_model') || 'lite',
       openaiModel: openaiDefault,
       prompt: readSetting('drafts.image_edit.prompt') || DEFAULT_PROMPT,
@@ -150,8 +154,18 @@ const publicJob = (j) => ({
   previews: j.status === 'done' ? j.results.map((r, i) => ({ index: i, url: `/api/drafts/image-edit/jobs/${j.id}/file?i=${i}`, width: r.width, height: r.height, mime: r.mime, bytes: r.bytes })) : [],
   previewUrl: j.status === 'done' ? `/api/drafts/image-edit/jobs/${j.id}/file?i=0` : null,
   width: j.results?.[0]?.width ?? null, height: j.results?.[0]?.height ?? null,
-  ignored: j.ignored ?? [], seconds: Math.round(((j.finishedAt ?? Date.now()) - j.createdAt) / 1000),
+  keyProblem: j.keyProblem ?? null, ignored: j.ignored ?? [], seconds: Math.round(((j.finishedAt ?? Date.now()) - j.createdAt) / 1000),
 });
+
+/** Save a new API key for Manus or ChatGPT (the old one was deleted, revoked or mistyped). */
+export function saveKey(provider, apiKey) {
+  const key = String(apiKey ?? '').trim();
+  if (!['manus', 'openai'].includes(provider)) throw badRequest('Choose Manus or ChatGPT.');
+  if (key.length < 12 || /\s/.test(key)) throw badRequest('That does not look like an API key - copy it again, whole, with nothing around it.');
+  writeSetting(provider === 'manus' ? 'ai.manus.api_key' : 'ai.openai.api_key', key);
+  audit('settings.ai_key', { detail: { provider } });
+  return { saved: provider, options: options() };
+}
 
 export function job(id) {
   const j = jobs.get(String(id));
@@ -204,6 +218,8 @@ async function run(j, src) {
     log.warn(`picture edit ${j.id} failed: ${err.message}`);
     j.status = 'error';
     j.error = err.message;
+    // the service said the key itself is wrong (deleted, revoked, mistyped): the page offers to enter a new one
+    if (/api[ _-]?key|unauthori[sz]ed|invalid[_ ]credential|authentication/i.test(err.message) || err.status === 401) j.keyProblem = j.provider;
   } finally {
     j.finishedAt = Date.now();
   }
@@ -250,23 +266,25 @@ export async function start({ listingId, mediaId, provider, model, prompt, param
  */
 export async function apply(jobId, { mode = 'replace', index = 0 } = {}) {
   const j = jobs.get(String(jobId));
-  const result = j?.status === 'done' ? j.results[Number(index) || 0] : null;
+  let result = j?.status === 'done' ? j.results[Number(index) || 0] : null;
   if (!result) throw notFound('That edited picture is not ready (or is gone - edits are kept for an hour).');
   if (!['replace', 'add'].includes(mode)) throw badRequest('mode must be "replace" or "add".');
-  if (result.mime === 'image/webp') throw badRequest('Etsy does not accept WebP pictures. Edit again with JPEG or PNG as the output format.');
-  const buffer = fs.readFileSync(result.file);
+  const raw = fs.readFileSync(result.file);
   const original = await sourceOf(j.listingId, j.mediaId).catch(() => null);
   if (!original) throw notFound('The original picture is no longer on this draft.');
   const base = String(original.filename || 'image').replace(/\.[^.]+$/, '');
-  const ext = path.extname(result.file);
-  const filename = `${base}-en${ext}`;
+  // WebP results are turned into JPEG (PNG if see-through): Etsy does not take WebP
+  const pic = await forEtsy(raw, `${base}-en${path.extname(result.file)}`);
+  const buffer = pic.buffer;
+  const filename = pic.filename;
+  result = { ...result, mime: pic.mime };
   const what = mode === 'replace' ? 'AI-edited picture replaced the original' : 'AI-edited picture added next to the original';
 
   if (j.listingId < 0) {
     if (mode === 'add') {
-      draftmedia.addUpload(j.listingId, { kind: 'image', buffer, filename, mime: result.mime, label: `${what} (draft)`, undoNote: 'Removes the added picture; the original was never touched.' });
+      await draftmedia.addUpload(j.listingId, { kind: 'image', buffer, filename, mime: result.mime, label: `${what} (draft)`, undoNote: 'Removes the added picture; the original was never touched.' });
     } else {
-      draftmedia.replaceImage(j.listingId, j.mediaId, { buffer, filename, mime: result.mime, note: `${what} (draft)` });
+      await draftmedia.replaceImage(j.listingId, j.mediaId, { buffer, filename, mime: result.mime, note: `${what} (draft)` });
     }
   } else {
     // the original is kept (as a file) so it can be put back on Etsy

@@ -50,6 +50,7 @@ router.post('/delete', asyncRoute(async (req, res) => {
 // -------------------------------------------------- AI edits of a picture
 /** Providers and models on offer, and what the box starts with. */
 router.get('/image-edit/options', asyncRoute(async (req, res) => res.json(imageedit.options())));
+router.post('/image-edit/key', asyncRoute(async (req, res) => res.json(imageedit.saveKey(req.body?.provider, req.body?.apiKey))));
 router.get('/image-edit/jobs/:jobId', asyncRoute(async (req, res) => res.json(imageedit.job(req.params.jobId))));
 router.get('/image-edit/jobs/:jobId/file', asyncRoute(async (req, res) => {
   const { path, mime } = imageedit.jobFile(req.params.jobId, req.query.i);
@@ -129,7 +130,7 @@ router.post('/:id/media/:mediaId/ai-edit', asyncRoute(async (req, res) => {
 router.post('/:id/media/upload', upload.single('file'), asyncRoute(async (req, res) => {
   if (!req.file) throw new Error('Attach a file as the "file" field.');
   const kind = req.body?.kind === 'video' ? 'video' : 'image';
-  res.status(201).json(draftmedia.addUpload(Number(req.params.id), {
+  res.status(201).json(await draftmedia.addUpload(Number(req.params.id), {
     kind, buffer: req.file.buffer, filename: req.file.originalname, mime: req.file.mimetype, altText: req.body?.altText,
   }));
 }));
