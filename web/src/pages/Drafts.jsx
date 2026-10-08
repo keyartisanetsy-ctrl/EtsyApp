@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import api from '../lib/api.js';
+import api, { withBase } from '../lib/api.js';
 import { TablePage } from '../components/Page.jsx';
 import {
   Spinner, Empty, Banner, Checkbox, Drawer, Modal, Thumb, CopyButton, Tabs,
@@ -8,6 +8,7 @@ import {
 } from '../components/ui.jsx';
 import { CategoryPicker } from './NewListing.jsx';
 import { PersonalizationEditor } from '../components/Personalization.jsx';
+import { PictureMenu, ImageAiModal, DeleteDraftsModal, AddByUrlModal } from '../components/DraftPictures.jsx';
 
 const WHEN_MADE = ['made_to_order', '2020_2026', '2010_2019', '2007_2009', 'before_2007',
   '2000_2006', '1990s', '1980s', '1970s', '1960s', '1950s', '1940s', '1930s', '1920s', '1910s',
@@ -49,6 +50,8 @@ export default function Drafts() {
   const [busy, setBusy] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const [defaultsOpen, setDefaultsOpen] = useState(false);
+  const [sel, setSel] = useState(() => new Set());
+  const [deleting, setDeleting] = useState(null);
   const [params, setParams] = useSearchParams();
 
   // Product Studio is handed a link straight to the draft it just created, so
@@ -66,6 +69,9 @@ export default function Drafts() {
 
   const { data, loading, reload } = useAsync(() => api.get('/drafts'), []);
   const drafts = data?.drafts ?? [];
+  const toggle = (id) => setSel((s0) => { const n = new Set(s0); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const allOn = drafts.length > 0 && drafts.every((d) => sel.has(d.listingId));
+  const chosen = drafts.filter((d) => sel.has(d.listingId));
 
   const pull = async () => {
     setBusy(true);
@@ -91,6 +97,7 @@ export default function Drafts() {
       subtitle={drafts.length ? `${drafts.length} draft(s) — nothing here is on Etsy until you send it` : ''}
       actions={
         <>
+          {chosen.length > 0 && <button className="btn sm danger" onClick={() => setDeleting(chosen)}>🗑 Delete {chosen.length} selected</button>}
           <button className="btn sm" onClick={() => setDefaultsOpen(true)}>⚙ Usual defaults</button>
           <button className="btn sm" onClick={() => setConnectOpen(true)}>🔗 Connect an outside app</button>
           <button className="btn sm" onClick={startNew}>＋ Start one here</button>
@@ -116,13 +123,14 @@ export default function Drafts() {
           <table className="data">
             <thead>
               <tr>
-                <th className="col-tight" /><th>Title</th><th className="right">Price</th>
+                <th className="col-tight"><Checkbox checked={allOn} onChange={(v) => setSel(v ? new Set(drafts.map((d) => d.listingId)) : new Set())} /></th><th className="col-tight" /><th>Title</th><th className="right">Price</th>
                 <th>Where it is</th><th>Your edits</th><th>Updated</th><th className="col-tight" />
               </tr>
             </thead>
             <tbody>
               {drafts.map((d) => (
-                <tr key={d.listingId} className={d.stagedCount ? 'multi-item' : ''}>
+                <tr key={d.listingId} className={[d.stagedCount ? 'multi-item' : '', sel.has(d.listingId) ? 'selected' : ''].join(' ')}>
+                  <td><Checkbox checked={sel.has(d.listingId)} onChange={() => toggle(d.listingId)} /></td>
                   <td><Thumb src={d.imageUrl} fallback="✎" /></td>
                   <td className="cell-title">{d.title}</td>
                   <td className="num">{d.price != null ? fmtMoney(d.price, 'USD') : '—'}</td>
@@ -138,14 +146,15 @@ export default function Drafts() {
                       : <span className="dim">none</span>}
                   </td>
                   <td className="small dim">{fmtAgo(d.updatedAt)}</td>
-                  <td><button className="btn xs" onClick={() => setOpen(d.listingId)}>Open</button></td>
+                  <td className="flex gap4"><button className="btn xs" onClick={() => setOpen(d.listingId)}>Open</button><button className="btn xs danger" aria-label={`Delete ${d.title}`} onClick={() => setDeleting([d])}>Delete</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
 
-      <DraftEditor key={open} id={open} onClose={() => setOpen(null)} onChanged={reload} />
+      <DraftEditor key={open} id={open} onClose={() => setOpen(null)} onChanged={reload} onDelete={(d) => setDeleting([d])} />
+      {deleting && <DeleteDraftsModal drafts={deleting} onClose={() => setDeleting(null)} onDone={() => { setSel(new Set()); if (deleting.some((d) => d.listingId === open)) setOpen(null); setDeleting(null); reload(); }} />}
       <ConnectProductStudio open={connectOpen} onClose={() => setConnectOpen(false)} onImported={reload} />
       <DraftDefaultsModal open={defaultsOpen} onClose={() => setDefaultsOpen(false)} />
     </TablePage>
@@ -306,7 +315,7 @@ function DraftDefaultsModal({ open, onClose }) {
   );
 }
 
-function DraftEditor({ id, onClose, onChanged }) {
+function DraftEditor({ id, onClose, onChanged, onDelete }) {
   const [busy, setBusy] = useState(false);
   const [revertTick, setRevertTick] = useState(0);
   const toast = useToast();
@@ -416,6 +425,7 @@ function DraftEditor({ id, onClose, onChanged }) {
           }}>
             Drop my edits
           </button>
+          <button className="btn danger" onClick={() => onDelete({ listingId: draft.listingId, title: merged.title || draft.etsy?.title, isLocalOnly: draft.isLocalOnly, etsyState: draft.etsyState })}>Delete draft</button>
           <div className="spacer" />
           <button className="btn" disabled={busy || !plan?.ready} onClick={() => send(false)}>
             {busy ? <Spinner /> : 'Send to Etsy as draft'}
@@ -896,21 +906,14 @@ function MediaManager({ draft, onChanged }) {
   const showError = useErrorToast();
   const local = draft.isLocalOnly;
   const listingId = draft.listingId;
+  const [urlFor, setUrlFor] = useState(null);   // 'image' | 'video' - the "by link" box
+  const [menu, setMenu] = useState(null);        // right-click menu on a picture
+  const [aiEdit, setAiEdit] = useState(null);    // { image, autoRun }
 
   const images = local ? (draft.pendingMedia?.images ?? []) : draft.images.map((i) => ({ id: i.imageId, url: i.thumb || i.url }));
   const videos = local ? (draft.pendingMedia?.videos ?? []) : draft.videos.map((v) => ({ id: v.videoId, url: v.thumb || v.url }));
   const maxImages = draft.pendingMedia?.maxImages ?? 20;
   const maxVideos = draft.pendingMedia?.maxVideos ?? 2;
-
-  const addUrl = async (kind) => {
-    const url = prompt(kind === 'image' ? 'Paste the image URL' : 'Paste the video URL');
-    if (!url) return;
-    setBusy(true);
-    try {
-      await api.post(`/drafts/${listingId}/media`, { kind, url });
-      onChanged();
-    } catch (err) { showError(err, 'Could not add that'); } finally { setBusy(false); }
-  };
 
   const addFile = async (kind, file) => {
     setBusy(true);
@@ -995,6 +998,21 @@ function MediaManager({ draft, onChanged }) {
     } catch (err) { showError(err, 'Could not reorder that'); } finally { setBusy(false); }
   };
 
+  /** What right-clicking (or the ✦ button on) a picture offers. */
+  const openMenu = (x, y, it, index, items) => setMenu({
+    x, y,
+    items: [
+      { label: '✦ Translate the text to English (AI)', run: () => setAiEdit({ image: it, autoRun: true }) },
+      { label: '✦ Edit with AI…', run: () => setAiEdit({ image: it, autoRun: false }) },
+      { sep: true },
+      { label: 'Open the picture', run: () => window.open(withBase(it.url), '_blank', 'noreferrer') },
+      { label: 'Move earlier', disabled: index === 0, run: () => moveImage(items, index, -1) },
+      { label: 'Move later', disabled: index === items.length - 1, run: () => moveImage(items, index, 1) },
+      { sep: true },
+      { label: 'Remove', danger: true, run: () => remove('image', it.id) },
+    ],
+  });
+
   const Row = ({ kind, items, max }) => {
     const kindPending = pending.filter((p) => p.kind === kind);
     const count = items.length + kindPending.length;
@@ -1003,7 +1021,7 @@ function MediaManager({ draft, onChanged }) {
         <div className="flex gap4" style={{ alignItems: 'center', justifyContent: 'space-between' }}>
           <span className="small dim">{kind === 'image' ? 'Images' : 'Video'} — {count} of {max}</span>
           <div className="flex gap4">
-            <button className="btn xs ghost" disabled={busy || count >= max} onClick={() => addUrl(kind)}>+ By URL</button>
+            <button className="btn xs ghost" disabled={busy || count >= max} onClick={() => setUrlFor(kind)}>+ By URL</button>
             <label className="btn xs ghost" style={{ cursor: count >= max ? 'not-allowed' : 'pointer', opacity: count >= max ? 0.5 : 1 }}>
               + Upload
               <input type="file" accept={kind === 'image' ? 'image/*' : 'video/*'} multiple style={{ display: 'none' }}
@@ -1015,13 +1033,19 @@ function MediaManager({ draft, onChanged }) {
         {count > 0 && (
           <div className="flex gap4 mt8" style={{ flexWrap: 'wrap' }}>
             {items.map((it, index) => (
-              <div key={it.id} style={{ position: 'relative' }}>
+              <div key={it.id} style={{ position: 'relative' }}
+                   onContextMenu={kind === 'image' ? (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, it, index, items); } : undefined}>
                 {kind === 'image'
                   ? <Thumb src={it.url} size="lg" />
                   : <video src={it.url} muted style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 6, background: '#000' }} />}
                 <button type="button" className="btn xs" disabled={busy}
                         style={{ position: 'absolute', top: -6, right: -6, borderRadius: '50%', padding: '0 6px' }}
                         onClick={() => remove(kind, it.id)} aria-label="Remove">×</button>
+                {kind === 'image' && (
+                  <button type="button" className="btn xs" disabled={busy} title="Edit with AI - translate the text on it (or right-click the picture)"
+                          style={{ position: 'absolute', top: -6, left: -6, borderRadius: '50%', padding: '0 6px' }}
+                          onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu(r.left, r.bottom + 4, it, index, items); }} aria-label="Picture options">✦</button>
+                )}
                 {kind === 'image' && items.length > 1 && (
                   <div className="flex gap4" style={{ position: 'absolute', bottom: -6, left: 0, right: 0, justifyContent: 'center' }}>
                     <button type="button" className="btn xs" disabled={busy || index === 0}
@@ -1065,6 +1089,12 @@ function MediaManager({ draft, onChanged }) {
       )}
       <Row kind="image" items={images} max={maxImages} />
       <Row kind="video" items={videos} max={maxVideos} />
+      {menu && <PictureMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+      {aiEdit && <ImageAiModal listingId={listingId} image={aiEdit.image} autoRun={aiEdit.autoRun} onClose={() => setAiEdit(null)} onApplied={onChanged} />}
+      {urlFor && (
+        <AddByUrlModal kind={urlFor} listingId={listingId} room={Math.max(1, (urlFor === 'image' ? maxImages - images.length : maxVideos - videos.length))}
+                       onClose={() => setUrlFor(null)} onDone={async () => { if (!local) await api.post(`/drafts/${listingId}/resync`, {}).catch(() => {}); await onChanged(); }} />
+      )}
     </div>
   );
 }
