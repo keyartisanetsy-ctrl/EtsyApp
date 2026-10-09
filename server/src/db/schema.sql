@@ -1095,7 +1095,12 @@ CREATE TABLE IF NOT EXISTS inbound_parcels (
   ocr_text       TEXT,
   quick          TEXT,
   created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-  raw_text         TEXT                   -- the line exactly as it was typed (中通 3324 1件), for the packing sheet
+  raw_text         TEXT,                  -- the line exactly as it was typed (中通 3324 1件), for the packing sheet
+  -- Pieces of one arrival can go to several customers, or onto the shelf: each share is an arrival of its own
+  -- (a child with alloc = 1, same photos), and what is left stays with the original. stock_sku: these pieces
+  -- were put into the real stock of that SKU instead of being matched to an order.
+  alloc            INTEGER NOT NULL DEFAULT 0,
+  stock_sku        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_parcels_match ON inbound_parcels(match_channel, match_item_id);
 CREATE INDEX IF NOT EXISTS idx_parcels_parent ON inbound_parcels(parent_id);

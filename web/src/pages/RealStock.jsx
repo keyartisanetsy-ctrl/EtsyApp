@@ -14,7 +14,7 @@ const FILTERS = [
 ];
 
 const KIND = {
-  count: ['blue', 'Counted'], order: ['orange', 'Order'], cancel: ['green', 'Order cancelled'], clear: ['grey', 'Stopped counting'], rename: ['grey', 'SKU renamed'],
+  count: ['blue', 'Counted'], order: ['orange', 'Order'], cancel: ['green', 'Order cancelled'], receive: ['green', 'Received'], clear: ['grey', 'Stopped counting'], rename: ['grey', 'SKU renamed'],
 };
 
 /** What the last change of a SKU was, in a few words. */

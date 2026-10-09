@@ -94,6 +94,39 @@ export function setReal(sku, qty) {
   return { sku: s, qty: n, from: before?.qty ?? null };
 }
 
+/**
+ * Pieces that came in at the warehouse go onto the shelf: the count goes up by `qty` (and starts at `qty` when
+ * nobody was counting this SKU). The date of the count is left as it was, so orders already taken off stay taken off.
+ */
+export function receive(sku, qty, { ref = null, note = null } = {}) {
+  const s = String(sku ?? '').trim();
+  if (!s) throw badRequest('Say which SKU these pieces are.');
+  const n = Number(qty);
+  if (!Number.isInteger(n) || n < 1 || n > 100_000) throw badRequest('Pieces to put into stock: a whole number, 1 or more.');
+  const db = getDb();
+  const before = db.prepare('SELECT qty FROM real_stock WHERE sku = ?').get(s);
+  if (before) db.prepare("UPDATE real_stock SET qty = qty + ?, updated_at = datetime('now') WHERE sku = ?").run(n, s);
+  else db.prepare("INSERT INTO real_stock (sku, qty, counted_at, updated_at) VALUES (?,?, datetime('now'), datetime('now'))").run(s, n);
+  const after = (before?.qty ?? 0) + n;
+  audit('stock.receive', { entity: 'sku', entityId: s, detail: { qty: n, ref } });
+  ledger({ sku: s, kind: 'receive', before: before?.qty ?? 0, after, note: note || 'Pieces received at the warehouse' });
+  return { sku: s, qty: after, added: n };
+}
+
+/** Take received pieces back off the shelf (the arrival was put back to unmatched, or deleted). Never below zero. */
+export function unreceive(sku, qty, { note = null } = {}) {
+  const s = String(sku ?? '').trim();
+  const n = Math.max(0, Math.floor(Number(qty) || 0));
+  const db = getDb();
+  const before = db.prepare('SELECT qty FROM real_stock WHERE sku = ?').get(s);
+  if (!before || !n) return { sku: s, qty: before?.qty ?? null, removed: 0 };
+  const after = Math.max(0, before.qty - n);
+  db.prepare("UPDATE real_stock SET qty = ?, updated_at = datetime('now') WHERE sku = ?").run(after, s);
+  audit('stock.unreceive', { entity: 'sku', entityId: s, detail: { qty: n } });
+  ledger({ sku: s, kind: 'receive', before: before.qty, after, note: note || 'Pieces taken back out (the arrival was unstocked)' });
+  return { sku: s, qty: after, removed: before.qty - after };
+}
+
 export function clearReal(sku) {
   const s = String(sku ?? '').trim();
   const before = getDb().prepare('SELECT qty FROM real_stock WHERE sku = ?').get(s);

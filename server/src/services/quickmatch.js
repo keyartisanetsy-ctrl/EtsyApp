@@ -275,6 +275,7 @@ export async function quickMatch(id, { channels, from, to, assign = 'tracking' }
   const db = getDb();
   const parcel = packing.getRow(id);
   if (parcel.match_channel) throw badRequest('This arrival is matched already - unmatch it first.');
+  if (parcel.stock_sku) throw badRequest('These pieces are already in stock.');
   if (parcel.quantity < 1) throw badRequest('Every piece of this photo has been split out - match the split arrivals instead.');
 
   const range = packing.resolveRange({ channels, from, to });

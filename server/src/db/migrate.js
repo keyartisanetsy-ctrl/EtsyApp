@@ -140,6 +140,8 @@ export function migrateSchema(db) {
   addColumn(db, 'inbound_parcels', 'ocr_text', 'TEXT');
   addColumn(db, 'inbound_parcels', 'quick', 'TEXT');
   addColumn(db, 'inbound_parcels', 'raw_text', 'TEXT');
+  addColumn(db, 'inbound_parcels', 'alloc', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn(db, 'inbound_parcels', 'stock_sku', 'TEXT');
 
   // What each shop is called over in Airtable.
   addColumn(db, 'etsy_accounts', 'airtable_name', "TEXT DEFAULT ''");

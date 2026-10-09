@@ -41,10 +41,16 @@ router.post('/parcels', upload.fields([{ name: 'photo', maxCount: 1 }, { name: '
     receivedOn: b.receivedOn,
   });
   if (product.length > 1) packing.addParcelPhotos(parcel.id, product.slice(1));
+  const stockSku = String(b.stockSku ?? '').trim();
   if (labels.length) packing.addParcelPhotos(parcel.id, labels, { kind: 'label' });
   // An order code typed with the arrival is applied at once. The arrival is kept
   // whatever happens: a code that fits nothing, or an order with several items,
   // comes back as a message / a choice next to it, not as a lost photo.
+  // "Add to stock" typed with the arrival: all of its pieces go onto the shelf under that SKU, no order involved.
+  if (stockSku) {
+    try { res.status(201).json(packing.stockParcel(parcel.id, { sku: stockSku }).parcel); } catch (err) { res.status(201).json({ ...packing.getParcel(parcel.id), stockError: err.message }); }
+    return;
+  }
   const code = String(b.code ?? '').trim();
   if (!code) { res.status(201).json(product.length > 1 || labels.length ? packing.getParcel(parcel.id) : parcel); return; }
   try {
@@ -160,6 +166,39 @@ router.post('/parcels/:id/photos/:photoId/detach', asyncRoute(async (req, res) =
 /** Gather other arrivals' photos onto this one - they were one package. */
 router.post('/parcels/:id/merge', asyncRoute(async (req, res) => {
   res.json(packing.mergeParcels(req.params.id, req.body?.sourceIds ?? []));
+}));
+
+// ------------------------------------- sharing pieces out, counting, the shelf
+
+/** How many pieces the photo(s) show - of one product when `channel` + `itemId` name it. */
+router.post('/parcels/:id/count', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(await packing.countPieces(req.params.id, { provider: b.provider, model: b.model, channel: b.channel, itemId: b.itemId }));
+}));
+/** Say how many pieces the arrival really has (the line the warehouse typed is kept). */
+router.post('/parcels/:id/set-count', asyncRoute(async (req, res) => {
+  res.json(packing.setCount(req.params.id, req.body?.quantity));
+}));
+/** Share the arrival's pieces out: `parts` [{channel, orderId, itemId, qty}] and `stock` {sku, qty}. */
+router.post('/parcels/:id/allocate', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  res.status(201).json(packing.allocateParcel(req.params.id, { parts: b.parts, stock: b.stock }));
+}));
+/** Give a share's pieces back to the arrival they came from. */
+router.post('/parcels/:id/unallocate', asyncRoute(async (req, res) => {
+  res.json(packing.unallocateParcel(req.params.id));
+}));
+/** Put pieces of the arrival into the real stock of a SKU. */
+router.post('/parcels/:id/stock', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  if (!String(b.sku ?? '').trim()) throw badRequest('Say which SKU these pieces are.');
+  res.status(201).json(packing.stockParcel(req.params.id, { sku: b.sku, qty: b.qty }));
+}));
+router.post('/parcels/:id/unstock', asyncRoute(async (req, res) => {
+  res.json(packing.unstockParcel(req.params.id));
+}));
+router.get('/skus', asyncRoute(async (req, res) => {
+  res.json({ skus: packing.skuSearch(req.query.q ?? '') });
 }));
 
 // ----------------------------------------- what the photo reader has been told
