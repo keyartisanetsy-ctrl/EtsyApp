@@ -8,6 +8,9 @@ import * as holds from '../services/holds.js';
 import * as dispatch from '../services/orderdispatch.js';
 import * as ordersupply from '../services/ordersupply.js';
 import * as itemsupply from '../services/itemsupply.js';
+import * as memory from '../services/packingmemory.js';
+import { providerStatus } from '../services/ai/index.js';
+import { readSetting, writeSetting } from '../services/settings.js';
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -21,9 +24,12 @@ router.get('/parcels', asyncRoute(async (req, res) => {
 }));
 
 /** A new arrival: the warehouse photo (optional) and the line they sent, e.g. "中通 3324 1件". */
-router.post('/parcels', upload.single('photo'), asyncRoute(async (req, res) => {
+router.post('/parcels', upload.fields([{ name: 'photo', maxCount: 1 }, { name: 'photos', maxCount: 11 }, { name: 'labels', maxCount: 4 }]), asyncRoute(async (req, res) => {
   const b = req.body ?? {};
-  const attachmentId = req.file ? packing.saveParcelPhoto(req.file) : null;
+  // The first photo is the arrival's own; any others (more angles, the carrier's label) are kept with it.
+  const product = [...(req.files?.photo ?? []), ...(req.files?.photos ?? [])];
+  const labels = req.files?.labels ?? [];
+  const attachmentId = product[0] ? packing.saveParcelPhoto(product[0]) : null;
   const parcel = packing.createParcel({
     text: b.text ?? '',
     carrier: b.carrier === undefined || b.carrier === '' ? undefined : b.carrier,
@@ -34,11 +40,13 @@ router.post('/parcels', upload.single('photo'), asyncRoute(async (req, res) => {
     note: b.note ?? '',
     receivedOn: b.receivedOn,
   });
+  if (product.length > 1) packing.addParcelPhotos(parcel.id, product.slice(1));
+  if (labels.length) packing.addParcelPhotos(parcel.id, labels, { kind: 'label' });
   // An order code typed with the arrival is applied at once. The arrival is kept
   // whatever happens: a code that fits nothing, or an order with several items,
   // comes back as a message / a choice next to it, not as a lost photo.
   const code = String(b.code ?? '').trim();
-  if (!code) { res.status(201).json(parcel); return; }
+  if (!code) { res.status(201).json(product.length > 1 || labels.length ? packing.getParcel(parcel.id) : parcel); return; }
   try {
     const out = await quick.assignByCode(parcel.id, { code, channels: channelsOf(b.channels), from: b.from, to: b.to });
     res.status(201).json(out.needsItem ? { ...packing.getParcel(parcel.id), needsItem: out.needsItem } : out.parcel);
@@ -106,7 +114,9 @@ router.post('/parcels/:id/unmatch', asyncRoute(async (req, res) => {
 /** Ask the AI where each product sits in the photo. Boxes only - nothing is cut or saved. */
 router.post('/parcels/:id/detect', asyncRoute(async (req, res) => {
   const b = req.body ?? {};
-  res.json(await packing.detectRegions(req.params.id, { provider: b.provider, model: b.model, auto: bool(b.auto) }));
+  res.json(await packing.detectRegions(req.params.id, {
+    provider: b.provider, model: b.model, auto: bool(b.auto), channels: channelsOf(b.channels), from: b.from, to: b.to,
+  }));
 }));
 
 /**
@@ -129,6 +139,58 @@ router.post('/parcels/:id/split', upload.fields([{ name: 'crops', maxCount: 12 }
 /** Put a split photo back together as it arrived. */
 router.post('/parcels/:id/unsplit', asyncRoute(async (req, res) => {
   res.json(packing.unsplitParcel(req.params.id));
+}));
+
+// ------------------------------------------------- several photos of one package
+
+/** More photos for this arrival: another side, the carrier's label (kind=label), the other tray. */
+router.post('/parcels/:id/photos', upload.array('photos', 12), asyncRoute(async (req, res) => {
+  res.status(201).json(packing.addParcelPhotos(req.params.id, req.files ?? [], { kind: req.body?.kind }));
+}));
+router.delete('/parcels/:id/photos/:photoId', asyncRoute(async (req, res) => {
+  res.json(packing.removeParcelPhoto(req.params.id, req.params.photoId));
+}));
+router.post('/parcels/:id/photos/:photoId/text', asyncRoute(async (req, res) => {
+  res.json(packing.setPhotoText(req.params.id, req.params.photoId, req.body?.text ?? ''));
+}));
+/** Make one extra photo an arrival of its own again. */
+router.post('/parcels/:id/photos/:photoId/detach', asyncRoute(async (req, res) => {
+  res.json(packing.detachParcelPhoto(req.params.id, req.params.photoId));
+}));
+/** Gather other arrivals' photos onto this one - they were one package. */
+router.post('/parcels/:id/merge', asyncRoute(async (req, res) => {
+  res.json(packing.mergeParcels(req.params.id, req.body?.sourceIds ?? []));
+}));
+
+// ----------------------------------------- what the photo reader has been told
+
+const IMAGE_ENGINES = ['openai', 'anthropic', 'gemini', 'openrouter'];
+
+router.get('/brain', asyncRoute(async (req, res) => {
+  const status = providerStatus();
+  res.json({
+    engines: IMAGE_ENGINES.map((id) => ({ id, configured: !!status[id]?.configured, model: status[id]?.model ?? '' })),
+    engine: readSetting('ai.warehouse.provider') || '',
+    model: readSetting('ai.warehouse.model') || '',
+    instructions: memory.instructions(),
+    lessons: memory.listLessons(),
+    looks: memory.lookCount(),
+  });
+}));
+
+router.put('/brain', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  if (b.engine !== undefined) {
+    if (b.engine && !IMAGE_ENGINES.includes(b.engine)) throw badRequest('Unknown engine.');
+    writeSetting('ai.warehouse.provider', b.engine || '');
+  }
+  if (b.model !== undefined) writeSetting('ai.warehouse.model', String(b.model || '').trim());
+  if (b.instructions !== undefined) memory.setInstructions(b.instructions);
+  res.json({ ok: true });
+}));
+
+router.delete('/brain/lessons', asyncRoute(async (req, res) => {
+  res.json(memory.clearLessons());
 }));
 
 // ------------------------------------------------------ orders & the queue

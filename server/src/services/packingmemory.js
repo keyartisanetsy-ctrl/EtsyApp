@@ -75,7 +75,6 @@ export function rememberLook({ key, attachmentId, parcelId = null }) {
   const sig = signatureFor(attachmentId);
   if (!sig) return false;
   const db = getDb();
-  db.prepare('DELETE FROM parcel_looks WHERE parcel_id = ? AND item_key = ?').run(parcelId, key);
   db.prepare('INSERT INTO parcel_looks (item_key, signature, parcel_id) VALUES (?,?,?)').run(key, JSON.stringify(sig), parcelId);
   db.prepare(`DELETE FROM parcel_looks WHERE item_key = ? AND id NOT IN
               (SELECT id FROM parcel_looks WHERE item_key = ? ORDER BY id DESC LIMIT ?)`).run(key, key, MAX_LOOKS_PER_ITEM);

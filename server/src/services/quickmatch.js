@@ -24,6 +24,7 @@ import { findOrderByCode } from './ordercode.js';
 import { signatureFor, similarity } from './imagesig.js';
 import { cachedProductImageId } from './warehousecheck.js';
 import * as packing from './packing.js';
+import * as memory from './packingmemory.js';
 
 const clamp = (n, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, n));
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -167,26 +168,43 @@ const stretch = (sim) => clamp((sim - 0.5) / 0.4);
  * compared once per distinct listing picture, not once per order.
  */
 export async function scoreDemands(parcel, demands, { photoSignature = undefined } = {}) {
-  const sig = photoSignature !== undefined ? photoSignature : signatureFor(parcel.attachment_id);
-  const readText = [parcel.ocr_text, parcel.note].filter(Boolean).join(' ');
+  // Every product photo of the arrival counts; the best resemblance of any of them is the one used.
+  const sigs = photoSignature !== undefined
+    ? [photoSignature].filter(Boolean)
+    : packing.allPhotos(parcel, { kinds: ['product'] }).map((p) => signatureFor(p.id)).filter(Boolean);
+  const readText = [packing.readTextOf(parcel), parcel.note].filter(Boolean).join(' ');
   const texts = textScores(readText, demands);
 
   // One fingerprint per distinct listing picture (and the supplier's, where the supply book has some).
   const byImage = new Map();
   for (const d of demands) {
     if (!d.imageUrl) continue;
-    if (!byImage.has(d.imageUrl)) byImage.set(d.imageUrl, { refs: new Set([d.imageUrl]) });
-    for (const u of (d.supplyImages ?? []).slice(0, 2)) if (typeof u === 'string' && /^https?:/.test(u)) byImage.get(d.imageUrl).refs.add(u);
+    if (!byImage.has(d.imageUrl)) byImage.set(d.imageUrl, { refs: new Set([d.imageUrl]), keys: new Set() });
+    const entry = byImage.get(d.imageUrl);
+    for (const u of (d.supplyImages ?? []).slice(0, 2)) if (typeof u === 'string' && /^https?:/.test(u)) entry.refs.add(u);
+    const key = memory.itemKey(d);
+    if (key) entry.keys.add(key);
   }
   const visual = new Map();
-  if (sig) {
-    await packing.mapLimit([...byImage.entries()], 6, async ([imageUrl, { refs }]) => {
+  const learned = new Set();
+  if (sigs.length) {
+    await packing.mapLimit([...byImage.entries()], 6, async ([imageUrl, { refs, keys }]) => {
       let best = null;
       for (const url of refs) {
         try {
-          const sim = similarity(sig, signatureFor(await cachedProductImageId(url)));
-          if (sim != null && (best == null || sim > best)) best = sim;
+          const ref = signatureFor(await cachedProductImageId(url));
+          for (const sig of sigs) {
+            const sim = similarity(sig, ref);
+            if (sim != null && (best == null || sim > best)) best = sim;
+          }
         } catch { /* a photo that cannot be fetched or read just has no say */ }
+      }
+      // How the warehouse photographed this product before (same SKU), which looks far more like the next photo than the listing does.
+      for (const key of keys) {
+        for (const sig of sigs) {
+          const sim = memory.bestLookSimilarity(sig, key);
+          if (sim != null && (best == null || sim > best)) { best = sim; learned.add(imageUrl); }
+        }
       }
       if (best != null) visual.set(imageUrl, best);
     });
@@ -201,7 +219,7 @@ export async function scoreDemands(parcel, demands, { photoSignature = undefined
 
     if (trk.match) evidence.push({ kind: 'tracking', strong: true, label: `tracking ends ${parcel.last4}` });
     if (txt && txt.hits.length) evidence.push({ kind: 'text', label: `text: ${txt.hits.slice(0, 3).join(', ')}`, score: round2(txt.score) });
-    if (sim != null) evidence.push({ kind: 'colours', label: `colours ${Math.round(sim * 100)}%`, score: round2(sim) });
+    if (sim != null) evidence.push({ kind: 'colours', label: `${d.imageUrl && learned.has(d.imageUrl) ? 'looks like an earlier photo of it' : 'colours'} ${Math.round(sim * 100)}%`, score: round2(sim) });
     if (d.purchased) evidence.push({ kind: 'state', label: 'bought from supplier' });
     if (trk.conflict) evidence.push({ kind: 'warn', label: 'order has a different tracking number' });
 

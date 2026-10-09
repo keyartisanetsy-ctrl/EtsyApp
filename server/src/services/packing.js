@@ -23,7 +23,8 @@ import { sha256 } from '../lib/crypto.js';
 import { activeShopId } from '../etsy/shop.js';
 import { activeShopifyShopId } from '../shopify/shop.js';
 import { readSetting } from './settings.js';
-import { run, parseJsonish } from './ai/index.js';
+import { run, parseJsonish, providerStatus } from './ai/index.js';
+import * as memory from './packingmemory.js';
 import { resolveForTransaction } from './productimages.js';
 import { codesFor, shopifyCodesFor, ensureOrderCode, releaseIfUnused, restampStaleCodes } from './ordercode.js';
 import { cachedProductImageId } from './warehousecheck.js';
@@ -98,6 +99,148 @@ function removeParcelAttachment(id) {
   db.prepare('DELETE FROM attachments WHERE id = ?').run(a.id);
 }
 
+// ------------------------------------------------------------ several photos
+
+/** The other photos of one arrival (its own photo is inbound_parcels.attachment_id), in the order they were added. */
+export function photosOf(parcelId) {
+  return getDb().prepare('SELECT * FROM parcel_photos WHERE parcel_id = ? ORDER BY position, id').all(parcelId);
+}
+
+/** Every photo of the arrival, its own first: [{ id: attachmentId, kind, text, extraId }]. */
+export function allPhotos(row, { kinds = null } = {}) {
+  const out = [];
+  if (row.attachment_id) out.push({ id: row.attachment_id, kind: 'product', text: row.ocr_text || '', extraId: null });
+  for (const x of photosOf(row.id)) out.push({ id: x.attachment_id, kind: x.kind, text: x.ocr_text || '', extraId: x.id });
+  return kinds ? out.filter((p) => kinds.includes(p.kind)) : out;
+}
+
+/** Everything the browser read off every photo of the arrival, as one piece of text. */
+export const readTextOf = (row) => allPhotos(row).map((p) => p.text).filter(Boolean).join(' ').slice(0, 6000);
+
+const MAX_PHOTOS = 12;
+const photoKind = (k) => (String(k) === 'label' ? 'label' : 'product');
+
+/**
+ * Add photos to an arrival: the same package seen from another side, the carrier's label,
+ * the second tray the warehouse put the other half of the same product on. An arrival with
+ * no photo of its own takes the first one as its own.
+ */
+export function addParcelPhotos(id, files, { kind = 'product' } = {}) {
+  const db = getDb();
+  const row = getRow(id);
+  const list = (Array.isArray(files) ? files : [files]).filter(Boolean);
+  if (!list.length) throw badRequest('Choose at least one photo to add.');
+  if (photosOf(row.id).length + (row.attachment_id ? 1 : 0) + list.length > MAX_PHOTOS) {
+    throw badRequest(`One arrival can hold up to ${MAX_PHOTOS} photos.`);
+  }
+  const ids = list.map((f) => saveParcelPhoto(f));
+  db.transaction(() => {
+    let rest = ids;
+    if (!row.attachment_id && photoKind(kind) === 'product') {
+      db.prepare('UPDATE inbound_parcels SET attachment_id = ? WHERE id = ?').run(ids[0], row.id);
+      rest = ids.slice(1);
+    }
+    const pos = db.prepare('SELECT COALESCE(MAX(position), 0) AS p FROM parcel_photos WHERE parcel_id = ?').get(row.id).p;
+    rest.forEach((att, i) => db.prepare('INSERT INTO parcel_photos (parcel_id, attachment_id, kind, position) VALUES (?,?,?,?)')
+      .run(row.id, att, photoKind(kind), pos + i + 1));
+    db.prepare('UPDATE inbound_parcels SET suggestions = NULL, quick = NULL WHERE id = ? AND match_channel IS NULL').run(row.id);
+  })();
+  audit('packing.photos_add', { entity: 'parcel', entityId: row.id, detail: { count: ids.length, kind: photoKind(kind) } });
+  return getParcel(row.id);
+}
+
+export function removeParcelPhoto(id, photoId) {
+  const db = getDb();
+  const row = getRow(id);
+  const x = db.prepare('SELECT * FROM parcel_photos WHERE id = ? AND parcel_id = ?').get(Number(photoId), row.id);
+  if (!x) throw notFound('That photo is not on this arrival.');
+  db.prepare('DELETE FROM parcel_photos WHERE id = ?').run(x.id);
+  removeParcelAttachment(x.attachment_id);
+  db.prepare('UPDATE inbound_parcels SET suggestions = NULL, quick = NULL WHERE id = ? AND match_channel IS NULL').run(row.id);
+  audit('packing.photo_remove', { entity: 'parcel', entityId: row.id, detail: { photoId: x.id } });
+  return getParcel(row.id);
+}
+
+/** What the browser read off one of the extra photos. */
+export function setPhotoText(id, photoId, text) {
+  const db = getDb();
+  const row = getRow(id);
+  const clean = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 3000);
+  const x = db.prepare('SELECT * FROM parcel_photos WHERE id = ? AND parcel_id = ?').get(Number(photoId), row.id);
+  if (!x) throw notFound('That photo is not on this arrival.');
+  db.prepare('UPDATE parcel_photos SET ocr_text = ? WHERE id = ?').run(clean, x.id);
+  // A carrier's label read off a photo ("圆通0269共1件") fills in the line the warehouse forgot to type.
+  if (x.kind === 'label' && (!row.last4 || !row.carrier)) {
+    const carrier = clean.match(/(中通|圆通|圓通|申通|韵达|韻達|顺丰|順豐|极兔|極兔|邮政|郵政|京东|京東|德邦|百世|汇通|匯通|丰网|豐網)/)?.[1] || '';
+    const digits = clean.match(/\d{4,}/g);
+    const last4 = digits ? digits[digits.length - 1].slice(-4) : '';
+    db.prepare('UPDATE inbound_parcels SET carrier = ?, last4 = ? WHERE id = ?').run(row.carrier || carrier, row.last4 || last4, row.id);
+  }
+  return getParcel(row.id);
+}
+
+/** Turn one extra photo back into an arrival of its own (the undo of adding it, or of a merge). */
+export function detachParcelPhoto(id, photoId) {
+  const db = getDb();
+  const row = getRow(id);
+  const x = db.prepare('SELECT * FROM parcel_photos WHERE id = ? AND parcel_id = ?').get(Number(photoId), row.id);
+  if (!x) throw notFound('That photo is not on this arrival.');
+  let childId;
+  db.transaction(() => {
+    const info = db.prepare(`
+      INSERT INTO inbound_parcels (carrier, last4, quantity, attachment_id, warehouse, note, received_on, ocr_text)
+      VALUES (?,?,?,?,?,?,?,?)`).run(row.carrier, row.last4, 1, x.attachment_id, row.warehouse, row.note, row.received_on, x.ocr_text || null);
+    childId = Number(info.lastInsertRowid);
+    db.prepare('DELETE FROM parcel_photos WHERE id = ?').run(x.id);
+    db.prepare('UPDATE inbound_parcels SET suggestions = NULL, quick = NULL WHERE id = ? AND match_channel IS NULL').run(row.id);
+  })();
+  audit('packing.photo_detach', { entity: 'parcel', entityId: row.id, detail: { photoId: x.id, newParcel: childId } });
+  return { parcel: getParcel(row.id), created: getParcel(childId) };
+}
+
+/**
+ * Two or more arrivals that are really one package (the warehouse photographed a product's
+ * parts apart and reported each): their photos are gathered on `targetId`, which keeps its
+ * own carrier line and piece count; the others disappear. Only arrivals nobody has matched yet.
+ */
+export function mergeParcels(targetId, sourceIds) {
+  const db = getDb();
+  const target = getRow(targetId);
+  const ids = [...new Set((Array.isArray(sourceIds) ? sourceIds : [sourceIds]).map(Number))].filter((n) => n && n !== target.id);
+  if (!ids.length) throw badRequest('Choose the arrivals to merge into this one.');
+  if (target.match_channel) throw badRequest('Unmatch this arrival before merging others into it.');
+  const sources = ids.map(getRow);
+  for (const src of sources) {
+    if (src.match_channel) throw badRequest(`${parcelLabel(src)} is matched already - unmatch it first.`);
+    if (src.original_attachment_id || db.prepare('SELECT 1 FROM inbound_parcels WHERE parent_id = ?').get(src.id)) {
+      throw badRequest(`${parcelLabel(src)} was split from a photo - restore the original before merging it.`);
+    }
+  }
+  const total = sources.reduce((n, s) => n + photosOf(s.id).length + (s.attachment_id ? 1 : 0), 0) + photosOf(target.id).length + (target.attachment_id ? 1 : 0);
+  if (total > MAX_PHOTOS) throw badRequest(`That would be ${total} photos on one arrival - the limit is ${MAX_PHOTOS}.`);
+
+  db.transaction(() => {
+    let pos = db.prepare('SELECT COALESCE(MAX(position), 0) AS p FROM parcel_photos WHERE parcel_id = ?').get(target.id).p;
+    for (const src of sources) {
+      const extras = photosOf(src.id);
+      if (src.attachment_id) {
+        if (!db.prepare('SELECT attachment_id FROM inbound_parcels WHERE id = ?').get(target.id).attachment_id) {
+          db.prepare('UPDATE inbound_parcels SET attachment_id = ?, ocr_text = ? WHERE id = ?').run(src.attachment_id, src.ocr_text || null, target.id);
+        } else {
+          pos += 1;
+          db.prepare('INSERT INTO parcel_photos (parcel_id, attachment_id, kind, ocr_text, position) VALUES (?,?,?,?,?)')
+            .run(target.id, src.attachment_id, 'product', src.ocr_text || null, pos);
+        }
+      }
+      for (const x of extras) { pos += 1; db.prepare('UPDATE parcel_photos SET parcel_id = ?, position = ? WHERE id = ?').run(target.id, pos, x.id); }
+      db.prepare('DELETE FROM inbound_parcels WHERE id = ?').run(src.id);
+    }
+    db.prepare('UPDATE inbound_parcels SET suggestions = NULL, quick = NULL WHERE id = ?').run(target.id);
+  })();
+  audit('packing.merge', { entity: 'parcel', entityId: target.id, detail: { merged: ids } });
+  return getParcel(target.id);
+}
+
 /** The listing item a parcel is matched to, for showing next to the parcel. */
 function loadItemInfo(db, rows) {
   const info = new Map();
@@ -140,7 +283,7 @@ function touchHold(channel, orderId) {
   try { holds.refreshHold(channel, String(orderId)); } catch (err) { console.warn(`[holds] ${channel} ${orderId}: ${err.message}`); }
 }
 
-function shapeParcel(r, item = null, children = 0, hold = null, supply = null) {
+function shapeParcel(r, item = null, children = 0, hold = null, supply = null, extras = []) {
   return {
     id: r.id,
     typed: r.raw_text || null,
@@ -151,6 +294,9 @@ function shapeParcel(r, item = null, children = 0, hold = null, supply = null) {
     // the delivery it was ("2件"), not as an empty one.
     label: parcelLabel(r.quantity === 0 && r.original_quantity ? { ...r, quantity: r.original_quantity } : r),
     photoUrl: photoUrl(r.attachment_id),
+    // More photos of the same package (another side, the carrier's label, a second tray).
+    extraPhotos: extras.map((x) => ({ id: x.id, url: photoUrl(x.attachment_id), kind: x.kind, hasText: !!(x.ocr_text && x.ocr_text.trim()) })),
+    photoCount: (r.attachment_id ? 1 : 0) + extras.length,
     warehouse: r.warehouse,
     note: r.note,
     receivedOn: r.received_on,
@@ -183,7 +329,7 @@ export function getParcel(id) {
   const kids = db.prepare('SELECT COUNT(*) AS c FROM inbound_parcels WHERE parent_id = ?').get(row.id).c;
   return shapeParcel(row, loadItemInfo(db, [row]).get(`${row.match_channel}:${row.match_item_id}`) ?? null, kids,
     row.match_channel ? holds.holdFor(row.match_channel, row.match_order_id) : null,
-    row.match_channel ? supplyFor(row.match_channel, row.match_order_id) : null);
+    row.match_channel ? supplyFor(row.match_channel, row.match_order_id) : null, photosOf(row.id));
 }
 
 /**
@@ -238,11 +384,16 @@ export function listParcels({ status = 'all', limit = 300 } = {}) {
            SUM(match_channel IS NOT NULL AND packed_at IS NULL) AS matched,
            SUM(packed_at IS NOT NULL) AS packed, COUNT(*) AS total
     FROM inbound_parcels`).get();
+  const extraMap = new Map();
+  for (const x of db.prepare('SELECT * FROM parcel_photos ORDER BY position, id').all()) {
+    if (!extraMap.has(x.parcel_id)) extraMap.set(x.parcel_id, []);
+    extraMap.get(x.parcel_id).push(x);
+  }
   return {
     counts: { unmatched: counts.unmatched || 0, matched: counts.matched || 0, packed: counts.packed || 0, total: counts.total || 0 },
     rows: rows.map((r) => shapeParcel(r, items.get(`${r.match_channel}:${r.match_item_id}`) ?? null, kids.get(r.id) ?? 0,
       onHold.get(`${r.match_channel}:${r.match_order_id}`) ?? null,
-      r.match_channel ? supplies.get(`${r.match_channel}:${r.match_order_id}`) ?? noSupply : null)),
+      r.match_channel ? supplies.get(`${r.match_channel}:${r.match_order_id}`) ?? noSupply : null, extraMap.get(r.id) ?? [])),
   };
 }
 
@@ -301,9 +452,12 @@ export function deleteParcel(id) {
   if (row.match_channel) undoMatchEffects(row);
   // Arrivals that were split out of this photo are real deliveries of their own; they stay.
   db.prepare('UPDATE inbound_parcels SET parent_id = NULL WHERE parent_id = ?').run(row.id);
+  const extras = photosOf(row.id);
+  db.prepare('DELETE FROM parcel_photos WHERE parcel_id = ?').run(row.id);
   db.prepare('DELETE FROM inbound_parcels WHERE id = ?').run(row.id);
+  memory.forgetLooks(row.id);
   if (row.match_channel) { touchHold(row.match_channel, row.match_order_id); releaseIfUnused(row.match_channel, row.match_order_id); }
-  for (const att of new Set([row.attachment_id, row.original_attachment_id].filter(Boolean))) removeParcelAttachment(att);
+  for (const att of new Set([row.attachment_id, row.original_attachment_id, ...extras.map((x) => x.attachment_id)].filter(Boolean))) removeParcelAttachment(att);
   audit('packing.parcel_delete', { entity: 'parcel', entityId: row.id });
   return { deleted: row.id };
 }
@@ -444,16 +598,59 @@ export const slimDemand = (d) => ({
   itemId: d.itemId, sku: d.sku, variant: d.variant, quantity: d.quantity, received: d.received, remaining: d.remaining,
 });
 
+// ------------------------------------------------------------------ engines
+
+/**
+ * The engines to try for a photo job, in order: the one asked for (or the one chosen for warehouse photos in
+ * Settings), then every other engine that has a key and can read images - so a down, rate-limited or
+ * out-of-credit engine does not stop the work when another is ready.
+ */
+export function engineChain(preferred) {
+  const wanted = preferred || readSetting('ai.warehouse.provider') || undefined;
+  let status;
+  try { status = providerStatus(); } catch { return [wanted]; }
+  const ready = Object.keys(status).filter((p) => p !== 'active' && status[p]?.configured && status[p]?.supportsImages);
+  const chain = [];
+  if (wanted && ready.includes(wanted)) chain.push(wanted);
+  for (const p of [status.active, ...ready]) if (ready.includes(p) && !chain.includes(p)) chain.push(p);
+  return chain.length ? chain : [wanted];
+}
+
+/** Run one photo job on the first engine that works. Returns the AI answer with `tried` = the engines that failed first. */
+async function runVision(opts, { provider, model, runner = run, fallback = true } = {}) {
+  const chain = engineChain(provider);
+  const tried = [];
+  let last = null;
+  for (let i = 0; i < chain.length; i += 1) {
+    const engine = chain[i];
+    try {
+      const useModel = i === 0 ? (model || readSetting('ai.warehouse.model') || undefined) : undefined;
+      // eslint-disable-next-line no-await-in-loop
+      const out = await runner({ ...opts, provider: engine, model: useModel });
+      return { ...out, tried };
+    } catch (err) {
+      last = err;
+      tried.push({ engine: engine || 'default', error: String(err.message || err).slice(0, 200) });
+      if (!fallback || /switched off|Privacy/i.test(String(err.message))) break;
+    }
+  }
+  throw last ?? new Error('No AI engine could look at this photo.');
+}
+
 // ----------------------------------------------------------------- matching
 
 const MATCH_SYSTEM = `You help a dropshipping shop work out which customer order a parcel belongs to.
 
-The FIRST image is a photo a warehouse worker took of items that have just arrived at the
-warehouse - usually boxed or bagged products on a floor or table, often under poor lighting,
-sometimes still in a retail box or a delivery bag. It can show more than one product at once,
-because one delivery may hold things bought for different customers. Every image AFTER the first
-is the shop's own listing photo of one product customers have ordered, numbered in the order
-given (listing 1, listing 2, ...).
+The FIRST image - or the first few, the input says how many - are photos a warehouse worker took of
+items that have just arrived at the warehouse: usually boxed or bagged products on a floor or table,
+often under poor lighting, sometimes still in a retail box or a delivery bag. When there are several
+they all show the SAME package (another side of it, the carrier's label, the other half of a product the
+warehouse split across two trays), so read them together. One photo can show more than one product,
+because one delivery may hold things bought for different customers. Every image AFTER those is the shop's
+own listing photo of one product customers have ordered, numbered in the order given (listing 1, listing 2, ...).
+
+Warehouses often split ONE customer product into parts (a main kit in one tray and its accessory set in
+another, or a product apart from its box). Parts that belong together count as that one listing being there.
 
 For EACH numbered listing, say how likely it is that this product is among the items in the
 warehouse photo. Judge the specific details, not the general category:
@@ -502,18 +699,20 @@ export async function mapLimit(list, limit, fn) {
  * the final.
  */
 async function scoreBatch(parcel, batch, { provider, model, runner, detail, usage }) {
-  const ai = await runner({
+  const photos = allPhotos(parcel);
+  const guide = memory.guidance();
+  const ai = await runVision({
     kind: 'custom',
-    provider: provider || readSetting('ai.warehouse.provider') || undefined,
-    model: model || readSetting('ai.warehouse.model') || undefined,
-    promptOverride: MATCH_SYSTEM,
-    attachmentIds: [{ id: parcel.attachment_id, detail: 'high' }, ...batch.map((p) => ({ id: p.attachmentId, detail }))],
+    promptOverride: guide ? `${MATCH_SYSTEM}\n\n${guide}` : MATCH_SYSTEM,
+    attachmentIds: [...photos.map((p) => ({ id: p.id, detail: 'high' })), ...batch.map((p) => ({ id: p.attachmentId, detail }))],
     // Picking a picture out of a few is not a task to think hard about.
     effort: 'fast',
     context: { listings: batch.map((p, i) => ({ index: i + 1, title: p.title, sku: p.sku })) },
-    userInput: 'The first image is the warehouse photo. Each image after it is one numbered listing photo, in order. JSON only.',
+    userInput: `The first ${photos.length} image${photos.length === 1 ? ' is' : 's are'} the warehouse photo${photos.length === 1 ? '' : 's'} of one package`
+      + `${photos.some((p) => p.kind === 'label') ? ` (${photos.filter((p) => p.kind === 'label').length} of them show a label)` : ''}. `
+      + 'Each image after that is one numbered listing photo, in order. JSON only.',
     maxTokens: 900,
-  });
+  }, { provider, model, runner });
   usage.calls += 1;
   usage.input += ai.tokens?.input ?? 0;
   usage.output += ai.tokens?.output ?? 0;
@@ -527,7 +726,7 @@ async function scoreBatch(parcel, batch, { provider, model, runner, detail, usag
     if (!product || !Number.isFinite(score)) continue;
     scored.push({ product, score: Math.max(0, Math.min(1, score)), reason: String(m.reason ?? '').slice(0, 240) });
   }
-  return { scored, unreadable: !!parsed.unreadable, provider: ai.provider, model: ai.model };
+  return { scored, unreadable: !!parsed.unreadable, provider: ai.provider, model: ai.model, tried: ai.tried };
 }
 
 const byScore = (a, b) => b.score - a.score;
@@ -596,6 +795,7 @@ export async function matchParcel(id, { channels, from, to, provider, model, run
       result.unreadable = good.some((r) => r.unreadable);
       result.provider = good[0].provider;
       result.model = good[0].model;
+      result.tried = good.flatMap((r) => r.tried ?? []).slice(0, 4);
 
       const contenders = ordered.filter((s) => s.score >= 0.3);
       const several = ordered.filter((s) => s.score >= CONFIDENT_SCORE).length >= 2;
@@ -713,6 +913,25 @@ function undoMatchEffectsHere(parcel) {
   } catch { /* the order may be gone from the local mirror; the parcel can still be released */ }
 }
 
+/**
+ * Remember how the warehouse's photo of this product looked, so the free matcher can recognise the
+ * next one by it. Only from matches that can be trusted: ones a person made or confirmed, or that
+ * the tracking number settled - never a guess the colours alone made.
+ */
+function learnLook(parcel, channel, itemId, source, score) {
+  try {
+    if (source === 'quick' && !(Number(score) >= 0.96)) return;
+    const db = getDb();
+    const line = channel === 'etsy'
+      ? db.prepare('SELECT sku, image_url FROM receipt_transactions WHERE transaction_id = ?').get(Number(itemId))
+      : db.prepare('SELECT sku, image_url FROM shopify_order_line_items WHERE line_item_id = ?').get(String(itemId));
+    const key = memory.itemKey({ sku: line?.sku, imageUrl: line?.image_url });
+    memory.forgetLooks(parcel.id);
+    if (!key) return;
+    for (const p of allPhotos(parcel, { kinds: ['product'] })) memory.rememberLook({ key, attachmentId: p.id, parcelId: parcel.id });
+  } catch (err) { console.warn(`[packing] could not remember the look of parcel ${parcel.id}: ${err.message}`); }
+}
+
 export function confirmMatch(id, { channel, orderId, itemId, source = 'manual', score = null } = {}) {
   const db = getDb();
   const parcel = getRow(id);
@@ -729,6 +948,7 @@ export function confirmMatch(id, { channel, orderId, itemId, source = 'manual', 
     .run(channel, String(orderId), String(itemId), target.code, ['ai', 'quick'].includes(source) ? source : 'manual',
       score == null ? null : Number(score), parcel.id);
   applyMatchEffects(parcel, channel, orderId, itemId, existingPhoto);
+  learnLook(parcel, channel, itemId, source, score);
   // Look at the order this parcel now belongs to (and the one it left): if the rest of it
   // has not arrived, this parcel is put on hold; if it is the last piece, the hold is released.
   if (parcel.match_channel) { touchHold(parcel.match_channel, parcel.match_order_id); releaseIfUnused(parcel.match_channel, parcel.match_order_id); }
@@ -741,6 +961,7 @@ export function unmatchParcel(id) {
   const parcel = getRow(id);
   if (!parcel.match_channel) return getParcel(parcel.id);
   undoMatchEffects(parcel);
+  memory.forgetLooks(parcel.id);
   getDb().prepare(`
     UPDATE inbound_parcels SET match_channel = NULL, match_order_id = NULL, match_item_id = NULL, match_code = NULL,
       match_source = NULL, match_score = NULL, matched_at = NULL, packed_at = NULL WHERE id = ?`).run(parcel.id);
@@ -769,13 +990,17 @@ function cleanBox(b) {
 }
 
 /**
- * One photo can show products bought for several customers. Each box becomes
+ * One photo can show products bought for several customers. Each product becomes
  * its own arrival - same carrier line, one piece, with just that product's
  * cropped photo - so it can be matched to its own customer's order and sit on
  * its own row of the packing sheet. What is left of the photo (the browser has
  * already taken the boxed parts out of it) stays with the original arrival,
  * which keeps the untouched photo and its piece count so the split can be undone.
  * When nothing is left (`done`), the original arrival is just the container.
+ *
+ * A product the warehouse laid out in several places (a kit in one tray, its accessory set in
+ * another) is several boxes with the same `group`: they become ONE arrival holding all those
+ * crops, not one arrival per part. Boxes with no group are a product each.
  *
  * The pixels are cut in the browser, where a canvas reads every image format
  * and applies a phone photo's rotation; the server stores what it is given.
@@ -787,17 +1012,29 @@ export function splitParcel(id, { regions, crops = [], remainder = null, done = 
   if (!parent.attachment_id) throw badRequest('This arrival has no photo to split.');
   if (parent.quantity < 1) throw badRequest('Every piece of this photo has already been split out.');
 
-  const boxes = (Array.isArray(regions) ? regions : []).map(cleanBox);
+  const given = Array.isArray(regions) ? regions : [];
+  const boxes = given.map(cleanBox);
   if (!boxes.length || boxes.length > MAX_REGIONS) throw badRequest(`Split between 1 and ${MAX_REGIONS} boxes at a time.`);
   if (crops.length !== boxes.length) throw badRequest('Every box needs its cropped photo.');
   for (const f of [...crops, remainder].filter(Boolean)) {
     if (!String(f.mimetype || '').startsWith('image/')) throw badRequest('Split photos have to be images.');
   }
 
+  // Boxes that share a group are one product; every other box is a product of its own.
+  const products = [];
+  const byGroup = new Map();
+  boxes.forEach((box, i) => {
+    const g = Math.floor(Number(given[i]?.group));
+    if (Number.isFinite(g) && g > 0) {
+      if (!byGroup.has(g)) { byGroup.set(g, { boxIdx: [] }); products.push(byGroup.get(g)); }
+      byGroup.get(g).boxIdx.push(i);
+    } else products.push({ boxIdx: [i] });
+  });
+
   // `done` is the browser saying nothing is left in the photo once the boxes are
   // out. Whether the original arrival stays open follows what the photo shows,
   // not the piece count the warehouse typed, which can be off.
-  const piecesLeft = done ? 0 : Math.max(1, parent.quantity - boxes.length);
+  const piecesLeft = done ? 0 : Math.max(1, parent.quantity - products.length);
   const cropIds = crops.map((f) => saveParcelPhoto(f, 'parcel-crop'));
   const remainderId = !done && remainder ? saveParcelPhoto(remainder, 'parcel-remainder') : null;
   const previousRemainder = remainderId && parent.original_attachment_id && parent.attachment_id !== parent.original_attachment_id
@@ -809,19 +1046,35 @@ export function splitParcel(id, { regions, crops = [], remainder = null, done = 
       db.prepare('UPDATE inbound_parcels SET original_attachment_id = ?, original_quantity = ? WHERE id = ?')
         .run(parent.attachment_id, parent.quantity, parent.id);
     }
-    boxes.forEach((box, i) => {
+    for (const product of products) {
+      const [first, ...more] = product.boxIdx;
       const info = db.prepare(`
         INSERT INTO inbound_parcels (carrier, last4, quantity, attachment_id, warehouse, note, received_on, parent_id, source_box)
         VALUES (?,?,?,?,?,?,?,?,?)`)
-        .run(parent.carrier, parent.last4, 1, cropIds[i], parent.warehouse, parent.note, parent.received_on, parent.id, JSON.stringify(box));
-      childIds.push(Number(info.lastInsertRowid));
-    });
+        .run(parent.carrier, parent.last4, 1, cropIds[first], parent.warehouse, parent.note, parent.received_on, parent.id, JSON.stringify(boxes[first]));
+      const childId = Number(info.lastInsertRowid);
+      more.forEach((idx, n) => db.prepare('INSERT INTO parcel_photos (parcel_id, attachment_id, kind, position) VALUES (?,?,?,?)')
+        .run(childId, cropIds[idx], 'product', n + 1));
+      childIds.push(childId);
+    }
     db.prepare('UPDATE inbound_parcels SET attachment_id = ?, quantity = ?, suggestions = NULL, raw_text = NULL WHERE id = ?')
       .run(remainderId ?? parent.attachment_id, piecesLeft, parent.id);
   })();
   removeParcelAttachment(previousRemainder);
 
-  audit('packing.split', { entity: 'parcel', entityId: parent.id, detail: { children: childIds, boxes } });
+  // What the seller grouped by hand is what the AI is told next time.
+  for (const product of products) {
+    const names = product.boxIdx.map((i) => String(given[i]?.label ?? '').trim()).filter(Boolean);
+    if (product.boxIdx.length > 1 && names.length > 1) {
+      memory.addLesson(`In one warehouse photo, "${names.join('" and "')}" were parts of ONE customer product (the warehouse had split it) - the seller grouped them.`);
+    }
+  }
+  const lone = products.filter((q) => q.boxIdx.length === 1).map((q) => String(given[q.boxIdx[0]]?.label ?? '').trim()).filter(Boolean);
+  if (lone.length > 1 && lone.length === products.length) {
+    memory.addLesson(`In one warehouse photo, "${lone.join('", "')}" were separate customer products - the seller split them apart.`);
+  }
+
+  audit('packing.split', { entity: 'parcel', entityId: parent.id, detail: { children: childIds, boxes, groups: products.map((q) => q.boxIdx) } });
   return { parent: getParcel(parent.id), children: childIds.map(getParcel) };
 }
 
@@ -840,8 +1093,12 @@ export function unsplitParcel(id) {
   const kids = db.prepare('SELECT * FROM inbound_parcels WHERE parent_id = ?').all(parent.id);
   for (const kid of kids) {
     if (kid.match_channel) undoMatchEffects(kid);
+    const kidExtras = photosOf(kid.id);
+    db.prepare('DELETE FROM parcel_photos WHERE parcel_id = ?').run(kid.id);
     db.prepare('DELETE FROM inbound_parcels WHERE id = ?').run(kid.id);
+    memory.forgetLooks(kid.id);
     removeParcelAttachment(kid.attachment_id);
+    for (const x of kidExtras) removeParcelAttachment(x.attachment_id);
     if (kid.match_channel) touchHold(kid.match_channel, kid.match_order_id);
   }
 
@@ -863,13 +1120,13 @@ The photo was taken at a warehouse of items that have just arrived - usually box
 products on a floor or table, sometimes several at once because one delivery can hold things
 bought for different customers.
 
-Return a bounding box for EACH separate product. Coordinates are percentages of the whole photo:
+Return a bounding box for EACH separate item you can see. Coordinates are percentages of the whole photo:
 x and y are the top-left corner, measured from the photo's top-left; w and h are the box's width
 and height - every number from 0 to 100.
 
 Rules:
-- One box per separate product. A set sold together, or one item in its own retail box, is ONE
-  product. Two different products side by side are two.
+- One box per separate physical item. A set sold together, or one item in its own retail box, is ONE
+  box. Two different products side by side are two.
 - A product inside a display case, frame, clamshell, jar or bag is ONE product: box the whole case
   or frame - never the thing inside it as well.
 - Box only the product and the box or bag it came in - not the table, the floor, a hand, a shelf,
@@ -882,8 +1139,18 @@ Rules:
 - If you can only see one product, return one box around it.
 - Order the boxes left to right, then top to bottom.
 
+GROUPS - the part that matters most. Warehouses often split ONE customer's product across several
+trays or spots in the photo (the main kit in one tray, its accessory set or spare parts in another, the
+item apart from its box). Give every box a "group" number: boxes that are parts of the SAME customer
+product share a number, boxes of different products get different numbers. Number groups 1, 2, 3 in
+order of first appearance. When a list of the products customers ordered is given, use it: parts that
+together make up one listed product (a kit plus the accessories its title mentions) belong in one group,
+while two things the list shows as separate products are separate groups. Do not merge two things only
+because they look alike - two identical items bought by two customers are two groups.
+
 Reply with JSON only:
-{"items":[{"x":0,"y":0,"w":0,"h":0,"label":"a few words that identify it, like 'black keyboard' or 'blue-haired figure in a box'","confidence":0.0}]}`;
+{"items":[{"x":0,"y":0,"w":0,"h":0,"group":1,"label":"a few words that identify it, like 'black keyboard' or 'blue-haired figure in a box'","confidence":0.0}],
+ "note":"one short sentence on how you grouped them, or why you could not"}`;
 
 const area = (b) => b.w * b.h;
 const overlap = (a, b) => {
@@ -919,25 +1186,36 @@ function padBoxes(boxes, pad = 0.012) {
  * nothing that fills the whole photo - and it says whether there is anything
  * to split at all (two products or more).
  */
-export async function detectRegions(id, { provider, model, auto = false, runner = run } = {}) {
+export async function detectRegions(id, { provider, model, auto = false, runner = run, channels, from, to } = {}) {
   const parcel = getRow(id);
   if (!parcel.attachment_id) throw badRequest('This arrival has no photo to look at.');
   if (parcel.quantity < 1) throw badRequest('Every piece of this photo has already been split out.');
 
-  const ai = await runner({
+  // What customers have ordered: lets the AI see which parts together make one listed product.
+  let ordered = [];
+  try {
+    const seen = new Set();
+    for (const d of loadDemand(resolveRange({ channels, from, to })).filter((x) => x.remaining > 0)) {
+      const t = String(d.title || '').replace(/\s+/g, ' ').trim().slice(0, 110);
+      if (t && !seen.has(t)) { seen.add(t); ordered.push(t); }
+      if (ordered.length >= 40) break;
+    }
+  } catch { ordered = []; }
+
+  const guide = memory.guidance();
+  const ai = await runVision({
     kind: 'custom',
-    provider: provider || readSetting('ai.warehouse.provider') || undefined,
-    model: model || readSetting('ai.warehouse.model') || undefined,
-    promptOverride: DETECT_SYSTEM,
+    promptOverride: guide ? `${DETECT_SYSTEM}\n\n${guide}` : DETECT_SYSTEM,
     attachmentIds: [{ id: parcel.attachment_id, detail: 'high' }],
     effort: 'fast',
+    ...(ordered.length ? { context: { productsCustomersOrdered: ordered } } : {}),
     userInput: `The warehouse reported ${parcel.quantity} piece${parcel.quantity === 1 ? '' : 's'} in this photo (that number is often wrong - go by what you see). JSON only.`,
-    maxTokens: 900,
-  });
+    maxTokens: 1200,
+  }, { provider, model, runner });
   const parsed = parseJsonish(ai.text);
   if (!parsed || !Array.isArray(parsed.items)) throw new Error('The AI did not return a usable answer.');
 
-  const raw = parsed.items.map((i) => ({ ...i, x: Number(i.x), y: Number(i.y), w: Number(i.w), h: Number(i.h) }))
+  const raw = parsed.items.map((i, n) => ({ ...i, x: Number(i.x), y: Number(i.y), w: Number(i.w), h: Number(i.h), n }))
     .filter((i) => [i.x, i.y, i.w, i.h].every(Number.isFinite));
   // Told percentages, a model sometimes answers in 0-1 fractions; every box then fits inside 1.
   const scale = raw.length && raw.every((i) => i.x + i.w <= 1.05 && i.y + i.h <= 1.05) ? 1 : 100;
@@ -948,10 +1226,13 @@ export async function detectRegions(id, { provider, model, auto = false, runner 
     .map((i) => {
       const x = clamp01(i.x / scale);
       const y = clamp01(i.y / scale);
+      const g = Math.floor(Number(i.group));
       return {
         x, y, w: Math.min(1 - x, i.w / scale), h: Math.min(1 - y, i.h / scale),
         label: String(i.label ?? '').slice(0, 60),
         confidence: Number.isFinite(Number(i.confidence)) ? clamp01(Number(i.confidence)) : null,
+        group: Number.isFinite(g) && g > 0 ? g : null,
+        n: i.n,
       };
     })
     .filter((b) => b.w >= minSide && b.h >= minSide && (b.confidence == null ? !auto : b.confidence >= minConfidence))
@@ -962,17 +1243,25 @@ export async function detectRegions(id, { provider, model, auto = false, runner 
   const kept = [];
   for (const b of found) if (!kept.some((k) => overlap(k, b) > 0.5 || insideShare(b, k) > 0.7)) kept.push(b);
   const limited = kept.slice(0, MAX_REGIONS);
-  const ordered = (auto ? padBoxes(limited) : limited).sort((a, b) => a.x - b.x || a.y - b.y);
-  const regions = ordered.map((b) => ({ ...cleanBox(b), label: b.label, confidence: b.confidence }));
+  const ordered2 = (auto ? padBoxes(limited) : limited).sort((a, b) => a.x - b.x || a.y - b.y);
 
-  const out = { regions, provider: ai.provider, model: ai.model };
+  // Groups renumbered 1, 2, 3 in the order the boxes now read; a box the AI gave no group is a product of its own.
+  const renumber = new Map();
+  let next = 0;
+  const regions = ordered2.map((b) => {
+    const key = b.group != null ? `g${b.group}` : `own${b.n}`;
+    if (!renumber.has(key)) { next += 1; renumber.set(key, next); }
+    return { ...cleanBox(b), label: b.label, confidence: b.confidence, group: renumber.get(key) };
+  });
+
+  const out = { regions, groups: next, note: String(parsed.note ?? '').slice(0, 240), provider: ai.provider, model: ai.model, tried: ai.tried };
   if (auto) {
-    const split = regions.length >= 2 && regions.length <= 6;
+    const split = next >= 2 && next <= 6;
     out.auto = {
       split,
-      reason: split ? `${regions.length} separate products` : regions.length > 6
-        ? `${regions.length} boxes is more than a photo of parcels usually holds - split it by hand`
-        : regions.length === 1 ? 'one product' : 'no product found',
+      reason: split ? `${next} separate products${regions.length > next ? ` (${regions.length} parts)` : ''}` : next > 6
+        ? `${next} products is more than a photo of parcels usually holds - split it by hand`
+        : regions.length > 1 ? 'the parts are one product' : regions.length === 1 ? 'one product' : 'no product found',
     };
   }
   return out;
