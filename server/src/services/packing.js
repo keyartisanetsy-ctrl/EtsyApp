@@ -1714,7 +1714,7 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
 
   // Pictures go in at their own shape and size (never squeezed into a fixed box): the Image column is as wide as the
   // widest picture and each row as tall as its picture. Only a very large photo is scaled down - evenly, so it never distorts.
-  const MAX_SIDE = 640;
+  const MAX_SIDE = 1280;
   const PX_TO_COL = 7;     // one Excel column-width unit is about 7 pixels
   const shots = new Map();
   for (const p of rows) {
