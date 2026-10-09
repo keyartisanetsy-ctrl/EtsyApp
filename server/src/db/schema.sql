@@ -1101,6 +1101,41 @@ CREATE INDEX IF NOT EXISTS idx_parcels_match ON inbound_parcels(match_channel, m
 CREATE INDEX IF NOT EXISTS idx_parcels_parent ON inbound_parcels(parent_id);
 CREATE INDEX IF NOT EXISTS idx_parcels_received ON inbound_parcels(received_on);
 
+-- More than one photo can belong to one arrival: the product from another side, the
+-- carrier's label, a second tray the warehouse split the same product across. The
+-- arrival's own photo stays in inbound_parcels.attachment_id; these are the others.
+CREATE TABLE IF NOT EXISTS parcel_photos (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  parcel_id     INTEGER NOT NULL,
+  attachment_id TEXT NOT NULL,
+  kind          TEXT NOT NULL DEFAULT 'product',   -- product | label
+  ocr_text      TEXT,                              -- what the browser read off this photo
+  position      INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_parcel_photos_parcel ON parcel_photos(parcel_id);
+
+-- What the shop has taught the photo reader. A "look" is how the warehouse's photo of a
+-- confirmed match actually appeared for that product (keyed by SKU, or the listing picture
+-- when it has no SKU), so the next photo of the same product is recognised by it - the
+-- warehouse never photographs a product the way its listing does. A "lesson" is a plain
+-- sentence about a decision (these two trays are one product) that is told to the AI.
+CREATE TABLE IF NOT EXISTS parcel_looks (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_key      TEXT NOT NULL,
+  signature     TEXT NOT NULL,                     -- the colour fingerprint of the photo (imagesig.js)
+  parcel_id     INTEGER,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_parcel_looks_key ON parcel_looks(item_key);
+CREATE INDEX IF NOT EXISTS idx_parcel_looks_parcel ON parcel_looks(parcel_id);
+
+CREATE TABLE IF NOT EXISTS packing_lessons (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  text       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Shopify orders get the same short code Etsy orders carry (26-0710-01), drawn
 -- from the same per-day numbering, so one sheet can list both without two
 -- different orders ever sharing a code.

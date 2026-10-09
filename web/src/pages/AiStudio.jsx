@@ -10,7 +10,7 @@ export default function AiStudio() {
   const [tab, setTab] = useState('reply');
   const { data: status } = useAsync(() => api.get('/ai/status'), []);
 
-  const configured = status && ['manus', 'anthropic', 'openai'].some((p) => status[p].configured);
+  const configured = status && ['manus', 'anthropic', 'openai', 'gemini', 'openrouter'].some((p) => status[p].configured);
 
   return (
     <Page
@@ -18,7 +18,7 @@ export default function AiStudio() {
       subtitle={status ? `default: ${status.active}` : ''}
       actions={
         <div className="pill-row">
-          {status && ['manus', 'anthropic', 'openai'].map((p) => (
+          {status && ['manus', 'anthropic', 'openai', 'gemini', 'openrouter'].map((p) => (
             <span key={p} className={`badge ${status[p].configured ? 'green' : 'grey'}`}>{p}</span>
           ))}
         </div>
@@ -199,7 +199,7 @@ function ReplyDesk({ status }) {
         <div className="flex mt16">
           <select className="select sm" style={{ width: 150 }} value={provider} onChange={(e) => setProvider(e.target.value)}>
             <option value="">Default provider</option>
-            {['manus', 'anthropic', 'openai'].map((p) => (
+            {['manus', 'anthropic', 'openai', 'gemini', 'openrouter'].map((p) => (
               <option key={p} value={p} disabled={!status?.[p]?.configured}>{p}{status?.[p]?.configured ? '' : ' (no key)'}</option>
             ))}
           </select>
@@ -313,7 +313,7 @@ function ListingWriter({ status }) {
 
         <select className="select mb8" value={provider} onChange={(e) => setProvider(e.target.value)}>
           <option value="">Default provider</option>
-          {['manus', 'anthropic', 'openai'].map((p) => (
+          {['manus', 'anthropic', 'openai', 'gemini', 'openrouter'].map((p) => (
             <option key={p} value={p} disabled={!status?.[p]?.configured}>{p}</option>
           ))}
         </select>

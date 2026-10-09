@@ -184,7 +184,7 @@ export default function Dashboard({ summary, onRefresh }) {
         <div className="card">
           <div className="card-head"><h3>AI providers</h3></div>
           <dl className="kv">
-            {['manus', 'anthropic', 'openai'].map((p) => (
+            {['manus', 'anthropic', 'openai', 'gemini', 'openrouter'].map((p) => (
               <React.Fragment key={p}>
                 <dt style={{ textTransform: 'capitalize' }}>{p}</dt>
                 <dd>

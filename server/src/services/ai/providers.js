@@ -15,7 +15,7 @@ import { outboundFetch } from '../../lib/outbound.js';
 const log = createLogger('ai');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export const PROVIDERS = ['manus', 'anthropic', 'openai'];
+export const PROVIDERS = ['manus', 'anthropic', 'openai', 'gemini', 'openrouter'];
 
 export function providerStatus() {
   return {
@@ -27,6 +27,14 @@ export function providerStatus() {
     openai: {
       configured: !!readSetting('ai.openai.api_key'), supportsImages: true, async: false,
       model: readSetting('ai.openai.model'), effort: readSetting('ai.openai.effort') || '',
+    },
+    gemini: {
+      configured: !!readSetting('ai.gemini.api_key'), supportsImages: true, async: false,
+      model: readSetting('ai.gemini.model'), effort: '',
+    },
+    openrouter: {
+      configured: !!readSetting('ai.openrouter.api_key'), supportsImages: true, async: false,
+      model: readSetting('ai.openrouter.model'), effort: '',
     },
     active: readSetting('ai.provider'),
   };
@@ -52,8 +60,8 @@ export function resolveProvider(requested, { needsImages = false } = {}) {
   if (!fallback) {
     throw badRequest(
       needsImages
-        ? 'No AI provider with image support is configured. Add an Anthropic or OpenAI key in Settings.'
-        : 'No AI provider is configured. Add a Manus, Anthropic or OpenAI key in Settings.',
+        ? 'No AI provider with image support is configured. Add an Anthropic, OpenAI, Gemini or OpenRouter key in Settings.'
+        : 'No AI provider is configured. Add a Manus, Anthropic, OpenAI, Gemini or OpenRouter key in Settings.',
     );
   }
   if (fallback !== wanted) log.warn(`provider "${wanted}" unusable here, using "${fallback}"`);
@@ -241,6 +249,19 @@ export const MODEL_CATALOGUE = {
     { id: 'gpt-4.1-mini', label: 'GPT-4.1 mini', effortLevels: [], note: 'Previous-generation, cheap bulk option. Reads images.' },
     { id: 'gpt-4o', label: 'GPT-4o', effortLevels: [], note: 'Previous-generation, still generally available. Reads images.' },
     { id: 'gpt-4o-mini', label: 'GPT-4o mini', effortLevels: [], note: 'Previous-generation, cheap bulk option. Reads images.' },
+  ],
+  // Gemini and OpenRouter take any model id the account can use; these are the
+  // vision-capable ones worth offering. No reasoning-effort control is wired up.
+  gemini: [
+    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', effortLevels: [], note: 'Fast and cheap, reads images well. A free tier exists - a good first engine for warehouse photos.' },
+    { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite', effortLevels: [], note: 'The cheapest Gemini. Fine for easy photos, may miss details.' },
+    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', effortLevels: [], note: 'The most careful Gemini - for photos the others get wrong.' },
+  ],
+  openrouter: [
+    { id: 'google/gemini-2.5-flash', label: 'Gemini 2.5 Flash (via OpenRouter)', effortLevels: [], note: 'One OpenRouter key, many engines. Cheap and reads images.' },
+    { id: 'anthropic/claude-sonnet-4.5', label: 'Claude Sonnet (via OpenRouter)', effortLevels: [], note: 'Claude through OpenRouter.' },
+    { id: 'openai/gpt-4o', label: 'GPT-4o (via OpenRouter)', effortLevels: [], note: 'OpenAI through OpenRouter.' },
+    { id: 'qwen/qwen2.5-vl-72b-instruct', label: 'Qwen2.5-VL 72B (via OpenRouter)', effortLevels: [], note: 'Open vision model that is strong with Chinese text on labels and boxes.' },
   ],
   // Manus has no live model-list endpoint (its /v2/agent.list is for the
   // agents you have configured, not Manus's own model tiers) - agent_profile
@@ -759,7 +780,62 @@ export async function manusEditImage({ prompt, image, profile, signal, onProgres
   }
 }
 
-const IMPLS = { manus: manusComplete, anthropic: anthropicComplete, openai: openaiComplete };
+// ------------------------------------------------- Gemini / OpenRouter
+
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
+const OPENROUTER_BASE = 'https://openrouter.ai/api';
+
+async function geminiComplete({ prompt, system, images = [], maxTokens = 4096, model: override, signal }) {
+  const apiKey = readSetting('ai.gemini.api_key');
+  const model = override || readSetting('ai.gemini.model');
+  const parts = images.map((img) => ({ inline_data: { mime_type: img.mime || 'image/jpeg', data: img.base64 } }));
+  parts.push({ text: prompt });
+  const payload = {
+    ...(system ? { system_instruction: { parts: [{ text: system }] } } : {}),
+    contents: [{ role: 'user', parts }],
+    generationConfig: { maxOutputTokens: Math.max(maxTokens, 2048), temperature: 0.2 },
+  };
+  const res = await outboundFetch(`${GEMINI_BASE}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: 'POST',
+    headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new AppError(res.status, `Gemini error: ${body?.error?.message || res.statusText}`);
+  const text = (body.candidates?.[0]?.content?.parts ?? []).map((p) => p.text || '').join('\n').trim();
+  if (!text) throw new AppError(502, `Gemini returned no answer${body.promptFeedback?.blockReason ? ` (${body.promptFeedback.blockReason})` : ''}.`);
+  return {
+    text, model, raw: body,
+    tokens: { input: body.usageMetadata?.promptTokenCount ?? 0, output: body.usageMetadata?.candidatesTokenCount ?? 0 },
+  };
+}
+
+async function openrouterComplete({ prompt, system, images = [], maxTokens = 4096, model: override, signal }) {
+  const apiKey = readSetting('ai.openrouter.api_key');
+  const model = override || readSetting('ai.openrouter.model');
+  const content = [{ type: 'text', text: prompt }];
+  for (const img of images) {
+    content.push({ type: 'image_url', image_url: { url: `data:${img.mime || 'image/jpeg'};base64,${img.base64}` } });
+  }
+  const messages = [...(system ? [{ role: 'system', content: system }] : []), { role: 'user', content }];
+  const res = await outboundFetch(`${OPENROUTER_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.2 }),
+    signal,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new AppError(res.status, `OpenRouter error: ${body?.error?.message || res.statusText}`);
+  const text = body.choices?.[0]?.message?.content?.trim() ?? '';
+  if (!text) throw new AppError(502, 'OpenRouter returned no answer.');
+  return {
+    text, model: body.model || model, raw: body,
+    tokens: { input: body.usage?.prompt_tokens ?? 0, output: body.usage?.completion_tokens ?? 0 },
+  };
+}
+
+const IMPLS = { manus: manusComplete, anthropic: anthropicComplete, openai: openaiComplete, gemini: geminiComplete, openrouter: openrouterComplete };
 
 /** Single entry point for text generation. */
 export async function complete({ provider, ...opts }) {
