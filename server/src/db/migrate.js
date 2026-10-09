@@ -291,6 +291,20 @@ export function migrateSchema(db) {
 
 /** Runs AFTER schema.sql, once etsy_accounts is guaranteed to exist. */
 export function migrateData(db) {
+  // Etsy's receipts carry is_paid / is_shipped and a status now - the old was_* fields are gone, so earlier syncs stored
+  // every order as unpaid, unshipped and not canceled. Put the flags right from what was stored (local rows only; no
+  // request to Etsy) - it is a no-op once they agree.
+  if (hasTable(db, 'receipts')) {
+    db.exec(`
+      UPDATE receipts SET is_paid = 1, was_paid = 1
+        WHERE COALESCE(was_paid,0) = 0 AND (COALESCE(is_paid,0) = 1 OR lower(COALESCE(status,'')) IN ('paid','completed','partially refunded','fully refunded'));
+      UPDATE receipts SET is_shipped = 1, was_shipped = 1
+        WHERE COALESCE(was_shipped,0) = 0 AND (COALESCE(is_shipped,0) = 1 OR lower(COALESCE(status,'')) = 'completed');
+      UPDATE receipts SET was_canceled = 1
+        WHERE COALESCE(was_canceled,0) = 0 AND lower(COALESCE(status,'')) = 'canceled';
+    `);
+  }
+
   // Single-shop oauth_token -> multi-shop etsy_accounts.
   if (hasTable(db, 'oauth_token')) {
     const existing = db.prepare('SELECT * FROM oauth_token').all();

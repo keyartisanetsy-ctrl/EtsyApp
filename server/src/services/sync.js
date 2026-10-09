@@ -399,6 +399,12 @@ const upsertReceipt = (db) => db.prepare(`
     expected_ship_ts=excluded.expected_ship_ts, raw=excluded.raw, synced_at=datetime('now')
 `);
 
+const PAID_STATUSES = ['paid', 'completed', 'partially refunded', 'fully refunded'];
+const statusOf = (r) => String(r.status ?? '').toLowerCase();
+export const receiptPaid = (r) => !!(r.is_paid || r.was_paid || PAID_STATUSES.includes(statusOf(r)));
+export const receiptShipped = (r) => !!(r.is_shipped || r.was_shipped || statusOf(r) === 'completed');
+export const receiptCanceled = (r) => !!(r.was_canceled || statusOf(r) === 'canceled');
+
 function receiptRow(r) {
   const total = money(r.grandtotal);
   // Refunds come as a list; the sum is what actually left your pocket.
@@ -428,12 +434,14 @@ function receiptRow(r) {
     message_from_buyer: r.message_from_buyer ?? null,
     message_from_seller: r.message_from_seller ?? null,
     message_from_payment: r.message_from_payment ?? null,
-    is_paid: r.is_paid ? 1 : 0,
-    is_shipped: r.is_shipped ? 1 : 0,
-    was_paid: r.was_paid ? 1 : 0,
-    was_shipped: r.was_shipped ? 1 : 0,
+    is_paid: receiptPaid(r) ? 1 : 0,
+    is_shipped: receiptShipped(r) ? 1 : 0,
+    // Etsy's receipts now say is_paid / is_shipped and a status; the old was_* fields are gone, and reading only them
+    // marked every order unpaid and unshipped (so no Etsy order ever reached the packing queue)
+    was_paid: receiptPaid(r) ? 1 : 0,
+    was_shipped: receiptShipped(r) ? 1 : 0,
     was_delivered: r.was_delivered ? 1 : 0,
-    was_canceled: r.was_canceled ? 1 : 0,
+    was_canceled: receiptCanceled(r) ? 1 : 0,
     grandtotal_amount: total.amount,
     grandtotal_divisor: total.divisor,
     grandtotal_currency: total.currency,

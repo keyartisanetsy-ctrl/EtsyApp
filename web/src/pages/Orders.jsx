@@ -228,7 +228,7 @@ export default function Orders() {
       }
       toolbar={
         <>
-          {counters?.allShops?.shops?.length > 1 && <div style={{ flexBasis: '100%' }}><UnshippedShops shops={counters.allShops.shops} compact /></div>}
+          {counters?.allShops?.shops?.length > 1 && <div style={{ flexBasis: '100%' }}><UnshippedShops shops={counters.allShops.shops} compact onFetched={refreshAll} /></div>}
           <input className="input search" placeholder="Search order id, buyer, city, SKU, tracking…"
                  value={search} onChange={(e) => { setSearch(e.target.value); setOffset(0); }} />
           <Filter label="Done" value={done} onChange={setDone} />

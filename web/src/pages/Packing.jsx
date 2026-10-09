@@ -999,7 +999,7 @@ export default function Packing() {
           {queue.data && !queue.data.connected.etsy && filters.etsy && ' Etsy is not connected.'}
           {queue.data && !queue.data.connected.shopify && filters.shopify && ' Shopify is not connected.'}
         </div>
-        {queue.data?.shops?.length > 0 && <div className="mt8"><UnshippedShops shops={queue.data.shops} olderThanRange={queue.data.olderThanRange} compact /></div>}
+        {queue.data?.shops?.length > 0 && <div className="mt8"><UnshippedShops shops={queue.data.shops} olderThanRange={queue.data.olderThanRange} compact onFetched={() => queue.reload()} /></div>}
       </div>
 
       <div className="grid c5 mb16">
