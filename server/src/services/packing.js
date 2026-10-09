@@ -218,9 +218,11 @@ export function mergeParcels(targetId, sourceIds) {
   const ids = [...new Set((Array.isArray(sourceIds) ? sourceIds : [sourceIds]).map(Number))].filter((n) => n && n !== target.id);
   if (!ids.length) throw badRequest('Choose the arrivals to merge into this one.');
   if (target.match_channel) throw badRequest('Unmatch this arrival before merging others into it.');
+  if (target.stock_sku || target.alloc) throw badRequest('Pieces that are in stock, or a share of another arrival, cannot be merged - give them back to their arrival first.');
   const sources = ids.map(getRow);
   for (const src of sources) {
     if (src.match_channel) throw badRequest(`${parcelLabel(src)} is matched already - unmatch it first.`);
+    if (src.stock_sku || src.alloc) throw badRequest(`${parcelLabel(src)} is in stock or a share of another arrival - give it back to its arrival first.`);
     if (src.original_attachment_id || db.prepare('SELECT 1 FROM inbound_parcels WHERE parent_id = ?').get(src.id)) {
       throw badRequest(`${parcelLabel(src)} was split from a photo - restore the original before merging it.`);
     }

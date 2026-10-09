@@ -38,12 +38,18 @@ export default function SplitPhoto({ parcel, range, onClose, onDone }) {
   const setRegions = (r) => setRegionsRaw(numbered(r));
   const leftover = useMemo(() => leftoverShare(regions), [regions]);
   const products = useMemo(() => new Set(regions.map((r) => r.group)).size, [regions]);
+  // A product's parts are counted once (the biggest count among them), the same way the server makes its arrivals.
+  const pieces = useMemo(() => {
+    const per = new Map();
+    for (const r of regions) per.set(r.group, Math.max(per.get(r.group) ?? 0, Number(r.count) || 1));
+    return [...per.values()].reduce((a, b) => a + b, 0);
+  }, [regions]);
 
   // Likely finished once every reported piece has a product (or the boxes cover nearly the whole photo);
   // a tight box always leaves a margin of table around it, so the leftover share alone cannot tell.
   useEffect(() => {
-    if (!touched.current) setFinished(regions.length > 0 && (products >= parcel.quantity || leftover < 0.06));
-  }, [regions, products, leftover, parcel.quantity]);
+    if (!touched.current) setFinished(regions.length > 0 && (pieces >= parcel.quantity || leftover < 0.06));
+  }, [regions, pieces, leftover, parcel.quantity]);
 
   const suggest = async () => {
     setBusy('detect');
@@ -67,7 +73,7 @@ export default function SplitPhoto({ parcel, range, onClose, onDone }) {
     try {
       const { crops, remainder } = await splitPhoto(withBase(parcel.photoUrl), regions);
       const form = new FormData();
-      form.append('regions', JSON.stringify(regions.map(({ x, y, w, h, group, label }) => ({ x, y, w, h, group, label }))));
+      form.append('regions', JSON.stringify(regions.map(({ x, y, w, h, group, label, count }) => ({ x, y, w, h, group, label, count: Math.max(1, Number(count) || 1) }))));
       form.append('done', finished || !remainder ? '1' : '0');
       crops.forEach((blob, i) => form.append('crops', blob, `piece-${i + 1}.jpg`));
       if (remainder && !finished) form.append('remainder', remainder, 'rest.jpg');
@@ -131,6 +137,9 @@ export default function SplitPhoto({ parcel, range, onClose, onDone }) {
                     <span style={{ width: 12, height: 12, borderRadius: 3, background: REGION_COLORS[(r.group - 1) % REGION_COLORS.length], flex: '0 0 auto' }} />
                     <input className="input sm" style={{ flex: 1, minWidth: 0 }} value={r.label} placeholder={`Part ${i + 1}`} aria-label={`Name of part ${i + 1}`}
                            disabled={!!busy} onChange={(e) => patch(r.id, { label: e.target.value })} />
+                    <input className="input sm" style={{ width: 54, textAlign: 'center' }} type="number" min="1" max="99" value={r.count ?? 1} disabled={!!busy}
+                           aria-label={`Pieces in part ${i + 1}`} title="How many identical pieces this box holds (stacked boxes)"
+                           onChange={(e) => patch(r.id, { count: Math.max(1, Number(e.target.value) || 1) })} />
                     <select className="select sm" style={{ width: 92 }} value={r.group} disabled={!!busy} aria-label={`Product of part ${i + 1}`}
                             title="Parts with the same product number stay together as one arrival"
                             onChange={(e) => patch(r.id, { group: Number(e.target.value) })}>
@@ -154,7 +163,7 @@ export default function SplitPhoto({ parcel, range, onClose, onDone }) {
           {count > 0 && (
             <div className="small" style={{ marginTop: 8 }}>
               <div className="muted mb4">
-                {count} part{count === 1 ? '' : 's'} → {products} product{products === 1 ? '' : 's'}. The warehouse reported {parcel.quantity} piece{parcel.quantity === 1 ? '' : 's'}; {Math.round(leftover * 100)}% of the photo is outside the boxes.
+                {count} part{count === 1 ? '' : 's'} → {products} product{products === 1 ? '' : 's'}, {pieces} piece{pieces === 1 ? '' : 's'} counted. The warehouse reported {parcel.quantity} piece{parcel.quantity === 1 ? '' : 's'}; {Math.round(leftover * 100)}% of the photo is outside the boxes.
               </div>
               <Checkbox checked={finished} onChange={(v) => { touched.current = true; setFinished(v); }} label="Nothing else is left in this photo" />
               <div className="muted" style={{ marginTop: 4 }}>

@@ -6,6 +6,7 @@ import {
 } from '../components/ui.jsx';
 import SplitPhoto from '../components/SplitPhoto.jsx';
 import PhotoBrain from '../components/PhotoBrain.jsx';
+import { AssignPicker, StockDialog, SkuPicker } from '../components/PieceAllocator.jsx';
 import ItemSupplyBox from '../components/ItemSupply.jsx';
 import UnshippedShops from '../components/UnshippedShops.jsx';
 import { normalizePhoto, splitPhoto } from '../lib/photo.js';
@@ -65,6 +66,7 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
   const [shots, setShots] = useState([]);
   const [text, setText] = useState('');
   const [code, setCode] = useState('');
+  const [stockSku, setStockSku] = useState('');
   const [busy, setBusy] = useState(false);
   const [over, setOver] = useState(false);
   const textRef = useRef(null);
@@ -103,6 +105,7 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
       form.append('warehouse', warehouse);
       form.append('receivedOn', localDay(new Date()));
       form.append('code', code.trim());
+      form.append('stockSku', stockSku.trim());
       form.append('channels', range.channels.join(','));
       form.append('from', range.from);
       form.append('to', range.to);
@@ -111,6 +114,7 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
       setShots([]);
       setText('');
       setCode('');
+      setStockSku('');
       onAdded(parcel);
     } catch (err) { showError(err, 'Could not add that parcel'); } finally { setBusy(false); }
   };
@@ -165,6 +169,7 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
           <input className="input mono" value={code} placeholder={`Order code or number (optional) - ${exampleCode()} / #2419`}
                  onChange={(e) => setCode(e.target.value)}
                  onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
+          <SkuPicker value={stockSku} onChange={setStockSku} placeholder="Straight into stock? Type the product's SKU (optional) - all its pieces go on the shelf" />
           <input className="input" value={warehouse} placeholder="Warehouse (仓库) - optional, remembered"
                  onChange={(e) => onWarehouse(e.target.value)}
                  onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
@@ -206,45 +211,6 @@ function EditParcel({ parcel, onClose, onSaved }) {
         <label className="flex col small">Received on<input className="input" type="date" value={form.receivedOn} onChange={set('receivedOn')} /></label>
         <label className="flex col small">Note<input className="input" value={form.note} onChange={set('note')} /></label>
       </div>
-    </Modal>
-  );
-}
-
-/** Pick the order item by hand when the AI could not, or got it wrong. */
-function AssignPicker({ parcel, range, onClose, onAssign }) {
-  const [q, setQ] = useState('');
-  const { data, loading } = useAsync(
-    () => api.get('/packing/open-items', { channels: range.channels, from: range.from, to: range.to }),
-    [range.channels.join(','), range.from, range.to]);
-  const items = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    const all = data?.items ?? [];
-    if (!needle) return all;
-    return all.filter((i) => [i.title, i.sku, i.orderRef, i.buyer, i.variant].join(' ').toLowerCase().includes(needle));
-  }, [data, q]);
-
-  return (
-    <Modal open lg onClose={onClose} title={`Assign ${parcel.label} to an order item`}>
-      <div className="flex gap12 mb12" style={{ alignItems: 'flex-start' }}>
-        <Thumb src={parcel.photoUrl} size="lg" />
-        <input className="input" autoFocus value={q} placeholder="Search title, SKU, order code or buyer" onChange={(e) => setQ(e.target.value)} />
-      </div>
-      {loading ? <Spinner /> : !items.length ? <Empty icon="∅" title="Nothing open in this range" /> : (
-        <table className="data">
-          <tbody>
-            {items.map((i) => (
-              <tr key={`${i.channel}:${i.itemId}`}>
-                <td style={{ width: 70 }}><Thumb src={i.imageUrl} size="lg" /></td>
-                <td>
-                  <div><strong>{i.title}</strong>{i.variant && <span className="muted"> · {i.variant}</span>}</div>
-                  <div className="small muted"><ChannelBadge channel={i.channel} /> <span className="mono">{i.orderRef}</span> · {i.buyer} · {shortDay(i.orderedAt)} · needs {i.remaining}</div>
-                </td>
-                <td className="right"><button className="btn sm primary" onClick={() => onAssign({ channel: i.channel, orderId: i.orderId, itemId: i.itemId })}>Assign</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
     </Modal>
   );
 }
@@ -548,7 +514,7 @@ function ExtraPhotos({ parcel, busy, onAdd, onRemove, onDetach }) {
 function MergePicker({ parcel, rows, onClose, onMerge }) {
   const [picked, setPicked] = useState([]);
   // Parts of one split photo can be put back together here too - the AI may have cut one product in two.
-  const others = rows.filter((p) => p.id !== parcel.id && p.status === 'unmatched' && p.photoUrl && !p.canRestore);
+  const others = rows.filter((p) => p.id !== parcel.id && p.status === 'unmatched' && p.photoUrl && !p.canRestore && !p.alloc);
   const toggle = (id) => setPicked((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
   return (
     <Modal open lg onClose={onClose} title={`Merge arrivals into ${parcel.label}`}
@@ -577,7 +543,7 @@ function MergePicker({ parcel, rows, onClose, onMerge }) {
   );
 }
 
-function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit, onCode, onChoose, onRelease, onSupply, onItemSaved, onAddPhotos, onRemovePhoto, onDetachPhoto, onMerge }) {
+function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit, onCode, onChoose, onRelease, onSupply, onItemSaved, onAddPhotos, onRemovePhoto, onDetachPhoto, onMerge, onStock, onUnstock, onUnallocate }) {
   const [open, setOpen] = useState(false);
   const s = latestSuggestions(parcel);
   const top = s?.items?.[0];
@@ -591,8 +557,9 @@ function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, on
       <tr style={parcel.status === 'split' ? { opacity: 0.65 } : undefined}>
         <td style={parcel.parentId ? { paddingLeft: 26 } : undefined}>
           <div className="mono">
-            {parcel.parentId && <span className="muted" title="Cut out of a photo that showed several products">↳ </span>}
+            {parcel.parentId && <span className="muted" title={parcel.alloc ? 'A share of the pieces of another arrival' : 'Cut out of a photo that showed several products'}>↳ </span>}
             <strong>{parcel.label}</strong>
+            {parcel.pieces > 1 && parcel.status !== 'split' && <span className="badge blue" style={{ marginLeft: 6 }} title="Pieces on this arrival">× {parcel.pieces}</span>}
           </div>
           <div className="small muted">
             {parcel.receivedOn}{parcel.note ? ` · ${parcel.note}` : ''}
@@ -620,9 +587,15 @@ function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, on
         <td>{parcel.warehouse || <span className="muted">—</span>}</td>
         <td>
           {parcel.status === 'split' && (
-            <span className="small muted">All pieces were split into {parcel.children} arrival{parcel.children === 1 ? '' : 's'} below</span>
+            <span className="small muted">All pieces went into {parcel.children} arrival{parcel.children === 1 ? '' : 's'} below</span>
           )}
           {parcel.status === 'packed' && <span className="badge green">Packed</span>}
+          {parcel.status === 'stocked' && (
+            <div className="small" data-testid="stocked-note">
+              <span className="badge blue">In stock</span> <span className="mono"><strong>{parcel.stockSku}</strong></span> × {parcel.pieces}
+              <div className="muted">Put on the shelf - not for a customer's order. Shown on the packing sheet as STOCK.</div>
+            </div>
+          )}
           {m && (
             <div className="small" style={{ marginTop: parcel.status === 'packed' ? 4 : 0 }}>
               <div><strong>{m.item?.title ?? m.itemId}</strong>{m.item?.variant && <span className="muted"> · {m.item.variant}</span>}</div>
@@ -643,7 +616,7 @@ function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, on
             </button>
           )}
           {!m && s && !top && parcel.status !== 'split' && <span className="small muted">No likely match in range</span>}
-          {!m && !s && parcel.status !== 'split' && <span className="small muted">Not matched yet</span>}
+          {!m && !s && parcel.status !== 'split' && parcel.status !== 'stocked' && <span className="small muted">Not matched yet</span>}
           {!m && s?.needsItem && <div><button className="btn xs" disabled={busy} onClick={() => onChoose(parcel, s.needsItem)}>Which item of {s.needsItem.code}? ▸</button></div>}
           {!m && parcel.photoUrl && parcel.status !== 'split' && (reading || parcel.hasText) && (
             <div className="small muted" style={{ marginTop: 2 }}>{reading ? 'reading the text on the photo…' : '✓ text read from photo'}</div>
@@ -653,23 +626,31 @@ function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, on
           <div className="flex gap4" style={{ flexWrap: 'wrap' }}>
             {parcel.status === 'split' ? (
               <button className="btn xs" disabled={busy} onClick={() => onUnsplit(parcel)} title="Put the original photo back and remove the arrivals cut out of it">Restore original</button>
+            ) : parcel.status === 'stocked' ? (
+              <button className="btn xs" disabled={busy} onClick={() => onUnstock(parcel)}
+                      title="Take these pieces back off the shelf (the real stock of the SKU goes down again)">↩ Take out of stock</button>
             ) : (
               <>
                 {!m && <button className="btn xs" disabled={busy} onClick={() => onFree(parcel)}
                                 title="Free, no AI: tracking number, order state, text read off the photo and colours. Assigns by itself only when the tracking number settles it.">{busy ? <Spinner /> : '⚡'} Free match</button>}
                 {!m && <button className="btn xs primary" disabled={busy || !parcel.photoUrl} onClick={() => onMatch(parcel.id)}
                                 title={parcel.photoUrl ? 'Uses AI credits: compare the photo with the unshipped orders in the date range' : 'Add a photo first'}>{busy ? <Spinner /> : parcel.suggestions ? 'Re-match' : 'Find match'}</button>}
-                {!m && <button className="btn xs" disabled={busy} onClick={() => onPicker(parcel)}>Assign…</button>}
+                {!m && <button className="btn xs" disabled={busy} onClick={() => onPicker(parcel)}
+                                title="Give the pieces to one or several order items - any shop - and put what is left into stock">Assign…</button>}
+                {!m && <button className="btn xs" disabled={busy} onClick={() => onStock(parcel)}
+                                title="These pieces are not for an order: put them on the shelf under a SKU">▤ Stock</button>}
+                {parcel.alloc && <button className="btn xs ghost" disabled={busy} onClick={() => onUnallocate(parcel)}
+                                          title="Give these pieces back to the arrival they came from">↩ Back to arrival</button>}
                 {!m && parcel.photoUrl && (
                   <button className="btn xs" disabled={busy} onClick={() => onSplit(parcel)}
                           title="This photo shows products for more than one customer - cut each one out into its own arrival">✂ Split</button>
                 )}
-                {!m && !parcel.canRestore && parcel.status === 'unmatched' && (
+                {!m && !parcel.canRestore && !parcel.alloc && parcel.status === 'unmatched' && (
                   <button className="btn xs" disabled={busy} onClick={() => onMerge(parcel)}
                           title="Other arrivals are really parts of this same package - gather their photos here">⇉ Merge</button>
                 )}
                 {m && <button className="btn xs" disabled={busy} onClick={() => onUnmatch(parcel.id)}>Unmatch</button>}
-                {(parcel.canRestore || parcel.parentId) && (
+                {(parcel.canRestore || (parcel.parentId && !parcel.alloc)) && (
                   <button className="btn xs ghost" disabled={busy} onClick={() => onUnsplit(parcel)} title="Put the original photo back and remove the arrivals cut out of it">Undo split</button>
                 )}
               </>
@@ -848,6 +829,7 @@ export default function Packing() {
   const [reading, setReading] = useState({});
   const [deciding, setDeciding] = useState(null);
   const [merging, setMerging] = useState(null);
+  const [stocking, setStocking] = useState(null);
   const cancelRef = useRef(false);
 
   const channels = useMemo(() => [filters.etsy && 'etsy', filters.shopify && 'shopify'].filter(Boolean), [filters.etsy, filters.shopify]);
@@ -954,12 +936,19 @@ export default function Packing() {
     try {
       const d = await api.post(`/packing/parcels/${parcel.id}/detect`, { auto: true, channels: range.channels, from: range.from, to: range.to });
       if (!d.auto?.split) {
+        // One product, several units stacked: the arrival is that many pieces, whatever the warehouse typed.
+        const only = d.regions?.length === 1 ? d.regions[0] : null;
+        if (d.auto?.count > 1 && d.auto.count !== parcel.quantity && only && (only.confidence ?? 0) >= 0.85) {
+          await api.post(`/packing/parcels/${parcel.id}/set-count`, { quantity: d.auto.count });
+          toast({ kind: 'info', title: `${parcel.label}: the photo shows ${d.auto.count} pieces`, body: `The warehouse said ${parcel.quantity}. Use Assign… to give them to orders and put the extra ones into stock.`, duration: 9000 });
+          return null;
+        }
         if (!quiet) toast({ kind: 'info', title: `${parcel.label}: ${d.auto?.reason ?? 'nothing to split'}`, duration: 7000 });
         return null;
       }
       const { crops } = await splitPhoto(withBase(parcel.photoUrl), d.regions);
       const form = new FormData();
-      form.append('regions', JSON.stringify(d.regions.map(({ x, y, w, h, group, label }) => ({ x, y, w, h, group, label }))));
+      form.append('regions', JSON.stringify(d.regions.map(({ x, y, w, h, group, label, count }) => ({ x, y, w, h, group, label, count }))));
       form.append('done', '1');
       crops.forEach((blob, i) => form.append('crops', blob, `piece-${i + 1}.jpg`));
       const r = await api.upload(`/packing/parcels/${parcel.id}/split`, form);
@@ -1065,6 +1054,8 @@ export default function Packing() {
   // tracking number, order state, photo text and colours settle. The AI is never asked until "Find match" or "Match all" is pressed.
   const onAdded = (parcel) => {
     if (status !== 'all' && status !== 'unmatched') setStatus('all'); else parcels.reload();
+    if (parcel.status === 'stocked') { toast({ kind: 'ok', title: `Added ${parcel.label} → stock`, body: `${parcel.pieces} piece${parcel.pieces === 1 ? '' : 's'} put on the shelf as ${parcel.stockSku}` }); return; }
+    if (parcel.stockError) { toast({ kind: 'err', title: `Added ${parcel.label}, but it could not go into stock`, body: parcel.stockError, duration: 9000 }); return; }
     if (parcel.codeError) {
       toast({ kind: 'err', title: `Added ${parcel.label}, but its code did not fit`, body: parcel.codeError, duration: 9000 });
       return;
@@ -1198,6 +1189,19 @@ export default function Packing() {
     } catch (err) { showError(err, 'Could not merge those'); } finally { flag(parcel.id, false); }
   };
 
+  const unstock = async (parcel) => {
+    if (!window.confirm(`Take ${parcel.pieces} piece${parcel.pieces === 1 ? '' : 's'} of ${parcel.stockSku} back off the shelf?`)) return;
+    flag(parcel.id, true);
+    try { await api.post(`/packing/parcels/${parcel.id}/unstock`, {}); toast({ kind: 'ok', title: 'Taken back out of stock' }); refresh(); }
+    catch (err) { showError(err, 'Could not take those out of stock'); } finally { flag(parcel.id, false); }
+  };
+
+  const unallocate = async (parcel) => {
+    flag(parcel.id, true);
+    try { await api.post(`/packing/parcels/${parcel.id}/unallocate`, {}); toast({ kind: 'ok', title: `${parcel.pieces} piece${parcel.pieces === 1 ? '' : 's'} are back on the arrival` }); refresh(); }
+    catch (err) { showError(err, 'Could not give those back'); } finally { flag(parcel.id, false); }
+  };
+
   const pack = async (order, packed) => {
     const key = `${order.channel}:${order.orderId}`;
     flag(key, true);
@@ -1268,7 +1272,7 @@ export default function Packing() {
           <PhotoBrain />
           <AddParcel warehouse={filters.warehouse} onWarehouse={(v) => setFilter({ warehouse: v })} range={range} onAdded={onAdded} />
           <div className="flex gap8 mb12" style={{ flexWrap: 'wrap' }}>
-            {['all', 'unmatched', 'matched', 'packed'].map((s) => (
+            {['all', 'unmatched', 'matched', 'packed', 'stocked'].map((s) => (
               <button key={s} className={`btn xs ${status === s ? 'primary' : 'ghost'}`} onClick={() => setStatus(s)}>
                 {s === 'all' ? 'All' : s[0].toUpperCase() + s.slice(1)}{counts ? ` (${s === 'all' ? counts.total : counts[s]})` : ''}
               </button>
@@ -1304,7 +1308,8 @@ export default function Packing() {
                                onCode={assignCode} onChoose={(parcel, needsItem) => setChoosing({ parcel, needsItem })} onRelease={releaseHold} onSupply={saveSupply} onItemSaved={refresh}
                                onEdit={setEditing} onDelete={remove} onPicker={setPicking}
                                onSplit={setSplitting} onUnsplit={unsplit}
-                               onAddPhotos={addPhotos} onRemovePhoto={removePhoto} onDetachPhoto={detachPhoto} onMerge={setMerging} />
+                               onAddPhotos={addPhotos} onRemovePhoto={removePhoto} onDetachPhoto={detachPhoto} onMerge={setMerging}
+                               onStock={setStocking} onUnstock={unstock} onUnallocate={unallocate} />
                   ))}
                 </tbody>
               </table>
@@ -1333,6 +1338,7 @@ export default function Packing() {
       )}
 
       {editing && <EditParcel parcel={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} />}
+      {stocking && <StockDialog parcel={stocking} onClose={() => setStocking(null)} onDone={() => { setStocking(null); refresh(); }} />}
       {merging && <MergePicker parcel={merging} rows={parcels.data?.rows ?? []} onClose={() => setMerging(null)} onMerge={mergeInto} />}
       {splitting && <SplitPhoto parcel={splitting} range={range} onClose={() => setSplitting(null)} onDone={() => { setSplitting(null); refresh(); }} />}
       {deciding && (
@@ -1345,6 +1351,7 @@ export default function Packing() {
       )}
       {picking && (
         <AssignPicker parcel={picking} range={range} onClose={() => setPicking(null)}
+                      onDone={(r) => { setPicking(null); refresh(); (r.shares ?? []).filter((x) => x.hold?.state === 'active').forEach(holdToast); }}
                       onAssign={async (t) => { const id = picking.id; setPicking(null); await confirm(id, { ...t, source: 'manual' }); }} />
       )}
     </Page>
