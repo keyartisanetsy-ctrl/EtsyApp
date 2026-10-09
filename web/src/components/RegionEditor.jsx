@@ -83,7 +83,9 @@ export default function RegionEditor({ src, regions, onChange, disabled = false 
     >
       <img src={src} alt="Parcel" draggable={false} style={{ display: 'block', maxWidth: '100%', maxHeight: '62vh', width: 'auto', height: 'auto', borderRadius: 6 }} />
       {regions.map((r, i) => {
-        const color = REGION_COLORS[i % REGION_COLORS.length];
+        // Boxes of one product share a number and a colour.
+        const product = r.group ?? i + 1;
+        const color = REGION_COLORS[(product - 1) % REGION_COLORS.length];
         return (
           <div key={r.id}
                onPointerDown={(e) => begin(e, { mode: 'move', id: r.id, orig: { ...r } })}
@@ -92,7 +94,7 @@ export default function RegionEditor({ src, regions, onChange, disabled = false 
                  border: `2px solid ${color}`, background: `${color}26`, boxSizing: 'border-box', cursor: disabled ? 'default' : 'move',
                }}>
             <span style={{ position: 'absolute', left: 0, top: 0, transform: 'translateY(-100%)', background: color, color: '#111', font: '700 12px/1 system-ui', padding: '3px 6px', borderRadius: '4px 4px 0 0', display: 'flex', gap: 6, alignItems: 'center' }}>
-              {i + 1}
+              {product}
               {!disabled && (
                 <button type="button" aria-label={`Remove box ${i + 1}`}
                         onPointerDown={(e) => e.stopPropagation()}

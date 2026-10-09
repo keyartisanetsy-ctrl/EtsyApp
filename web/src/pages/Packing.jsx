@@ -5,6 +5,7 @@ import {
   Spinner, Empty, Stat, Thumb, Modal, Checkbox, CopyButton, useAsync, useToast, useErrorToast,
 } from '../components/ui.jsx';
 import SplitPhoto from '../components/SplitPhoto.jsx';
+import PhotoBrain from '../components/PhotoBrain.jsx';
 import ItemSupplyBox from '../components/ItemSupply.jsx';
 import UnshippedShops from '../components/UnshippedShops.jsx';
 import { normalizePhoto, splitPhoto } from '../lib/photo.js';
@@ -60,41 +61,44 @@ function ChannelBadge({ channel }) {
  */
 function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
   const showError = useErrorToast();
-  const [file, setFile] = useState(null);
-  const [preview, setPreview] = useState(null);
+  // Every photo of the package: the first is its own, the others are more angles, the other tray, or the carrier's label.
+  const [shots, setShots] = useState([]);
   const [text, setText] = useState('');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [over, setOver] = useState(false);
   const textRef = useRef(null);
 
-  const take = useCallback((f) => {
-    if (!f || !f.type?.startsWith('image/')) return;
-    setFile(f);
+  const take = useCallback((list) => {
+    const images = [...(list ?? [])].filter((f) => f?.type?.startsWith('image/'));
+    if (!images.length) return;
+    setShots((cur) => [...cur, ...images.map((file) => ({ file, kind: 'product', url: URL.createObjectURL(file), key: `${file.name}-${file.size}-${Math.random()}` }))].slice(0, 12));
   }, []);
+  const drop = (key) => setShots((cur) => cur.filter((x) => x.key !== key));
 
-  useEffect(() => {
-    if (!file) { setPreview(null); return undefined; }
-    const url = URL.createObjectURL(file);
-    setPreview(url);
-    return () => URL.revokeObjectURL(url);
-  }, [file]);
+  useEffect(() => () => shots.forEach((x) => URL.revokeObjectURL(x.url)), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const onPaste = (e) => {
-      const img = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith('image/'));
-      if (img) { e.preventDefault(); take(img); textRef.current?.focus(); }
+      const imgs = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+      if (imgs.length) { e.preventDefault(); take(imgs); textRef.current?.focus(); }
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
   }, [take]);
 
   const submit = async () => {
-    if (!file && !text.trim()) return;
+    if (!shots.length && !text.trim()) return;
     setBusy(true);
     try {
       const form = new FormData();
-      if (file) form.append('photo', await normalizePhoto(file));
+      const products = shots.filter((x) => x.kind === 'product');
+      const labels = shots.filter((x) => x.kind === 'label');
+      // A package with only label photos still needs one photo of its own - the first one.
+      const own = products[0] ?? labels[0];
+      if (own) form.append('photo', await normalizePhoto(own.file));
+      for (const x of products.slice(own === products[0] ? 1 : 0)) form.append('photos', await normalizePhoto(x.file));
+      for (const x of labels.filter((l) => l !== own)) form.append('labels', await normalizePhoto(x.file));
       form.append('text', text);
       form.append('warehouse', warehouse);
       form.append('receivedOn', localDay(new Date()));
@@ -103,7 +107,8 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
       form.append('from', range.from);
       form.append('to', range.to);
       const parcel = await api.upload('/packing/parcels', form);
-      setFile(null);
+      shots.forEach((x) => URL.revokeObjectURL(x.url));
+      setShots([]);
       setText('');
       setCode('');
       onAdded(parcel);
@@ -115,27 +120,44 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
       <div className="card-head"><h3>New arrival</h3></div>
       <div className="card-sub">
         Paste the photo from WeChat (Ctrl+V), then the line under it - carrier, last 4 digits and piece count, like 中通 3324 1件.
+        One package can have <strong>several photos</strong> (another side, the other tray of the same product, the carrier's label) - paste or drop them all; mark a label photo with 🏷.
         Know the order already? Type its code (like {exampleCode()}) - or its order number (#2419) if it has no code yet - and the arrival goes straight onto that order.
         An order gets its code the moment its first parcel is added (today's date, numbered 01, 02, 03...).
-        Otherwise the free matcher looks for the order as soon as you add it - tracking number, order state, text read off the photo and colours, no AI credits.
+        Otherwise the free matcher looks for the order as soon as you add it - tracking number, order state, text read off the photos and colours, no AI credits.
         The AI only runs when you press Find match - and, while "Split photos with several products" is on, once on each new photo to see whether it shows more than one product (then each product becomes its own arrival, ready to match). Split one by hand with ✂ Split on its row.
       </div>
       <div className="flex" style={{ alignItems: 'flex-start', flexWrap: 'wrap', gap: 14 }}>
-        <label
-          onDragOver={(e) => { e.preventDefault(); setOver(true); }}
-          onDragLeave={() => setOver(false)}
-          onDrop={(e) => { e.preventDefault(); setOver(false); take(e.dataTransfer.files?.[0]); }}
-          style={{
-            width: 150, height: 150, border: `2px dashed ${over ? 'var(--brand)' : 'var(--border)'}`, borderRadius: 10,
-            display: 'grid', placeItems: 'center', cursor: 'pointer', overflow: 'hidden', textAlign: 'center',
-            background: 'var(--surface-2)',
-          }}
-        >
-          {preview
-            ? <img src={preview} alt="Parcel" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-            : <span className="muted small" style={{ padding: 10 }}>Paste, drop or click to add the photo</span>}
-          <input type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => { take(e.target.files?.[0]); e.target.value = ''; }} />
-        </label>
+        <div style={{ width: 230 }}>
+          <label
+            onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+            onDragLeave={() => setOver(false)}
+            onDrop={(e) => { e.preventDefault(); setOver(false); take(e.dataTransfer.files); }}
+            style={{
+              minHeight: 150, border: `2px dashed ${over ? 'var(--brand)' : 'var(--border)'}`, borderRadius: 10,
+              display: 'grid', placeItems: 'center', cursor: 'pointer', overflow: 'hidden', textAlign: 'center',
+              background: 'var(--surface-2)',
+            }}
+          >
+            {shots.length
+              ? (
+                <div className="flex" style={{ flexWrap: 'wrap', gap: 6, padding: 6, justifyContent: 'center' }}>
+                  {shots.map((x, i) => (
+                    <div key={x.key} data-testid="new-shot" style={{ position: 'relative', width: 66, height: 66 }} onClick={(e) => e.preventDefault()}>
+                      <img src={x.url} alt={`Photo ${i + 1}`} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 6, border: i === 0 ? '2px solid var(--brand)' : '1px solid var(--border)' }} />
+                      <button type="button" aria-label={`Remove photo ${i + 1}`} onClick={(e) => { e.preventDefault(); e.stopPropagation(); drop(x.key); }}
+                              style={{ position: 'absolute', top: -5, right: -5, width: 18, height: 18, borderRadius: 9, border: 0, background: '#111', color: '#fff', cursor: 'pointer', fontSize: 11, lineHeight: '18px', padding: 0 }}>×</button>
+                      <button type="button" aria-label={`Photo ${i + 1} is a label`} title="This photo is the carrier's label"
+                              onClick={(e) => { e.preventDefault(); e.stopPropagation(); setShots((cur) => cur.map((y) => (y.key === x.key ? { ...y, kind: y.kind === 'label' ? 'product' : 'label' } : y))); }}
+                              style={{ position: 'absolute', bottom: -4, left: -4, width: 20, height: 20, borderRadius: 10, border: 0, background: x.kind === 'label' ? 'var(--brand)' : '#555', color: '#fff', cursor: 'pointer', fontSize: 11, lineHeight: '20px', padding: 0 }}>🏷</button>
+                    </div>
+                  ))}
+                </div>
+              )
+              : <span className="muted small" style={{ padding: 10 }}>Paste, drop or click to add the photo(s)</span>}
+            <input type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={(e) => { take(e.target.files); e.target.value = ''; }} />
+          </label>
+          {shots.length > 0 && <div className="small muted" style={{ marginTop: 4 }}>{shots.length} photo{shots.length === 1 ? '' : 's'} - click the box to add more</div>}
+        </div>
         <div className="flex col" style={{ flex: 1, minWidth: 260, gap: 8 }}>
           <input ref={textRef} className="input" value={text} placeholder="中通 3324 1件"
                  onChange={(e) => setText(e.target.value)}
@@ -147,10 +169,10 @@ function AddParcel({ warehouse, onWarehouse, range, onAdded }) {
                  onChange={(e) => onWarehouse(e.target.value)}
                  onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
           <div className="flex gap8">
-            <button className="btn primary" disabled={busy || (!file && !text.trim())} onClick={submit}>
+            <button className="btn primary" disabled={busy || (!shots.length && !text.trim())} onClick={submit}>
               {busy ? <Spinner /> : '＋'} Add arrival
             </button>
-            {file && <button className="btn ghost" disabled={busy} onClick={() => setFile(null)}>Clear photo</button>}
+            {shots.length > 0 && <button className="btn ghost" disabled={busy} onClick={() => { shots.forEach((x) => URL.revokeObjectURL(x.url)); setShots([]); }}>Clear photos</button>}
           </div>
         </div>
       </div>
@@ -487,7 +509,74 @@ function ItemChooser({ parcel, needsItem, busy, onChoose, onClose }) {
   );
 }
 
-function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit, onCode, onChoose, onRelease, onSupply, onItemSaved }) {
+/** The other photos of one package, each with a way to take it out or make it an arrival of its own again. */
+function ExtraPhotos({ parcel, busy, onAdd, onRemove, onDetach }) {
+  const input = useRef(null);
+  const editable = parcel.status !== 'split' && parcel.status !== 'packed';
+  return (
+    <div className="flex gap4" style={{ flexWrap: 'wrap', marginTop: 4, alignItems: 'flex-start' }}>
+      {parcel.extraPhotos.map((x) => (
+        <div key={x.id} data-testid="extra-photo" style={{ textAlign: 'center' }}>
+          <a href={withBase(x.url)} target="_blank" rel="noreferrer" title={x.kind === 'label' ? 'Carrier label' : 'Another photo of this package'}>
+            <Thumb src={x.url} size="lg" />
+          </a>
+          <div className="small muted">
+            {x.kind === 'label' ? '🏷' : ''}
+            {editable && (
+              <>
+                {' '}<button className="btn xs ghost" disabled={busy} title="Make this photo an arrival of its own" aria-label="Make this photo its own arrival" onClick={() => onDetach(parcel, x)}>⇱</button>
+                <button className="btn xs ghost" disabled={busy} title="Remove this photo" aria-label="Remove this photo" onClick={() => onRemove(parcel, x)}>✕</button>
+              </>
+            )}
+          </div>
+        </div>
+      ))}
+      {editable && parcel.photoCount < 12 && (
+        <>
+          <button className="btn xs" disabled={busy} title="Add more photos of this package: another side, the other tray, or the carrier's label" onClick={() => input.current?.click()}>＋ Photos</button>
+          <button className="btn xs" disabled={busy} title="Add the carrier's label photo (its text fills in a missing carrier line)"
+                  onClick={() => { input.current.dataset.kind = 'label'; input.current.click(); }}>＋ 🏷 Label</button>
+          <input ref={input} type="file" accept="image/*" multiple style={{ display: 'none' }} data-testid="add-photos"
+                 onChange={(e) => { const kind = e.target.dataset.kind || 'product'; e.target.dataset.kind = ''; onAdd(parcel, [...e.target.files], kind); e.target.value = ''; }} />
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Gather other arrivals' photos onto this one - the warehouse reported one package as several. */
+function MergePicker({ parcel, rows, onClose, onMerge }) {
+  const [picked, setPicked] = useState([]);
+  const others = rows.filter((p) => p.id !== parcel.id && p.status === 'unmatched' && p.photoUrl && !p.parentId && !p.canRestore);
+  const toggle = (id) => setPicked((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  return (
+    <Modal open lg onClose={onClose} title={`Merge arrivals into ${parcel.label}`}
+           footer={(
+             <>
+               <button className="btn" onClick={onClose}>Cancel</button>
+               <button className="btn primary" disabled={!picked.length} onClick={() => onMerge(parcel, picked)}>Merge {picked.length || ''} into this arrival</button>
+             </>
+           )}>
+      <div className="small muted mb12">
+        Tick the arrivals that are really parts of this same package (for example the warehouse sent the second half of a product as its own photo).
+        Their photos are added to this arrival, which keeps its own carrier line; the ticked ones disappear. You can take a photo back out later with ⇱.
+      </div>
+      <div className="flex" style={{ flexWrap: 'wrap', gap: 10 }}>
+        <div style={{ textAlign: 'center' }}><Thumb src={parcel.photoUrl} size="lg" /><div className="small"><strong>{parcel.label}</strong><div className="muted">this one</div></div></div>
+        <div style={{ alignSelf: 'center', fontSize: 22 }}>＋</div>
+        {!others.length && <span className="muted small" style={{ alignSelf: 'center' }}>There is no other open arrival with a photo.</span>}
+        {others.map((p) => (
+          <label key={p.id} data-testid="merge-option" style={{ textAlign: 'center', cursor: 'pointer', padding: 4, borderRadius: 8, border: `2px solid ${picked.includes(p.id) ? 'var(--brand)' : 'transparent'}` }}>
+            <Thumb src={p.photoUrl} size="lg" />
+            <div className="small"><input type="checkbox" checked={picked.includes(p.id)} onChange={() => toggle(p.id)} /> <span className="mono">{p.label}</span></div>
+          </label>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
+function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, onUnmatch, onEdit, onDelete, onPicker, onSplit, onUnsplit, onCode, onChoose, onRelease, onSupply, onItemSaved, onAddPhotos, onRemovePhoto, onDetachPhoto, onMerge }) {
   const [open, setOpen] = useState(false);
   const s = latestSuggestions(parcel);
   const top = s?.items?.[0];
@@ -522,6 +611,9 @@ function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, on
           </div>
           {parcel.originalPhotoUrl && (
             <a className="small" href={withBase(parcel.originalPhotoUrl)} target="_blank" rel="noreferrer" title="The photo as the warehouse sent it">original ↗</a>
+          )}
+          {(parcel.extraPhotos.length > 0 || (parcel.photoUrl && parcel.status !== 'split')) && (
+            <ExtraPhotos parcel={parcel} busy={busy} onAdd={onAddPhotos} onRemove={onRemovePhoto} onDetach={onDetachPhoto} />
           )}
         </td>
         <td>{parcel.warehouse || <span className="muted">—</span>}</td>
@@ -570,6 +662,10 @@ function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, on
                 {!m && parcel.photoUrl && (
                   <button className="btn xs" disabled={busy} onClick={() => onSplit(parcel)}
                           title="This photo shows products for more than one customer - cut each one out into its own arrival">✂ Split</button>
+                )}
+                {!m && !parcel.parentId && !parcel.canRestore && (
+                  <button className="btn xs" disabled={busy} onClick={() => onMerge(parcel)}
+                          title="Other arrivals are really parts of this same package - gather their photos here">⇉ Merge</button>
                 )}
                 {m && <button className="btn xs" disabled={busy} onClick={() => onUnmatch(parcel.id)}>Unmatch</button>}
                 {(parcel.canRestore || parcel.parentId) && (
@@ -750,6 +846,7 @@ export default function Packing() {
   const [choosing, setChoosing] = useState(null);
   const [reading, setReading] = useState({});
   const [deciding, setDeciding] = useState(null);
+  const [merging, setMerging] = useState(null);
   const cancelRef = useRef(false);
 
   const channels = useMemo(() => [filters.etsy && 'etsy', filters.shopify && 'shopify'].filter(Boolean), [filters.etsy, filters.shopify]);
@@ -787,15 +884,27 @@ export default function Packing() {
     } catch (err) { showError(err, 'Could not match that'); } finally { flag(id, false); }
   };
 
-  /** What the browser reads off a parcel's photo (OCR, free), kept on the parcel for the free matcher. */
+  /** What the browser reads off every photo of a parcel (OCR, free), kept on the parcel for the free matcher. */
   const readText = useCallback(async (parcel) => {
     if (!parcel.photoUrl) return null;
     setReading((r) => ({ ...r, [parcel.id]: true }));
     try {
       const { readPhotoText } = await import('../lib/ocr.js');
-      const text = await readPhotoText(withBase(parcel.photoUrl));
-      await api.post(`/packing/parcels/${parcel.id}/text`, { text });
-      return text;
+      let all = '';
+      if (!parcel.hasText) {
+        const text = await readPhotoText(withBase(parcel.photoUrl));
+        await api.post(`/packing/parcels/${parcel.id}/text`, { text });
+        all = text;
+      }
+      for (const x of parcel.extraPhotos ?? []) {
+        if (x.hasText) continue;
+        // eslint-disable-next-line no-await-in-loop
+        const text = await readPhotoText(withBase(x.url));
+        // eslint-disable-next-line no-await-in-loop
+        await api.post(`/packing/parcels/${parcel.id}/photos/${x.id}/text`, { text });
+        all = `${all} ${text}`.trim();
+      }
+      return all || null;
     } catch (err) {
       toast({ kind: 'info', title: 'Could not read the text on that photo', body: `${err?.message ?? err} - the free match still uses tracking and colours.` });
       return null;
@@ -821,8 +930,8 @@ export default function Packing() {
     try {
       let p = await quickOne(parcel.id, { silent: quiet });
       if (!p || p.status === 'matched') return p;
-      if (parcel.photoUrl && !p.hasText) {
-        const text = await readText(parcel);
+      if (parcel.photoUrl && (!p.hasText || (p.extraPhotos ?? []).some((x) => !x.hasText))) {
+        const text = await readText(p);
         if (text) p = (await quickOne(parcel.id, { silent: true })) ?? p;
       }
       if (p.status !== 'matched') {
@@ -842,14 +951,14 @@ export default function Packing() {
     if (!parcel.photoUrl || parcel.status !== 'unmatched' || parcel.quantity < 1) return null;
     flag(parcel.id, true);
     try {
-      const d = await api.post(`/packing/parcels/${parcel.id}/detect`, { auto: true });
+      const d = await api.post(`/packing/parcels/${parcel.id}/detect`, { auto: true, channels: range.channels, from: range.from, to: range.to });
       if (!d.auto?.split) {
         if (!quiet) toast({ kind: 'info', title: `${parcel.label}: ${d.auto?.reason ?? 'nothing to split'}`, duration: 7000 });
         return null;
       }
       const { crops } = await splitPhoto(withBase(parcel.photoUrl), d.regions);
       const form = new FormData();
-      form.append('regions', JSON.stringify(d.regions.map(({ x, y, w, h }) => ({ x, y, w, h }))));
+      form.append('regions', JSON.stringify(d.regions.map(({ x, y, w, h, group, label }) => ({ x, y, w, h, group, label }))));
       form.append('done', '1');
       crops.forEach((blob, i) => form.append('crops', blob, `piece-${i + 1}.jpg`));
       const r = await api.upload(`/packing/parcels/${parcel.id}/split`, form);
@@ -1046,6 +1155,48 @@ export default function Packing() {
     } catch (err) { showError(err, 'Could not restore that photo'); } finally { flag(parcel.id, false); }
   };
 
+  /** More photos for an arrival (another side, the other tray, the carrier's label); their text is read for the free match. */
+  const addPhotos = async (parcel, files, kind = 'product') => {
+    if (!files.length) return;
+    flag(parcel.id, true);
+    try {
+      const form = new FormData();
+      for (const f of files) form.append('photos', await normalizePhoto(f));
+      form.append('kind', kind);
+      const p = await api.upload(`/packing/parcels/${parcel.id}/photos`, form);
+      toast({ kind: 'ok', title: `${files.length} photo${files.length === 1 ? '' : 's'} added to ${parcel.label}` });
+      parcels.reload();
+      readText(p).then(() => parcels.reload());
+    } catch (err) { showError(err, 'Could not add those photos'); } finally { flag(parcel.id, false); }
+  };
+
+  const removePhoto = async (parcel, photo) => {
+    if (!window.confirm('Remove this photo from the arrival?')) return;
+    flag(parcel.id, true);
+    try { await api.del(`/packing/parcels/${parcel.id}/photos/${photo.id}`); refresh(); }
+    catch (err) { showError(err, 'Could not remove that photo'); } finally { flag(parcel.id, false); }
+  };
+
+  const detachPhoto = async (parcel, photo) => {
+    flag(parcel.id, true);
+    try {
+      await api.post(`/packing/parcels/${parcel.id}/photos/${photo.id}/detach`, {});
+      toast({ kind: 'ok', title: 'That photo is an arrival of its own again' });
+      refresh();
+    } catch (err) { showError(err, 'Could not take that photo out'); } finally { flag(parcel.id, false); }
+  };
+
+  const mergeInto = async (parcel, sourceIds) => {
+    flag(parcel.id, true);
+    try {
+      const p = await api.post(`/packing/parcels/${parcel.id}/merge`, { sourceIds });
+      setMerging(null);
+      toast({ kind: 'ok', title: `Merged - ${p.label} now has ${p.photoCount} photos` });
+      refresh();
+      if (channels.length) freeOne(p, { quiet: true });
+    } catch (err) { showError(err, 'Could not merge those'); } finally { flag(parcel.id, false); }
+  };
+
   const pack = async (order, packed) => {
     const key = `${order.channel}:${order.orderId}`;
     flag(key, true);
@@ -1113,6 +1264,7 @@ export default function Packing() {
 
       {tab === 'arrivals' && (
         <>
+          <PhotoBrain />
           <AddParcel warehouse={filters.warehouse} onWarehouse={(v) => setFilter({ warehouse: v })} range={range} onAdded={onAdded} />
           <div className="flex gap8 mb12" style={{ flexWrap: 'wrap' }}>
             {['all', 'unmatched', 'matched', 'packed'].map((s) => (
@@ -1150,7 +1302,8 @@ export default function Packing() {
                                onMatch={matchOne} onFree={freeOne} onAssign={confirm} onUnmatch={unmatch}
                                onCode={assignCode} onChoose={(parcel, needsItem) => setChoosing({ parcel, needsItem })} onRelease={releaseHold} onSupply={saveSupply} onItemSaved={refresh}
                                onEdit={setEditing} onDelete={remove} onPicker={setPicking}
-                               onSplit={setSplitting} onUnsplit={unsplit} />
+                               onSplit={setSplitting} onUnsplit={unsplit}
+                               onAddPhotos={addPhotos} onRemovePhoto={removePhoto} onDetachPhoto={detachPhoto} onMerge={setMerging} />
                   ))}
                 </tbody>
               </table>
@@ -1179,7 +1332,8 @@ export default function Packing() {
       )}
 
       {editing && <EditParcel parcel={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} />}
-      {splitting && <SplitPhoto parcel={splitting} onClose={() => setSplitting(null)} onDone={() => { setSplitting(null); refresh(); }} />}
+      {merging && <MergePicker parcel={merging} rows={parcels.data?.rows ?? []} onClose={() => setMerging(null)} onMerge={mergeInto} />}
+      {splitting && <SplitPhoto parcel={splitting} range={range} onClose={() => setSplitting(null)} onDone={() => { setSplitting(null); refresh(); }} />}
       {deciding && (
         <AirtableDecision decision={deciding} busy={!!working[deciding.parcel.id]} onAnswer={answerDecision} onClose={() => setDeciding(null)} />
       )}
