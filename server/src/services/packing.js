@@ -1712,22 +1712,26 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
   header.height = 34;
   sheet.views = [{ state: 'frozen', ySplit: 1 }];
 
-  // Pictures go in at their own shape and size (never squeezed into a fixed box): the Image column is as wide as the
-  // widest picture and each row as tall as its picture. Only a very large photo is scaled down - evenly, so it never distorts.
-  const MAX_SIDE = 1280;
-  const PX_TO_COL = 7;     // one Excel column-width unit is about 7 pixels
+  // Every picture sits in the same fixed box (the Image cell never grows or shrinks with it). It is fitted inside the box
+  // evenly - bigger ones scaled down, smaller ones up - so its shape is never changed, and it is centred in the cell.
+  const BOX_W = 200;
+  const BOX_H = 165;
+  const PX_TO_COL = 7;                          // one Excel column-width unit is about 7 pixels
+  const COL_W = 30;                             // characters -> about 215 px
+  const ROW_PT = 130;                           // points -> about 173 px
+  const colPx = COL_W * PX_TO_COL + 5;
+  const rowPx = ROW_PT / 0.75;
+  sheet.getColumn('image').width = COL_W;
   const shots = new Map();
   for (const p of rows) {
     const att = p.attachment_id ? db.prepare('SELECT * FROM attachments WHERE id = ?').get(p.attachment_id) : null;
     const extension = att ? EXT[String(att.mime || '').toLowerCase()] : null;
     if (!att || !extension || !fs.existsSync(att.path)) continue;
     const buffer = fs.readFileSync(att.path);
-    const dim = imageDimensions(buffer) ?? { w: 120, h: 124 };
-    const k = Math.min(1, MAX_SIDE / Math.max(dim.w, dim.h));
+    const dim = imageDimensions(buffer) ?? { w: BOX_W, h: BOX_H };
+    const k = Math.min(BOX_W / dim.w, BOX_H / dim.h);
     shots.set(p.id, { buffer, extension, width: Math.max(1, Math.round(dim.w * k)), height: Math.max(1, Math.round(dim.h * k)) });
   }
-  const widest = Math.max(0, ...[...shots.values()].map((x) => x.width));
-  sheet.getColumn('image').width = Math.max(22, Math.ceil((widest + 12) / PX_TO_COL));
 
   let r = 1;
   for (const p of rows) {
@@ -1760,13 +1764,13 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
       row.eachCell({ includeEmpty: true }, (cell) => { cell.fill = fill; });
     }
     const shot = shots.get(p.id);
-    row.height = shot ? Math.max(40, Math.ceil((shot.height + 10) * 0.75)) : 40;   // points; a pixel is 0.75 point
+    row.height = ROW_PT;
     row.alignment = { vertical: 'middle', wrapText: true };
     row.getCell('code').font = { bold: true };
 
     if (shot) {
       const imageId = wb.addImage({ buffer: shot.buffer, extension: shot.extension });
-      sheet.addImage(imageId, { tl: { col: 2 + 6 / (sheet.getColumn('image').width * PX_TO_COL), row: r - 1 + 5 / (row.height / 0.75) }, ext: { width: shot.width, height: shot.height } });
+      sheet.addImage(imageId, { tl: { col: 2 + Math.max(0, (colPx - shot.width) / 2) / colPx, row: r - 1 + Math.max(0, (rowPx - shot.height) / 2) / rowPx }, ext: { width: shot.width, height: shot.height } });
     }
   }
 
