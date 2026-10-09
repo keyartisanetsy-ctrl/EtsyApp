@@ -547,7 +547,8 @@ function ExtraPhotos({ parcel, busy, onAdd, onRemove, onDetach }) {
 /** Gather other arrivals' photos onto this one - the warehouse reported one package as several. */
 function MergePicker({ parcel, rows, onClose, onMerge }) {
   const [picked, setPicked] = useState([]);
-  const others = rows.filter((p) => p.id !== parcel.id && p.status === 'unmatched' && p.photoUrl && !p.parentId && !p.canRestore);
+  // Parts of one split photo can be put back together here too - the AI may have cut one product in two.
+  const others = rows.filter((p) => p.id !== parcel.id && p.status === 'unmatched' && p.photoUrl && !p.canRestore);
   const toggle = (id) => setPicked((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
   return (
     <Modal open lg onClose={onClose} title={`Merge arrivals into ${parcel.label}`}
@@ -559,7 +560,7 @@ function MergePicker({ parcel, rows, onClose, onMerge }) {
            )}>
       <div className="small muted mb12">
         Tick the arrivals that are really parts of this same package (for example the warehouse sent the second half of a product as its own photo).
-        Their photos are added to this arrival, which keeps its own carrier line; the ticked ones disappear. You can take a photo back out later with ⇱.
+        Their photos are added to this arrival, which keeps its own carrier line; the ticked ones disappear. You can take a photo back out later with ⇱. (Parts cut from one photo can be joined the same way.)
       </div>
       <div className="flex" style={{ flexWrap: 'wrap', gap: 10 }}>
         <div style={{ textAlign: 'center' }}><Thumb src={parcel.photoUrl} size="lg" /><div className="small"><strong>{parcel.label}</strong><div className="muted">this one</div></div></div>
@@ -663,7 +664,7 @@ function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, on
                   <button className="btn xs" disabled={busy} onClick={() => onSplit(parcel)}
                           title="This photo shows products for more than one customer - cut each one out into its own arrival">✂ Split</button>
                 )}
-                {!m && !parcel.parentId && !parcel.canRestore && (
+                {!m && !parcel.canRestore && parcel.status === 'unmatched' && (
                   <button className="btn xs" disabled={busy} onClick={() => onMerge(parcel)}
                           title="Other arrivals are really parts of this same package - gather their photos here">⇉ Merge</button>
                 )}
