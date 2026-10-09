@@ -974,6 +974,7 @@ export function unmatchParcel(id) {
 // -------------------------------------------------------------------- split
 
 const MAX_REGIONS = 12;
+const DETECT_LISTING_PHOTOS = 24;
 const clamp01 = (n) => Math.min(1, Math.max(0, n));
 const round4 = (n) => Math.round(n * 10000) / 10000;
 
@@ -1116,9 +1117,11 @@ export function unsplitParcel(id) {
 const DETECT_SYSTEM = `You locate the separate products in a warehouse photo so each one can be cut out and
 kept with its own customer's order.
 
-The photo was taken at a warehouse of items that have just arrived - usually boxed or bagged
-products on a floor or table, sometimes several at once because one delivery can hold things
-bought for different customers.
+The FIRST image is the photo, taken at a warehouse of items that have just arrived - usually boxed or
+bagged products on a floor or table, sometimes several at once because one delivery can hold things
+bought for different customers. Any images AFTER the first are the shop's own listing photos of products
+customers have ordered, numbered in the order given (listing 1, listing 2, ...) with their titles in the
+context; they are only there to help you decide which parts belong to one product.
 
 Return a bounding box for EACH separate item you can see. Coordinates are percentages of the whole photo:
 x and y are the top-left corner, measured from the photo's top-left; w and h are the box's width
@@ -1143,9 +1146,10 @@ GROUPS - the part that matters most. Warehouses often split ONE customer's produ
 trays or spots in the photo (the main kit in one tray, its accessory set or spare parts in another, the
 item apart from its box). Give every box a "group" number: boxes that are parts of the SAME customer
 product share a number, boxes of different products get different numbers. Number groups 1, 2, 3 in
-order of first appearance. When a list of the products customers ordered is given, use it: parts that
-together make up one listed product (a kit plus the accessories its title mentions) belong in one group,
-while two things the list shows as separate products are separate groups. Do not merge two things only
+order of first appearance. Use the listing photos and titles: when two parts of the photo both look like
+pieces of the SAME listing (the main keycap set in one tray and the extra/novelty keys of that same theme in
+another tray, a kit and the accessories its title mentions), they belong in one group - the listing photo often
+shows them together. Two things that match two different listings are two groups. Do not merge two things only
 because they look alike - two identical items bought by two customers are two groups.
 
 Reply with JSON only:
@@ -1191,25 +1195,43 @@ export async function detectRegions(id, { provider, model, auto = false, runner 
   if (!parcel.attachment_id) throw badRequest('This arrival has no photo to look at.');
   if (parcel.quantity < 1) throw badRequest('Every piece of this photo has already been split out.');
 
-  // What customers have ordered: lets the AI see which parts together make one listed product.
-  let ordered = [];
+  // What customers have ordered - titles, and the listing photos of the oldest ones: lets the AI see which
+  // parts of the photo together make one listed product (a kit in one tray, its extra keys in another).
+  const listings = [];
+  const titlesOnly = [];
   try {
-    const seen = new Set();
-    for (const d of loadDemand(resolveRange({ channels, from, to })).filter((x) => x.remaining > 0)) {
+    const open = loadDemand(resolveRange({ channels, from, to })).filter((x) => x.remaining > 0);
+    const byImage = new Map();
+    for (const d of open) {
       const t = String(d.title || '').replace(/\s+/g, ' ').trim().slice(0, 110);
-      if (t && !seen.has(t)) { seen.add(t); ordered.push(t); }
-      if (ordered.length >= 40) break;
+      if (!t) continue;
+      const key = d.imageUrl || `title:${t}`;
+      if (!byImage.has(key)) byImage.set(key, { imageUrl: d.imageUrl, title: t });
     }
-  } catch { ordered = []; }
+    const distinct = [...byImage.values()];
+    const withPhoto = distinct.filter((x) => x.imageUrl).slice(0, DETECT_LISTING_PHOTOS);
+    const loaded = await mapLimit(withPhoto, 6, async (c) => {
+      try { return { ...c, attachmentId: await cachedProductImageId(c.imageUrl) }; } catch { return null; }
+    });
+    for (const c of loaded) if (c) listings.push(c);
+    const shown = new Set(listings.map((c) => c.title));
+    for (const c of distinct) if (!shown.has(c.title) && titlesOnly.length < 30) titlesOnly.push(c.title);
+  } catch { /* the photo can still be looked at without the order list */ }
 
   const guide = memory.guidance();
   const ai = await runVision({
     kind: 'custom',
     promptOverride: guide ? `${DETECT_SYSTEM}\n\n${guide}` : DETECT_SYSTEM,
-    attachmentIds: [{ id: parcel.attachment_id, detail: 'high' }],
+    attachmentIds: [{ id: parcel.attachment_id, detail: 'high' }, ...listings.map((c) => ({ id: c.attachmentId, detail: 'low' }))],
     effort: 'fast',
-    ...(ordered.length ? { context: { productsCustomersOrdered: ordered } } : {}),
-    userInput: `The warehouse reported ${parcel.quantity} piece${parcel.quantity === 1 ? '' : 's'} in this photo (that number is often wrong - go by what you see). JSON only.`,
+    ...(listings.length || titlesOnly.length ? {
+      context: {
+        ...(listings.length ? { listings: listings.map((c, i) => ({ index: i + 1, title: c.title })) } : {}),
+        ...(titlesOnly.length ? { otherProductsOrdered: titlesOnly } : {}),
+      },
+    } : {}),
+    userInput: `The warehouse reported ${parcel.quantity} piece${parcel.quantity === 1 ? '' : 's'} in this photo (that number is often wrong - go by what you see).`
+      + `${listings.length ? ` The first image is the warehouse photo; the ${listings.length} after it are numbered listing photos.` : ''} JSON only.`,
     maxTokens: 1200,
   }, { provider, model, runner });
   const parsed = parseJsonish(ai.text);
