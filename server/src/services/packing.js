@@ -27,6 +27,7 @@ import { run, parseJsonish, providerStatus } from './ai/index.js';
 import * as memory from './packingmemory.js';
 import * as realStock from './stock.js';
 import { variantRows } from './catalog.js';
+import { imageDimensions } from '../lib/picture.js';
 import { resolveForTransaction } from './productimages.js';
 import { codesFor, shopifyCodesFor, ensureOrderCode, releaseIfUnused, restampStaleCodes } from './ordercode.js';
 import { cachedProductImageId } from './warehousecheck.js';
@@ -1711,6 +1712,23 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
   header.height = 34;
   sheet.views = [{ state: 'frozen', ySplit: 1 }];
 
+  // Pictures go in at their own shape and size (never squeezed into a fixed box): the Image column is as wide as the
+  // widest picture and each row as tall as its picture. Only a very large photo is scaled down - evenly, so it never distorts.
+  const MAX_SIDE = 640;
+  const PX_TO_COL = 7;     // one Excel column-width unit is about 7 pixels
+  const shots = new Map();
+  for (const p of rows) {
+    const att = p.attachment_id ? db.prepare('SELECT * FROM attachments WHERE id = ?').get(p.attachment_id) : null;
+    const extension = att ? EXT[String(att.mime || '').toLowerCase()] : null;
+    if (!att || !extension || !fs.existsSync(att.path)) continue;
+    const buffer = fs.readFileSync(att.path);
+    const dim = imageDimensions(buffer) ?? { w: 120, h: 124 };
+    const k = Math.min(1, MAX_SIDE / Math.max(dim.w, dim.h));
+    shots.set(p.id, { buffer, extension, width: Math.max(1, Math.round(dim.w * k)), height: Math.max(1, Math.round(dim.h * k)) });
+  }
+  const widest = Math.max(0, ...[...shots.values()].map((x) => x.width));
+  sheet.getColumn('image').width = Math.max(22, Math.ceil((widest + 12) / PX_TO_COL));
+
   let r = 1;
   for (const p of rows) {
     r += 1;
@@ -1741,15 +1759,14 @@ export async function exportPackingSheet({ from, to, status = 'all' } = {}) {
       const fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: hold ? (holding ? 'FFFFF3CD' : 'FFE3F4E1') : 'FFDDEBFF' } };
       row.eachCell({ includeEmpty: true }, (cell) => { cell.fill = fill; });
     }
-    row.height = 96;
+    const shot = shots.get(p.id);
+    row.height = shot ? Math.max(40, Math.ceil((shot.height + 10) * 0.75)) : 40;   // points; a pixel is 0.75 point
     row.alignment = { vertical: 'middle', wrapText: true };
     row.getCell('code').font = { bold: true };
 
-    const att = p.attachment_id ? db.prepare('SELECT * FROM attachments WHERE id = ?').get(p.attachment_id) : null;
-    const extension = att ? EXT[String(att.mime || '').toLowerCase()] : null;
-    if (att && extension && fs.existsSync(att.path)) {
-      const imageId = wb.addImage({ buffer: fs.readFileSync(att.path), extension });
-      sheet.addImage(imageId, { tl: { col: 2.08, row: r - 1 + 0.06 }, ext: { width: 120, height: 124 } });
+    if (shot) {
+      const imageId = wb.addImage({ buffer: shot.buffer, extension: shot.extension });
+      sheet.addImage(imageId, { tl: { col: 2 + 6 / (sheet.getColumn('image').width * PX_TO_COL), row: r - 1 + 5 / (row.height / 0.75) }, ext: { width: shot.width, height: shot.height } });
     }
   }
 
