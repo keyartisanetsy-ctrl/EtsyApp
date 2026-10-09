@@ -5,6 +5,7 @@ import { badRequest } from '../lib/errors.js';
 import * as packing from '../services/packing.js';
 import * as quick from '../services/quickmatch.js';
 import * as holds from '../services/holds.js';
+import * as dispatch from '../services/orderdispatch.js';
 import * as ordersupply from '../services/ordersupply.js';
 import * as itemsupply from '../services/itemsupply.js';
 
@@ -186,6 +187,24 @@ router.post('/items/supply', asyncRoute(async (req, res) => {
   if (!b.channel || b.itemId == null) throw badRequest('channel and itemId are required.');
   const decision = ['check', 'change', 'keep'].includes(b.decision) ? b.decision : 'check';
   res.json(await itemsupply.save(b.channel, b.itemId, { taobao: b.taobao, price: b.price, currency: b.currency, sku: b.sku }, { decision }));
+}));
+
+/**
+ * Hand a waiting order over by hand: its package code and YunExpress tracking number. Takes it off the queue and writes both
+ * into its Airtable row (nothing goes to Etsy or Shopify). `airtable`: 'check' | 'change' | 'keep' | 'none'.
+ */
+router.post('/orders/dispatch', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  if (!b.channel || b.orderId == null) throw badRequest('channel and orderId are required.');
+  res.json(await dispatch.assign(b.channel, b.orderId, { trackingNumber: b.trackingNumber, code: b.code, carrier: b.carrier || undefined, airtable: b.airtable ?? 'check' }));
+}));
+router.get('/orders/dispatch', asyncRoute(async (req, res) => {
+  if (!req.query.channel || req.query.orderId == null) throw badRequest('channel and orderId are required.');
+  res.json(dispatch.describe(String(req.query.channel), req.query.orderId));
+}));
+router.delete('/orders/dispatch', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(dispatch.undo(b.channel, b.orderId));
 }));
 
 router.post('/export', asyncRoute(async (req, res) => {

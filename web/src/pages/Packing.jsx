@@ -596,7 +596,102 @@ function ParcelRow({ parcel, range, busy, reading, onMatch, onFree, onAssign, on
 const STATUS_LABEL = { ready: 'Ready to pack', partial: 'Partly here', waiting: 'Waiting', packed: 'Packed' };
 const STATUS_KIND = { ready: 'green', partial: 'amber', waiting: 'grey', packed: 'blue' };
 
-function QueueOrder({ order, busy, onPack }) {
+/**
+ * Hand a waiting order over by hand: type its package code (or leave it blank for the order's own / the next of the day)
+ * and its YunExpress tracking number. The order leaves the queue, and both go into its Airtable row. Nothing is sent to
+ * Etsy or Shopify - the buyer is not told anything.
+ */
+function HandoverBox({ order, onChanged }) {
+  const toast = useToast();
+  const showError = useErrorToast();
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState('');
+  const [tracking, setTracking] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [decision, setDecision] = useState(null);
+  const looksLikeCode = /^\d{2}-\d{4}-\d+/.test(String(order.ref ?? ''));
+
+  const send = async (airtable) => {
+    setBusy(true);
+    try {
+      const r = await api.post('/packing/orders/dispatch', { channel: order.channel, orderId: order.orderId, code: code.trim(), trackingNumber: tracking, airtable });
+      if (r.airtable?.status === 'needs_decision') {
+        setDecision(r);   // the order is handed over; Airtable holds something else in those cells
+        return;
+      }
+      setDecision(null);
+      const at = r.airtable;
+      const where = !at || airtable === 'none' ? 'Airtable was not touched.'
+        : at.status === 'sent' ? 'Written to Airtable.'
+          : at.status === 'nothing_to_change' ? 'Airtable already had it.'
+            : at.status === 'not_in_airtable' ? 'This order is not in Airtable yet - push it there first, then hand it over again to write the cells.'
+              : at.status === 'not_mapped' ? 'No Airtable column was found for the code / tracking number.'
+                : at.status === 'error' ? `Airtable said: ${at.message}` : '';
+      toast({ kind: at?.status === 'error' || at?.status === 'not_in_airtable' || at?.status === 'not_mapped' ? 'warn' : 'ok', duration: 9000,
+        title: `${r.code} · ${r.trackingNumber} - handed over`, body: `${order.ref} left the queue. ${where}` });
+      setOpen(false); setCode(''); setTracking('');
+      onChanged?.();
+    } catch (err) { showError(err, 'Could not hand this order over'); } finally { setBusy(false); }
+  };
+  const answer = async (choice) => { await send(choice); };
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button className="btn xs" aria-expanded={open} onClick={() => setOpen((v) => !v)}
+              title="Give this order its package code and YunExpress tracking number yourself - it leaves the queue and both go to Airtable">
+        ✋ Hand over by hand {open ? '▴' : '▾'}
+      </button>
+      {open && (
+        <div style={{ marginTop: 6, padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface-2)', maxWidth: 560 }}>
+          <div className="flex gap8" style={{ flexWrap: 'wrap' }}>
+            <label className="flex col small" style={{ flex: '1 1 150px' }}>Package code
+              <input className="input mono" value={code} placeholder={looksLikeCode ? order.ref : `blank = ${exampleCode()}`} aria-label={`Package code for ${order.ref}`}
+                     onChange={(e) => setCode(e.target.value)} />
+            </label>
+            <label className="flex col small" style={{ flex: '2 1 220px' }}>YunExpress tracking number
+              <input className="input mono" value={tracking} placeholder="YT2617900709012345" aria-label={`Tracking number for ${order.ref}`}
+                     onChange={(e) => setTracking(e.target.value)} />
+            </label>
+          </div>
+          <div className="small muted" style={{ marginTop: 4 }}>
+            The order leaves "Waiting" and both are written into its Airtable row. Nothing goes to {order.channel === 'etsy' ? 'Etsy' : 'Shopify'} and the buyer is not told.
+          </div>
+          <div className="flex gap4" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+            <button className="btn xs primary" disabled={busy || !tracking.trim()} onClick={() => send('check')}>{busy ? <Spinner /> : 'Hand over & send to Airtable'}</button>
+            <button className="btn xs" disabled={busy || !tracking.trim()} onClick={() => send('none')} title="Only take it off the queue here">Hand over, leave Airtable alone</button>
+          </div>
+        </div>
+      )}
+      {decision && (
+        <Modal open onClose={() => { setDecision(null); onChanged?.(); }} title="Airtable already has something else in this order's row"
+               footer={(
+                 <>
+                   <button className="btn" disabled={busy} onClick={() => answer('keep')}>Keep (don't change)</button>
+                   <button className="btn primary" disabled={busy} onClick={() => answer('change')}>{busy ? <Spinner /> : 'Change'}</button>
+                 </>
+               )}>
+          <div className="small muted mb8">
+            The order is handed over here already ({decision.code} · {decision.trackingNumber}). "Change" replaces what Airtable has; "Keep" leaves it as it is (empty cells are still filled).
+          </div>
+          <table className="data">
+            <thead><tr><th>Airtable column</th><th>Airtable has</th><th>You entered</th></tr></thead>
+            <tbody>
+              {decision.airtable.conflicts.map((c) => (
+                <tr key={`${c.destination}:${c.column}`}>
+                  <td><strong>{c.column}</strong><div className="small muted">{c.field} · {c.destination}</div></td>
+                  <td className="mono">{c.current}</td>
+                  <td className="mono"><strong>{c.next}</strong></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function QueueOrder({ order, busy, onPack, onChanged }) {
   return (
     <div className="card mb12" style={{ padding: 12 }}>
       <div className="flex gap8" style={{ flexWrap: 'wrap' }}>
@@ -633,6 +728,7 @@ function QueueOrder({ order, busy, onPack }) {
           ))}
         </tbody>
       </table>
+      {order.status !== 'packed' && <HandoverBox order={order} onChanged={onChanged} />}
     </div>
   );
 }
@@ -1077,7 +1173,7 @@ export default function Packing() {
               {queueFilter === 'ready' ? 'An order is ready once every item on it has a matched parcel.' : undefined}
             </Empty>
           ) : orders.map((o) => (
-            <QueueOrder key={`${o.channel}:${o.orderId}`} order={o} busy={!!working[`${o.channel}:${o.orderId}`]} onPack={pack} />
+            <QueueOrder key={`${o.channel}:${o.orderId}`} order={o} busy={!!working[`${o.channel}:${o.orderId}`]} onPack={pack} onChanged={() => queue.reload()} />
           ))}
         </>
       )}

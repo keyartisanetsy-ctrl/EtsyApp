@@ -18,6 +18,7 @@
  * lib/codeformat.js for the placeholders).
  */
 import { getDb } from '../db/index.js';
+import { badRequest, notFound } from '../lib/errors.js';
 import { activeShopId } from '../etsy/shop.js';
 import { activeShopifyShopId } from '../shopify/shop.js';
 import { withShop } from '../etsy/client.js';
@@ -188,6 +189,37 @@ export function ensureOrderCode(channel, orderId, { receivedOn = null } = {}) {
     return shopifyCodeFor(id, { shopId }) ?? code;
   }
   return null;
+}
+
+/**
+ * Give an order the package code you typed (instead of the next one of the day). Kept as it is written; one code can
+ * belong to one order only, across every shop. An order that already had a code takes the new one in its place.
+ */
+export function setOrderCode(channel, orderId, code) {
+  const db = getDb();
+  const text = String(code ?? '').trim().replace(/\s+/g, '');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{1,38}$/.test(text)) throw badRequest('A package code is letters, digits, "-", "." or "_" (for example 26-1009-03).');
+  const taken = db.prepare('SELECT receipt_id AS id FROM order_codes WHERE lower(code) = ?').get(text.toLowerCase());
+  const takenShopify = db.prepare('SELECT order_id AS id FROM shopify_order_codes WHERE lower(code) = ?').get(text.toLowerCase());
+  const mine = (channel === 'etsy' ? String(taken?.id ?? '') : String(takenShopify?.id ?? '')) === String(orderId);
+  if ((taken || takenShopify) && !mine) throw badRequest(`The code ${text} already belongs to another order.`);
+  const m = /^(\d{2})-(\d{2})(\d{2})-(\d{1,3})/.exec(text);
+  const day = m ? `20${m[1]}-${m[2]}-${m[3]}` : codeDay();
+  const seq = m ? Number(m[4]) : 0;
+  if (channel === 'etsy') {
+    const own = db.prepare('SELECT shop_id FROM receipts WHERE receipt_id = ?').get(Number(orderId));
+    if (!own) throw notFound('That order is not here.');
+    db.prepare(`INSERT INTO order_codes (shop_id, receipt_id, code, day, seq, source) VALUES (?,?,?,?,?, 'manual')
+                ON CONFLICT(shop_id, receipt_id) DO UPDATE SET code = excluded.code, day = excluded.day, seq = excluded.seq, source = 'manual'`)
+      .run(own.shop_id, Number(orderId), text, day, seq);
+  } else {
+    const own = db.prepare('SELECT shop_id FROM shopify_orders WHERE order_id = ?').get(String(orderId));
+    if (!own) throw notFound('That order is not here.');
+    db.prepare(`INSERT INTO shopify_order_codes (shop_id, order_id, code, day, seq, source) VALUES (?,?,?,?,?, 'manual')
+                ON CONFLICT(shop_id, order_id) DO UPDATE SET code = excluded.code, day = excluded.day, seq = excluded.seq, source = 'manual'`)
+      .run(own.shop_id, String(orderId), text, day, seq);
+  }
+  return text;
 }
 
 /**

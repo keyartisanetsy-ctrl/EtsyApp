@@ -35,6 +35,15 @@ const SOURCE = {
 const LABEL = { [SOURCE.taobao]: 'Taobao order number', [SOURCE.cost]: 'Supply cost' };
 const CORE = new Set([SOURCE.taobao, SOURCE.cost]);
 
+// What is reflected to Airtable, and how: the supplier side (above), or the hand-over - the package code and the
+// YunExpress tracking number given to an order that never came through the warehouse.
+const HANDOFF = { code: 'order.code', track: 'tracking.code' };
+const SUPPLY_KIND = { id: 'supply', sources: Object.values(SOURCE), core: CORE, label: LABEL, followsCost: true };
+const HANDOFF_KIND = {
+  id: 'handoff', sources: Object.values(HANDOFF), core: new Set(Object.values(HANDOFF)), followsCost: false,
+  label: { [HANDOFF.code]: 'Package code', [HANDOFF.track]: 'Tracking number' },
+};
+
 // ------------------------------------------------------------------- reading
 
 /** The supplier order number and cost of many orders at once: Map("channel:orderId" -> { taobaoOrder, cost, currency }). */
@@ -107,6 +116,9 @@ const COLUMN_NAMES = {
     'çin order no', 'çin sipariş no', 'supplier order', 'supplier order no', 'tedarik sipariş no'],
   [SOURCE.cost]: ['product cost (¥)', 'product cost (yuan)', 'taobao cost', 'supply cost', 'tedarik maliyeti', 'payment', 'ali payment'],
 };
+// the columns people keep the package code and the YunExpress number in (never "Çin paket kodu": that one is the Chinese carrier's)
+COLUMN_NAMES[HANDOFF.code] = ['kod', 'paket kodu', 'package code', 'paket kod', 'order code'];
+COLUMN_NAMES[HANDOFF.track] = ['takip no', 'manuel shipping', 'tracking number', 'tracking no', 'yunexpress takip no', 'yunexpress'];
 const TEXT_TYPES = new Set(['singleLineText', 'multilineText']);
 const NUMBER_TYPES = new Set(['currency', 'number']);
 
@@ -114,19 +126,19 @@ const NUMBER_TYPES = new Set(['currency', 'number']);
  * Map the Taobao order number and the supply cost of a destination that lacks them, by the names of its columns, and
  * keep the mapping. Never takes a column that is already mapped to something else. Returns what was added.
  */
-async function autoMapSupply(dest) {
-  const missing = [SOURCE.taobao, SOURCE.cost].filter((src) => !dest.fieldMap.some((e) => e.source === src));
+async function autoMapSupply(dest, kind = SUPPLY_KIND) {
+  const missing = [...kind.core].filter((src) => !dest.fieldMap.some((e) => e.source === src));
   if (!missing.length) return [];
   const table = await at.getTable(dest.baseId, dest.tableId);
   const taken = new Set(dest.fieldMap.map((e) => e.target));
   const added = [];
   for (const src of missing) {
-    const okType = src === SOURCE.taobao ? TEXT_TYPES : NUMBER_TYPES;
+    const okType = src === SOURCE.cost ? NUMBER_TYPES : TEXT_TYPES;
     const field = COLUMN_NAMES[src].map((name) => table.fields.find((f) => f.writable && okType.has(f.type) && !taken.has(f.name)
       && f.name.trim().toLowerCase() === name)).find(Boolean);
     if (!field) continue;
     taken.add(field.name);
-    added.push({ target: field.name, source: src, confidence: 1, why: 'matched by the column name when the Taobao order / cost was first sent' });
+    added.push({ target: field.name, source: src, confidence: 1, why: 'matched by the column name when it was first sent' });
   }
   if (added.length) {
     getDb().prepare("UPDATE airtable_destinations SET field_map = ?, updated_at = datetime('now') WHERE id = ?")
@@ -140,22 +152,22 @@ async function autoMapSupply(dest) {
  * What would be written to Airtable for this order, per destination, per
  * Airtable row, and what each target cell holds right now.
  */
-async function planFor(channel, orderId) {
+async function planFor(channel, orderId, kind = SUPPLY_KIND) {
   const key = channel === 'etsy' ? Number(orderId) : String(orderId);
   const destinations = airtable.listDestinations().filter((d) => d.channel === channel);
   const out = [];
   for (let dest of destinations) {
     let autoMapped = [];
-    if (!dest.fieldMap.some((e) => e.source === SOURCE.taobao) || !dest.fieldMap.some((e) => e.source === SOURCE.cost)) {
+    if ([...kind.core].some((src) => !dest.fieldMap.some((e) => e.source === src))) {
       try {
         // eslint-disable-next-line no-await-in-loop
-        autoMapped = await autoMapSupply(dest);
+        autoMapped = await autoMapSupply(dest, kind);
         if (autoMapped.length) dest = airtable.getDestination(dest.id);
       } catch (err) { log.warn(`could not look for the Taobao/cost columns of ${dest.label}: ${err.message}`); }
     }
-    const mapped = dest.fieldMap.filter((e) => Object.values(SOURCE).includes(e.source));
+    const mapped = dest.fieldMap.filter((e) => kind.sources.includes(e.source));
     const base = { id: dest.id, label: dest.label, baseId: dest.baseId, tableId: dest.tableId, rows: [], autoMapped };
-    if (!mapped.some((e) => CORE.has(e.source))) { out.push({ ...base, status: 'not_mapped' }); continue; }
+    if (!mapped.some((e) => kind.core.has(e.source))) { out.push({ ...base, status: 'not_mapped' }); continue; }
 
     const links = airtable.linksFor(dest.id, [key]);
     if (!links.length) { out.push({ ...base, status: 'not_in_airtable' }); continue; }
@@ -193,14 +205,14 @@ async function planFor(channel, orderId) {
 }
 
 /** Cells that already hold a different value for the Taobao number or the cost - the ones that need a decision. */
-function conflictsOf(plan) {
+function conflictsOf(plan, kind = SUPPLY_KIND) {
   return plan.flatMap((d) => d.rows.flatMap((r) => r.writes
-    .filter((w) => CORE.has(w.source) && w.state === 'differs')
-    .map((w) => ({ destination: d.label, column: w.target, field: LABEL[w.source], current: show(w.current), next: show(w.next) }))));
+    .filter((w) => kind.core.has(w.source) && w.state === 'differs')
+    .map((w) => ({ destination: d.label, column: w.target, field: kind.label[w.source], current: show(w.current), next: show(w.next) }))));
 }
 
 /** Write what is empty, what differs only if `overwrite`, and nothing that is already the same. */
-async function applyPlan(plan, { overwrite }) {
+async function applyPlan(plan, { overwrite, kind = SUPPLY_KIND }) {
   const summary = [];
   for (const d of plan) {
     if (d.status !== 'ready') { summary.push({ destination: d.label, status: d.status, filled: 0, changed: 0, kept: 0 }); continue; }
@@ -209,10 +221,10 @@ async function applyPlan(plan, { overwrite }) {
     let filled = 0; let changed = 0; let kept = 0;
     for (const row of d.rows) {
       const fields = {};
-      const cost = row.writes.find((w) => w.source === SOURCE.cost);
+      const cost = kind.followsCost ? row.writes.find((w) => w.source === SOURCE.cost) : null;
       const costWritten = cost ? (cost.state === 'empty' || (cost.state === 'differs' && overwrite)) : false;
       for (const w of row.writes) {
-        const core = CORE.has(w.source);
+        const core = kind.core.has(w.source);
         let doWrite;
         if (core) doWrite = w.state === 'empty' || (w.state === 'differs' && overwrite);
         else doWrite = costWritten && w.state !== 'same'; // the currency and USD columns follow the cost
@@ -271,5 +283,41 @@ async function saveAndReflectHere(channel, orderId, values = {}, { airtable: dec
   } catch (err) {
     log.warn(`Airtable supply update failed: ${err.message}`);
     return { supply, airtable: { status: 'error', message: err.message } };
+  }
+}
+
+
+/**
+ * Carry the package code and the tracking number of an order to Airtable (only those two cells, only on the rows this
+ * app already put there). Same decision rule as the supply entries: a cell that holds something different is reported
+ * ('needs_decision') unless `decision` says change or keep.
+ */
+export function reflectHandoff(channel, orderId, { decision = 'check' } = {}) {
+  return inOrderShop(channel, orderId, () => reflectHandoffHere(channel, orderId, decision));
+}
+
+async function reflectHandoffHere(channel, orderId, decision) {
+  const kind = HANDOFF_KIND;
+  let plan;
+  try { plan = await planFor(channel, orderId, kind); } catch (err) {
+    log.warn(`Airtable hand-over check failed: ${err.message}`);
+    return { status: 'error', message: err.message };
+  }
+  if (!plan.length) return { status: 'no_destination' };
+  const autoMapped = plan.flatMap((d) => (d.autoMapped ?? []).map((m) => ({ destination: d.label, column: m.target, field: kind.label[m.source] })));
+  const ready = plan.filter((d) => d.status === 'ready');
+  if (!ready.length) {
+    const status = plan.some((d) => d.status === 'not_in_airtable') ? 'not_in_airtable' : 'not_mapped';
+    return { status, destinations: plan.map((d) => ({ destination: d.label, status: d.status })), autoMapped };
+  }
+  const conflicts = conflictsOf(ready, kind);
+  if (decision === 'check' && conflicts.length) return { status: 'needs_decision', conflicts, autoMapped };
+  try {
+    const summary = await applyPlan(plan, { overwrite: decision === 'change', kind });
+    const sent = summary.some((s) => s.status === 'sent');
+    return { status: sent ? 'sent' : 'nothing_to_change', destinations: summary, kept: conflicts.length && decision === 'keep' ? conflicts : [], autoMapped };
+  } catch (err) {
+    log.warn(`Airtable hand-over update failed: ${err.message}`);
+    return { status: 'error', message: err.message };
   }
 }
