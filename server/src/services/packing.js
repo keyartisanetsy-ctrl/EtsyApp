@@ -1022,7 +1022,7 @@ function makeShare(db, parent, qty) {
 
 function takePieces(db, parent, qty) {
   db.prepare(`UPDATE inbound_parcels SET quantity = quantity - ?, original_quantity = COALESCE(original_quantity, ?),
-              raw_text = NULL, suggestions = NULL, quick = NULL WHERE id = ?`).run(qty, parent.quantity, parent.id);
+              suggestions = NULL, quick = NULL WHERE id = ?`).run(qty, parent.quantity, parent.id);
 }
 
 function stockLine(row, qty) {
