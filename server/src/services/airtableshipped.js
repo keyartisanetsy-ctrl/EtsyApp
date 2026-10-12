@@ -311,8 +311,8 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
       // Out of the not-sent view counts as sent only with something to show for it: the supplier's tracking number, a status
       // (an empty status with nothing else is a brand-new row that nobody has touched), or a ticked box.
       else if (!v.rows.some((r) => r.notSent) && v.rows.some((r) => r.cin || r.status.length || r.done)) found.set(k, { ...base, tracking: '', viaView: true });
-      // Not in the not-sent view and nothing filled in at all: a brand-new row nobody has processed in Airtable yet. It does not
-      // count as "to ship" (Airtable's own list does not) but is not forgotten either: the queue keeps it apart.
+      // Not in the not-sent view and nothing filled in at all: a brand-new row nobody has given a status in Airtable yet. It stays
+      // in the queue and counts as to ship (it has not been sent); the mark only lets the list say "no status in Airtable yet".
       else if (!v.rows.some((r) => r.notSent)) found.set(k, { ...base, tracking: '', untouched: true });
     }
 

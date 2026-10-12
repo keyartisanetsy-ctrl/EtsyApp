@@ -586,8 +586,10 @@ export function unshippedByShop() {
   const etsyWhere = `r.shop_id IS a.shop_id AND COALESCE(r.was_shipped,0) = 0 AND COALESCE(r.was_canceled,0) = 0
           AND COALESCE(f.is_canceled,0) = 0 AND COALESCE(r.was_paid,1) = 1
           AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.receipt_id = r.receipt_id AND s.tracking_code IS NOT NULL AND s.tracking_code <> '')`;
-  // Orders Airtable has already finished (or has not processed yet) are not "to ship" - unless a piece of them has arrived here.
+  // Orders Airtable has already finished are not "to ship" - unless a piece of them has arrived here. (An order Airtable lists
+  // without a status yet is still to ship; the 'airtable untouched' mark only lets the list say so.)
   const offList = (channel, id) => `EXISTS (SELECT 1 FROM order_sent_marks m WHERE m.channel = '${channel}' AND m.order_id = CAST(${id} AS TEXT)
+          AND m.source <> 'airtable untouched'
           AND NOT EXISTS (SELECT 1 FROM inbound_parcels p WHERE p.match_channel = '${channel}' AND p.match_order_id = CAST(${id} AS TEXT)))`;
   const untouched = (channel, id) => `EXISTS (SELECT 1 FROM order_sent_marks m WHERE m.channel = '${channel}' AND m.order_id = CAST(${id} AS TEXT) AND m.source = 'airtable untouched'
           AND NOT EXISTS (SELECT 1 FROM inbound_parcels p WHERE p.match_channel = '${channel}' AND p.match_order_id = CAST(${id} AS TEXT)))`;
@@ -609,7 +611,7 @@ export function unshippedByShop() {
       (SELECT MIN(substr(o.created_at_shopify,1,10)) FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id WHERE ${shopWhere}) AS oldest
     FROM shopify_accounts a ORDER BY a.id`).all().map((r) => ({ channel: 'shopify', ...r, active: !!r.active }));
   const shops = [...etsy, ...stores];
-  return { shops, total: shops.reduce((n, x) => n + x.unshipped, 0), untouched: shops.reduce((n, x) => n + (x.untouched || 0), 0) };
+  return { shops, total: shops.reduce((n, x) => n + x.unshipped, 0), noStatus: shops.reduce((n, x) => n + (x.untouched || 0), 0) };
 }
 
 export function orderCounters() {

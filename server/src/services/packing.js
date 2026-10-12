@@ -1656,17 +1656,15 @@ export function packingQueue(params = {}) {
     const parcels = o.items.flatMap((i) => i.parcels);
     const allPacked = parcels.length > 0 && parcels.every((p) => p.packedAt);
     const status = complete ? (allPacked ? 'packed' : 'ready') : any ? 'partial' : 'waiting';
-    // Airtable has the order but nobody has processed it there (empty status): kept apart, not counted as "to ship"
-    const untouched = o.airtableUntouched && status === 'waiting';
-    if (!untouched) summary[status] += 1;
-    return { ...o, status, airtableUntouched: untouched };
+    // Airtable has the order but nobody has given it a status there yet: it waits like any other order (the flag only lets the
+    // list say so)
+    summary[status] += 1;
+    return { ...o, status, airtableUntouched: o.airtableUntouched && status === 'waiting' };
   });
-  const untouchedList = list.filter((o) => o.airtableUntouched);
-  const mainList = list.filter((o) => !o.airtableUntouched);
 
   const rank = { ready: 0, partial: 1, waiting: 2, packed: 3 };
+  const mainList = list;
   mainList.sort((a, b) => rank[a.status] - rank[b.status] || String(a.orderedAt).localeCompare(String(b.orderedAt)));
-  untouchedList.sort((a, b) => String(a.orderedAt).localeCompare(String(b.orderedAt)));
   const unmatched = db.prepare('SELECT COUNT(*) AS c FROM inbound_parcels WHERE match_channel IS NULL AND stock_sku IS NULL AND quantity > 0').get().c;
 
   return {
@@ -1675,12 +1673,11 @@ export function packingQueue(params = {}) {
       etsy: db.prepare('SELECT 1 FROM etsy_accounts LIMIT 1').get() != null,
       shopify: db.prepare('SELECT 1 FROM shopify_accounts LIMIT 1').get() != null,
     },
-    summary: { ...summary, orders: mainList.length, untouched: untouchedList.length, unmatchedParcels: unmatched },
+    summary: { ...summary, orders: mainList.length, noStatus: mainList.filter((o) => o.airtableUntouched).length, unmatchedParcels: unmatched },
     // every shop the list looks through, and the orders still to ship that are older than the window (so they are not silently missing)
-    shops: unshippedByShop().shops.map((x) => ({ channel: x.channel, shopId: x.shopId, name: x.name, unshipped: x.unshipped, untouched: x.untouched, oldest: x.oldest })),
+    shops: unshippedByShop().shops.map((x) => ({ channel: x.channel, shopId: x.shopId, name: x.name, unshipped: x.unshipped, noStatus: x.untouched, oldest: x.oldest })),
     olderThanRange: olderUnshipped(range),
     orders: mainList.slice(0, 500),
-    untouched: untouchedList.slice(0, 200),
   };
 }
 
