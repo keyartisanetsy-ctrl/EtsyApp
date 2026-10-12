@@ -329,6 +329,10 @@ router.post('/sync-shipped', asyncRoute(async (req, res) => {
   try { res.json(await airtableShipped.syncShippedFromAirtable({ channels: channelsOf(b.channels), from: b.from, to: b.to })); }
   catch { res.json({ found: [], checked: 0 }); }
 }));
+/** The queue and Airtable side by side: every order they disagree about, and why. */
+router.get('/airtable-compare', asyncRoute(async (req, res) => {
+  res.json(await airtableShipped.compareWithAirtable({ channels: channelsOf(req.query.channels), from: req.query.from, to: req.query.to }));
+}));
 /** Queue items whose Airtable picture shows a different product (quiet: empty when there is nothing to say). */
 router.get('/image-warnings', asyncRoute(async (req, res) => {
   try { res.json(await itemImages.airtableImageWarnings({ channels: channelsOf(req.query.channels), from: req.query.from, to: req.query.to })); }

@@ -1592,7 +1592,17 @@ function olderUnshipped(range) {
 export function packingQueue(params = {}) {
   const db = getDb();
   const range = resolveRange(params);
-  const demand = loadDemand(range);
+  let demand = loadDemand(range);
+  // Orders Airtable lists as not sent are in the queue whatever their date (the date range only limits the rest).
+  try {
+    const extra = db.prepare('SELECT channel, order_id FROM airtable_unsent').all();
+    const have = new Set(demand.map((d) => `${d.channel}:${d.orderId}`));
+    const want = new Set(extra.map((x) => `${x.channel}:${x.order_id}`).filter((k) => !have.has(k)));
+    if (want.size) {
+      const wide = resolveRange({ channels: range.channels, from: '2000-01-01', to: '2099-12-31' });
+      demand = [...demand, ...loadDemand(wide).filter((d) => want.has(`${d.channel}:${d.orderId}`))];
+    }
+  } catch { /* the queue still opens */ }
 
   const parcelRows = db.prepare(`
     SELECT * FROM inbound_parcels WHERE match_item_id IS NOT NULL ORDER BY id`).all();
@@ -1612,7 +1622,7 @@ export function packingQueue(params = {}) {
     if (sentMarks.has(key)) continue;
     if (!orders.has(key)) {
       orders.set(key, {
-        channel: d.channel, shopId: d.shopId, shopName: d.shopName, orderId: d.orderId, ref: d.orderRef, orderedAt: d.orderedAt, buyer: d.buyer, items: [],
+        channel: d.channel, shopId: d.shopId, shopName: d.shopName, orderId: d.orderId, ref: d.orderRef, orderName: d.orderName || '', orderedAt: d.orderedAt, buyer: d.buyer, items: [],
         hold: onHold.get(key) ?? null,
       });
     }

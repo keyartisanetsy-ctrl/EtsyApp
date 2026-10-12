@@ -1171,6 +1171,15 @@ CREATE TABLE IF NOT EXISTS order_sent_marks (
   PRIMARY KEY (channel, order_id)
 );
 
+-- Orders Airtable lists as NOT sent yet (its not-sent view), refreshed by every look at Airtable. The packing queue shows
+-- them whatever their date, so the queue and Airtable always list the same orders.
+CREATE TABLE IF NOT EXISTS airtable_unsent (
+  channel  TEXT NOT NULL,
+  order_id TEXT NOT NULL,
+  at       TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (channel, order_id)
+);
+
 -- Shopify orders get the same short code Etsy orders carry (26-0710-01), drawn
 -- from the same per-day numbering, so one sheet can list both without two
 -- different orders ever sharing a code.
