@@ -17,7 +17,7 @@ import { getDb, audit } from '../db/index.js';
 import { createLogger } from '../lib/logger.js';
 import * as at from '../airtable/client.js';
 import { listAllDestinations } from './airtable.js';
-import { packingQueue } from './packing.js';
+import { packingQueue, allUnshippedOrders } from './packing.js';
 import { recordTracking } from './orderdispatch.js';
 import { inOrderShop } from '../lib/ordershop.js';
 import { readSetting } from './settings.js';
@@ -74,7 +74,6 @@ function tables() {
  */
 async function readTable(t) {
   const notSentView = viewsSetting('airtable.unshipped_views')[t.id];
-  const recentView = viewsSetting('airtable.recent_views')[t.id];
   if (!notSentView) return null;
   const meta = await at.getTable(t.baseId, t.tableId);
   const named = (names, types) => meta.fields.filter((f) => names.includes(norm(f.name)) && (!types || types.has(f.type))).map((f) => f.name);
@@ -89,8 +88,9 @@ async function readTable(t) {
 
   const notSent = await at.listRecords(t.baseId, t.tableId, { view: notSentView, fields, max: 20000 });
   if (!notSent.length) return null;                       // an empty view concludes nothing
-  const recent = recentView ? await at.listRecords(t.baseId, t.tableId, { view: recentView, fields, max: 30000 }) : [];
-  if (recentView && !recent.length) return null;
+  // Every row of the table (not only the last month): an order from months ago that was shipped is still not "to ship".
+  const recent = await at.listRecords(t.baseId, t.tableId, { fields, max: 40000 });
+  if (!recent.length) return null;
 
   const notSentIds = new Set(notSent.map((r) => r.id));
   const recentIds = new Set(recent.map((r) => r.id));
@@ -100,7 +100,7 @@ async function readTable(t) {
     if (!key) continue;
     if (!index.has(key)) index.set(key, { rows: [] });
     index.get(key).rows.push({
-      id: r.id, notSent: notSentIds.has(r.id), recent: !recentView || recentIds.has(r.id),
+      id: r.id, notSent: notSentIds.has(r.id), recent: recentIds.has(r.id),
       tracking: tracking.map((c) => trackingFromCell(r.fields?.[c])).find(Boolean) || '',
       done: done.some((c) => r.fields?.[c] === true),
       status: statusField ? (r.fields?.[statusField] ?? []).map((x) => x?.name ?? x) : [],
@@ -222,10 +222,10 @@ async function fetchMissingShopifyOrders(names) {
 export async function syncShippedFromAirtable({ channels, from, to, write = false } = {}) {
   const db = getDb();
   // What Airtable says is worked out afresh every time: earlier marks are cleared and found again (or not).
-  const before = new Set(db.prepare("SELECT channel, order_id FROM order_sent_marks WHERE source IN ('airtable view', 'airtable done box')").all().map((m) => `${m.channel}:${m.order_id}`));
-  db.prepare("DELETE FROM order_sent_marks WHERE source IN ('airtable view', 'airtable done box')").run();
-  const queue = packingQueue({ channels, from, to });
-  const orders = queue.orders.filter((o) => o.status !== 'packed');
+  const before = new Set(db.prepare("SELECT channel, order_id FROM order_sent_marks WHERE source LIKE 'airtable %'").all().map((m) => `${m.channel}:${m.order_id}`));
+  db.prepare("DELETE FROM order_sent_marks WHERE source LIKE 'airtable %'").run();
+  // every order the app has not shipped, of any date - the sync is not limited to the queue's date range
+  const orders = allUnshippedOrders({ channels });
 
   const found = new Map();
   let checked = 0;
@@ -238,7 +238,7 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
     let side;
     try { side = await readTable(t); } catch (err) { log.warn(`could not read ${t.label}: ${err.message}`); continue; }
     if (!side) continue;
-    checked += side.recentCount || side.notSentCount;
+    checked += side.recentCount;
 
     // Shopify orders Airtable lists as not sent that the app does not have yet: fetch them by number
     if (t.channel === 'shopify') {
@@ -248,7 +248,6 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
     }
 
     // not sent in Airtable -> remembered (shown by the queue whatever the date); back in the view -> no longer sent
-    const mark = db.prepare("DELETE FROM order_sent_marks WHERE channel = ? AND order_id = ? AND source = 'airtable view'");
     const keep = new Set();
     for (const [key, v] of side.index) if (v.rows.some((r) => r.notSent)) keep.add(key);
     db.prepare('DELETE FROM airtable_unsent WHERE channel = ?').run(t.channel);
@@ -256,7 +255,6 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
       const id = t.channel === 'etsy' ? key : db.prepare('SELECT order_id FROM shopify_orders WHERE name = ?').get(`#${key}`)?.order_id;
       if (!id) continue;
       db.prepare('INSERT OR REPLACE INTO airtable_unsent (channel, order_id) VALUES (?,?)').run(t.channel, String(id));
-      mark.run(t.channel, String(id));
       unsent.push({ channel: t.channel, orderId: String(id) });
     }
 
@@ -273,7 +271,10 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
       else if (v.rows.some((r) => r.done)) found.set(k, { ...base, tracking: '' });
       // Out of the not-sent view counts as sent only with something to show for it: the supplier's tracking number, a status
       // (an empty status with nothing else is a brand-new row that nobody has touched), or a ticked box.
-      else if (!v.rows.some((r) => r.notSent) && v.rows.some((r) => r.recent && (r.cin || r.status.length || r.done))) found.set(k, { ...base, tracking: '', viaView: true });
+      else if (!v.rows.some((r) => r.notSent) && v.rows.some((r) => r.cin || r.status.length || r.done)) found.set(k, { ...base, tracking: '', viaView: true });
+      // Not in the not-sent view and nothing filled in at all: a brand-new row nobody has processed in Airtable yet. It does not
+      // count as "to ship" (Airtable's own list does not) but is not forgotten either: the queue keeps it apart.
+      else if (!v.rows.some((r) => r.notSent)) found.set(k, { ...base, tracking: '', untouched: true });
     }
 
     // the app has a tracking number the Airtable row lacks: fill the empty cell (never overwrite)
@@ -331,12 +332,12 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
         // eslint-disable-next-line no-await-in-loop
         await inOrderShop(f.channel, f.orderId, () => recordTracking(f.channel, f.orderId, f.tracking));
       } else {
-        db.prepare('INSERT OR REPLACE INTO order_sent_marks (channel, order_id, source) VALUES (?,?,?)').run(f.channel, String(f.orderId), f.viaView ? 'airtable view' : 'airtable done box');
+        db.prepare('INSERT OR REPLACE INTO order_sent_marks (channel, order_id, source) VALUES (?,?,?)').run(f.channel, String(f.orderId), f.untouched ? 'airtable untouched' : f.viaView ? 'airtable view' : 'airtable done box');
       }
-      audit('airtable.shipped', { entity: f.channel, entityId: String(f.orderId), detail: { tracking: f.tracking, destination: f.destination } });
+      if (!f.untouched) audit('airtable.shipped', { entity: f.channel, entityId: String(f.orderId), detail: { tracking: f.tracking, destination: f.destination } });
       done.push(f);
     } catch (err) { log.warn(`could not keep the tracking number of ${f.ref}: ${err.message}`); }
   }
   // only what is new is reported (an order that was already off the queue last time is not announced again)
-  return { found: done.filter((f) => f.tracking || !before.has(`${f.channel}:${f.orderId}`)), checked, unsent: unsent.length, filled, fetched, settled };
+  return { found: done.filter((f) => !f.untouched && (f.tracking || !before.has(`${f.channel}:${f.orderId}`))), untouched: done.filter((f) => f.untouched).length, checked, unsent: unsent.length, filled, fetched, settled };
 }

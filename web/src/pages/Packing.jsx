@@ -879,6 +879,7 @@ export default function Packing() {
   const [stocking, setStocking] = useState(null);
   const [imageWarnings, setImageWarnings] = useState({});
   const [syncingShipped, setSyncingShipped] = useState(false);
+  const [showUntouched, setShowUntouched] = useState(false);
   const cancelRef = useRef(false);
 
   const channels = useMemo(() => [filters.etsy && 'etsy', filters.shopify && 'shopify'].filter(Boolean), [filters.etsy, filters.shopify]);
@@ -1428,6 +1429,19 @@ export default function Packing() {
                         queue.reload();
                       }} />
           ))}
+          {queue.data?.untouched?.length > 0 && (
+            <div className="card mt12" data-testid="untouched-orders" style={{ background: 'var(--surface-2)' }}>
+              <div className="flex gap8" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                <strong>{queue.data.untouched.length} new order{queue.data.untouched.length === 1 ? '' : 's'} not processed in Airtable yet</strong>
+                <span className="small muted">Airtable has their row, but no status - they are not in its "not sent" list, so they are not counted above.</span>
+                <div style={{ flex: 1 }} />
+                <button className="btn xs" onClick={() => setShowUntouched((v) => !v)}>{showUntouched ? 'Hide' : 'Show'}</button>
+              </div>
+              {showUntouched && queue.data.untouched.map((o) => (
+                <QueueOrder key={`${o.channel}:${o.orderId}`} order={o} busy={!!working[`${o.channel}:${o.orderId}`]} onPack={pack} warnings={imageWarnings} onChanged={() => queue.reload()} />
+              ))}
+            </div>
+          )}
         </>
       )}
 

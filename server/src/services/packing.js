@@ -1589,6 +1589,18 @@ function olderUnshipped(range) {
   return n;
 }
 
+/** Every order the app has not shipped, of any date: [{ channel, shopId, orderId, orderName, ref, buyer, status }]. */
+export function allUnshippedOrders({ channels } = {}) {
+  const wide = resolveRange({ channels, from: '2000-01-01', to: '2099-12-31' });
+  const out = new Map();
+  for (const d of loadDemand(wide)) {
+    const key = `${d.channel}:${d.orderId}`;
+    if (!out.has(key)) out.set(key, { channel: d.channel, shopId: d.shopId, orderId: d.orderId, orderName: d.orderName || '', ref: d.orderRef, buyer: d.buyer, status: 'waiting' });
+    if (d.received > 0) out.get(key).status = 'partial';
+  }
+  return [...out.values()];
+}
+
 export function packingQueue(params = {}) {
   const db = getDb();
   const range = resolveRange(params);
@@ -1615,7 +1627,9 @@ export function packingQueue(params = {}) {
 
   const onHold = holds.allHolds();
   const custom = itemImageOverrides();
-  const sentMarks = new Set(db.prepare('SELECT channel, order_id FROM order_sent_marks').all().map((m) => `${m.channel}:${m.order_id}`));
+  const marks = db.prepare('SELECT channel, order_id, source FROM order_sent_marks').all();
+  const sentMarks = new Set(marks.filter((m) => m.source !== 'airtable untouched').map((m) => `${m.channel}:${m.order_id}`));
+  const untouchedMarks = new Set(marks.filter((m) => m.source === 'airtable untouched').map((m) => `${m.channel}:${m.order_id}`));
   const orders = new Map();
   for (const d of demand) {
     const key = `${d.channel}:${d.orderId}`;
@@ -1624,6 +1638,7 @@ export function packingQueue(params = {}) {
     if (!orders.has(key)) {
       orders.set(key, {
         channel: d.channel, shopId: d.shopId, shopName: d.shopName, orderId: d.orderId, ref: d.orderRef, orderName: d.orderName || '', orderedAt: d.orderedAt, buyer: d.buyer, items: [],
+        airtableUntouched: untouchedMarks.has(key),
         hold: onHold.get(key) ?? null,
       });
     }
@@ -1641,12 +1656,17 @@ export function packingQueue(params = {}) {
     const parcels = o.items.flatMap((i) => i.parcels);
     const allPacked = parcels.length > 0 && parcels.every((p) => p.packedAt);
     const status = complete ? (allPacked ? 'packed' : 'ready') : any ? 'partial' : 'waiting';
-    summary[status] += 1;
-    return { ...o, status };
+    // Airtable has the order but nobody has processed it there (empty status): kept apart, not counted as "to ship"
+    const untouched = o.airtableUntouched && status === 'waiting';
+    if (!untouched) summary[status] += 1;
+    return { ...o, status, airtableUntouched: untouched };
   });
+  const untouchedList = list.filter((o) => o.airtableUntouched);
+  const mainList = list.filter((o) => !o.airtableUntouched);
 
   const rank = { ready: 0, partial: 1, waiting: 2, packed: 3 };
-  list.sort((a, b) => rank[a.status] - rank[b.status] || String(a.orderedAt).localeCompare(String(b.orderedAt)));
+  mainList.sort((a, b) => rank[a.status] - rank[b.status] || String(a.orderedAt).localeCompare(String(b.orderedAt)));
+  untouchedList.sort((a, b) => String(a.orderedAt).localeCompare(String(b.orderedAt)));
   const unmatched = db.prepare('SELECT COUNT(*) AS c FROM inbound_parcels WHERE match_channel IS NULL AND stock_sku IS NULL AND quantity > 0').get().c;
 
   return {
@@ -1655,11 +1675,12 @@ export function packingQueue(params = {}) {
       etsy: db.prepare('SELECT 1 FROM etsy_accounts LIMIT 1').get() != null,
       shopify: db.prepare('SELECT 1 FROM shopify_accounts LIMIT 1').get() != null,
     },
-    summary: { ...summary, orders: list.length, unmatchedParcels: unmatched },
+    summary: { ...summary, orders: mainList.length, untouched: untouchedList.length, unmatchedParcels: unmatched },
     // every shop the list looks through, and the orders still to ship that are older than the window (so they are not silently missing)
-    shops: unshippedByShop().shops.map((x) => ({ channel: x.channel, shopId: x.shopId, name: x.name, unshipped: x.unshipped, oldest: x.oldest })),
+    shops: unshippedByShop().shops.map((x) => ({ channel: x.channel, shopId: x.shopId, name: x.name, unshipped: x.unshipped, untouched: x.untouched, oldest: x.oldest })),
     olderThanRange: olderUnshipped(range),
-    orders: list.slice(0, 500),
+    orders: mainList.slice(0, 500),
+    untouched: untouchedList.slice(0, 200),
   };
 }
 

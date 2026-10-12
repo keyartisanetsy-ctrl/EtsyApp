@@ -586,9 +586,15 @@ export function unshippedByShop() {
   const etsyWhere = `r.shop_id IS a.shop_id AND COALESCE(r.was_shipped,0) = 0 AND COALESCE(r.was_canceled,0) = 0
           AND COALESCE(f.is_canceled,0) = 0 AND COALESCE(r.was_paid,1) = 1
           AND NOT EXISTS (SELECT 1 FROM shipments s WHERE s.receipt_id = r.receipt_id AND s.tracking_code IS NOT NULL AND s.tracking_code <> '')`;
+  // Orders Airtable has already finished (or has not processed yet) are not "to ship" - unless a piece of them has arrived here.
+  const offList = (channel, id) => `EXISTS (SELECT 1 FROM order_sent_marks m WHERE m.channel = '${channel}' AND m.order_id = CAST(${id} AS TEXT)
+          AND NOT EXISTS (SELECT 1 FROM inbound_parcels p WHERE p.match_channel = '${channel}' AND p.match_order_id = CAST(${id} AS TEXT)))`;
+  const untouched = (channel, id) => `EXISTS (SELECT 1 FROM order_sent_marks m WHERE m.channel = '${channel}' AND m.order_id = CAST(${id} AS TEXT) AND m.source = 'airtable untouched'
+          AND NOT EXISTS (SELECT 1 FROM inbound_parcels p WHERE p.match_channel = '${channel}' AND p.match_order_id = CAST(${id} AS TEXT)))`;
   const etsy = db.prepare(`
     SELECT a.shop_id AS shopId, COALESCE(NULLIF(a.label, ''), a.shop_name) AS name, a.is_active AS active,
-      (SELECT COUNT(*) FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id WHERE ${etsyWhere}) AS unshipped,
+      (SELECT COUNT(*) FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id WHERE ${etsyWhere} AND ${untouched('etsy', 'r.receipt_id')}) AS untouched,
+      (SELECT COUNT(*) FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id WHERE ${etsyWhere} AND NOT ${offList('etsy', 'r.receipt_id')}) AS unshipped,
       (SELECT MIN(r.created_ts) FROM receipts r LEFT JOIN order_flags f ON f.receipt_id = r.receipt_id WHERE ${etsyWhere}) AS oldestTs
     FROM etsy_accounts a ORDER BY a.id`).all()
     .map(({ oldestTs, ...r }) => ({ channel: 'etsy', ...r, active: !!r.active, oldest: oldestTs ? new Date(oldestTs * 1000).toISOString().slice(0, 10) : null }));
@@ -598,11 +604,12 @@ export function unshippedByShop() {
           AND COALESCE(f.tracking_number,'') = ''`;
   const stores = db.prepare(`
     SELECT a.id AS shopId, COALESCE(NULLIF(a.label, ''), a.shop_name, a.shop_domain) AS name, a.is_active AS active,
-      (SELECT COUNT(*) FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id WHERE ${shopWhere}) AS unshipped,
+      (SELECT COUNT(*) FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id WHERE ${shopWhere} AND ${untouched('shopify', 'o.order_id')}) AS untouched,
+      (SELECT COUNT(*) FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id WHERE ${shopWhere} AND NOT ${offList('shopify', 'o.order_id')}) AS unshipped,
       (SELECT MIN(substr(o.created_at_shopify,1,10)) FROM shopify_orders o LEFT JOIN shopify_fulfillments f ON f.order_id = o.order_id WHERE ${shopWhere}) AS oldest
     FROM shopify_accounts a ORDER BY a.id`).all().map((r) => ({ channel: 'shopify', ...r, active: !!r.active }));
   const shops = [...etsy, ...stores];
-  return { shops, total: shops.reduce((n, x) => n + x.unshipped, 0) };
+  return { shops, total: shops.reduce((n, x) => n + x.unshipped, 0), untouched: shops.reduce((n, x) => n + (x.untouched || 0), 0) };
 }
 
 export function orderCounters() {
