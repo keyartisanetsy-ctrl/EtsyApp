@@ -878,6 +878,7 @@ export default function Packing() {
   const [merging, setMerging] = useState(null);
   const [stocking, setStocking] = useState(null);
   const [imageWarnings, setImageWarnings] = useState({});
+  const [syncingShipped, setSyncingShipped] = useState(false);
   const cancelRef = useRef(false);
 
   const channels = useMemo(() => [filters.etsy && 'etsy', filters.shopify && 'shopify'].filter(Boolean), [filters.etsy, filters.shopify]);
@@ -891,6 +892,21 @@ export default function Packing() {
   const parcels = useAsync(() => api.get('/packing/parcels', { status }), [status]);
   const queue = useAsync(() => (channels.length ? api.get('/packing/queue', range) : Promise.resolve(null)), [rangeKey]);
   const refresh = useCallback(() => { parcels.reload(); queue.reload(); }, [parcels, queue]);
+
+  /** Orders whose Airtable row already has a tracking number were sent: keep the number here so they leave the queue. */
+  const syncShipped = useCallback(async ({ quiet = true } = {}) => {
+    if (!channels.length) return;
+    setSyncingShipped(true);
+    try {
+      const r = await api.post('/packing/sync-shipped', range);
+      if (r.found?.length) {
+        toast({ kind: 'ok', title: `${r.found.length} order${r.found.length === 1 ? '' : 's'} already sent - taken off the queue`, duration: 9000,
+          body: `${r.found.slice(0, 6).map((f) => `${f.ref} (${f.tracking})`).join(', ')}${r.found.length > 6 ? ' …' : ''} - the tracking number came from Airtable; nothing was sent to the shop.` });
+        queue.reload();
+      } else if (!quiet) toast({ kind: 'info', title: 'Nothing new in Airtable', body: `${r.checked ?? 0} Airtable row${r.checked === 1 ? '' : 's'} looked at.` });
+    } catch { if (!quiet) toast({ kind: 'err', title: 'Could not read Airtable' }); } finally { setSyncingShipped(false); }
+  }, [rangeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { syncShipped(); }, [syncShipped]);
 
   // Quietly look at the Airtable pictures of the queue's items: nothing is shown unless one is of a different product.
   useEffect(() => {
@@ -1384,6 +1400,11 @@ export default function Packing() {
                 {s === 'all' ? 'All' : STATUS_LABEL[s]}{summary ? ` (${s === 'all' ? summary.orders : summary[s]})` : ''}
               </button>
             ))}
+            <div style={{ flex: 1 }} />
+            <button className="btn xs" disabled={syncingShipped} onClick={() => syncShipped({ quiet: false })}
+                    title="Orders whose Airtable row already has a tracking number were sent: they leave this list. Reads Airtable only; nothing is sent to the shops.">
+              {syncingShipped ? <Spinner /> : '↻'} Sent in Airtable?
+            </button>
           </div>
           {queue.loading && !queue.data ? <Spinner /> : !orders.length ? (
             <Empty icon="📦" title={queueFilter === 'ready' ? 'Nothing is ready to pack yet' : 'No orders here'}>

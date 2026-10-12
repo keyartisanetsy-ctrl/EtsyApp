@@ -32,6 +32,24 @@ export function describe(channel, orderId) {
 }
 
 /**
+ * Keep a tracking number on an order, here only: nothing is sent to the shop and the buyer is not told.
+ * An earlier number that was never pushed is replaced, not stacked up.
+ */
+export async function recordTracking(channel, orderId, tracking, carrier = DEFAULT_CARRIER) {
+  const db = getDb();
+  if (channel === 'etsy') {
+    const id = Number(orderId);
+    db.prepare("DELETE FROM shipments WHERE receipt_id = ? AND COALESCE(pushed_to_etsy,0) = 0 AND tracking_code <> ?").run(id, tracking);
+    const r = await addTracking([{ receiptId: id, trackingCode: tracking, carrierName: carrier }], { pushToEtsy: false });
+    if (r.results[0]?.status === 'error') throw badRequest(r.results[0].error);
+  } else {
+    db.prepare(`INSERT INTO shopify_fulfillments (order_id, tracking_number, tracking_company) VALUES (?,?,?)
+                ON CONFLICT(order_id) DO UPDATE SET tracking_number = excluded.tracking_number, tracking_company = excluded.tracking_company`)
+      .run(String(orderId), tracking, carrier || null);
+  }
+}
+
+/**
  * Give the order its package code and tracking number.
  *   code      the package code to use (blank: the order's own, or the next one of the day)
  *   airtable  'check' (write unless a cell holds something else - then report it), 'change', 'keep', 'none'
@@ -49,18 +67,7 @@ export async function assign(channel, orderId, { trackingNumber, code, carrier =
     if (!packageCode) throw badRequest('Could not give this order a package code.');
 
     // 2. the tracking number, kept here only - the buyer is not told and nothing is fulfilled on the shop
-    const db = getDb();
-    if (channel === 'etsy') {
-      const id = Number(orderId);
-      // a hand-over typed earlier and never pushed is replaced, not stacked up
-      db.prepare("DELETE FROM shipments WHERE receipt_id = ? AND COALESCE(pushed_to_etsy,0) = 0 AND tracking_code <> ?").run(id, tracking);
-      const r = await addTracking([{ receiptId: id, trackingCode: tracking, carrierName: carrier }], { pushToEtsy: false });
-      if (r.results[0]?.status === 'error') throw badRequest(r.results[0].error);
-    } else {
-      db.prepare(`INSERT INTO shopify_fulfillments (order_id, tracking_number, tracking_company) VALUES (?,?,?)
-                  ON CONFLICT(order_id) DO UPDATE SET tracking_number = excluded.tracking_number, tracking_company = excluded.tracking_company`)
-        .run(String(orderId), tracking, carrier || null);
-    }
+    await recordTracking(channel, orderId, tracking, carrier);
     audit('dispatch.assign', { entity: channel === 'etsy' ? 'receipt' : 'shopify_order', entityId: String(orderId), detail: { code: packageCode, tracking, carrier } });
     return { code: packageCode };
   });

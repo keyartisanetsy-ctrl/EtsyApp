@@ -10,6 +10,7 @@ import * as ordersupply from '../services/ordersupply.js';
 import * as itemsupply from '../services/itemsupply.js';
 import * as memory from '../services/packingmemory.js';
 import * as itemImages from '../services/itemimages.js';
+import * as airtableShipped from '../services/airtableshipped.js';
 import { providerStatus } from '../services/ai/index.js';
 import { readSetting, writeSetting } from '../services/settings.js';
 
@@ -318,6 +319,15 @@ router.post('/items/image', upload.single('photo'), asyncRoute(async (req, res) 
 router.delete('/items/image', asyncRoute(async (req, res) => {
   const b = req.body ?? {};
   res.json(itemImages.clearOverride(b.channel, b.itemId));
+}));
+/**
+ * Orders whose Airtable row already holds a tracking number were sent: keep the number here (nothing goes to the shop)
+ * so they leave the queue. Quiet when Airtable cannot be reached.
+ */
+router.post('/sync-shipped', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  try { res.json(await airtableShipped.syncShippedFromAirtable({ channels: channelsOf(b.channels), from: b.from, to: b.to })); }
+  catch { res.json({ found: [], checked: 0 }); }
 }));
 /** Queue items whose Airtable picture shows a different product (quiet: empty when there is nothing to say). */
 router.get('/image-warnings', asyncRoute(async (req, res) => {
