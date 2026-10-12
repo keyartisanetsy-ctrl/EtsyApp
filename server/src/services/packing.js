@@ -1619,7 +1619,8 @@ export function packingQueue(params = {}) {
   const orders = new Map();
   for (const d of demand) {
     const key = `${d.channel}:${d.orderId}`;
-    if (sentMarks.has(key)) continue;
+    // marked sent from Airtable - unless a piece of it has arrived since: then it is back to work
+    if (sentMarks.has(key) && !demand.some((x) => x.channel === d.channel && x.orderId === d.orderId && x.received > 0)) continue;
     if (!orders.has(key)) {
       orders.set(key, {
         channel: d.channel, shopId: d.shopId, shopName: d.shopName, orderId: d.orderId, ref: d.orderRef, orderName: d.orderName || '', orderedAt: d.orderedAt, buyer: d.buyer, items: [],

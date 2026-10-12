@@ -898,7 +898,8 @@ export default function Packing() {
     if (!channels.length) return;
     setSyncingShipped(true);
     try {
-      const r = await api.post('/packing/sync-shipped', range);
+      // Opening the page only reads Airtable; the button also brings Airtable itself in step (tracking numbers, finished statuses).
+      const r = await api.post('/packing/sync-shipped', { ...range, write: !quiet });
       if (r.found?.length) {
         toast({ kind: 'ok', title: `${r.found.length} order${r.found.length === 1 ? '' : 's'} already sent - taken off the queue`, duration: 9000,
           body: `${r.found.slice(0, 6).map((f) => `${f.ref} (${f.tracking})`).join(', ')}${r.found.length > 6 ? ' …' : ''} - the tracking number came from Airtable; nothing was sent to the shop.` });

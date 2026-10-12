@@ -82,9 +82,10 @@ export function dropStaleCode(channel, orderId, { receivedOn = null } = {}) {
   const db = getDb();
   const today = codeDay();
   const row = channel === 'etsy'
-    ? db.prepare('SELECT shop_id, day FROM order_codes WHERE receipt_id = ?').get(Number(orderId))
-    : db.prepare('SELECT shop_id, day FROM shopify_order_codes WHERE order_id = ?').get(String(orderId));
+    ? db.prepare('SELECT shop_id, day, source FROM order_codes WHERE receipt_id = ?').get(Number(orderId))
+    : db.prepare('SELECT shop_id, day, source FROM shopify_order_codes WHERE order_id = ?').get(String(orderId));
   if (!row || !(row.day < today)) return null;
+  if (row.source === 'manual') return null;     // a code typed by hand (or given in a hand-over) is the person's: it is never replaced
   if (receivedOn && String(receivedOn) <= row.day) return null; // the parcel being matched is itself from the code's day
   const parcels = db.prepare('SELECT received_on, packed_at FROM inbound_parcels WHERE match_channel = ? AND match_order_id = ?').all(channel, String(orderId));
   if (parcels.some((p) => p.packed_at || !(String(p.received_on) > row.day))) return null;

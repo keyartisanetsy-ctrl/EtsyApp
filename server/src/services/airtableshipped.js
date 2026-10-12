@@ -42,6 +42,7 @@ export function trackingFromCell(cell) {
   const text = Array.isArray(cell) ? cell.map((c) => c?.name ?? c).join(' ') : String(cell ?? '');
   for (const part of text.split(/[\s,;，；]+/)) {
     const t = part.trim().toUpperCase();
+    if (/^HOLD/.test(t)) continue;                       // a hold code (HOLD-2120), not a tracking number
     if (REAL_TRACKING.test(t) && /\d{4,}/.test(t)) return t;
   }
   return '';
@@ -82,8 +83,9 @@ async function readTable(t) {
   if (!keyField) return null;
   const tracking = [...new Set([...t.dests.flatMap((d) => (d.fieldMap ?? []).filter((e) => e.source === 'tracking.code').map((e) => e.target)), ...named(TRACKING_NAMES, TEXT_TYPES)])];
   const done = meta.fields.filter((f) => f.type === 'checkbox' && DONE_NAMES.includes(norm(f.name))).map((f) => f.name);
+  const cin = meta.fields.find((f) => TEXT_TYPES.has(f.type) && norm(f.name) === 'cin takip no')?.name || null;
   const statusField = meta.fields.find((f) => f.type === 'multipleSelects' && norm(f.name) === 'siparis durum')?.name || null;
-  const fields = [keyField, ...tracking, ...done, ...(statusField ? [statusField] : [])];
+  const fields = [keyField, ...tracking, ...done, ...(statusField ? [statusField] : []), ...(cin ? [cin] : [])];
 
   const notSent = await at.listRecords(t.baseId, t.tableId, { view: notSentView, fields, max: 20000 });
   if (!notSent.length) return null;                       // an empty view concludes nothing
@@ -102,6 +104,7 @@ async function readTable(t) {
       tracking: tracking.map((c) => trackingFromCell(r.fields?.[c])).find(Boolean) || '',
       done: done.some((c) => r.fields?.[c] === true),
       status: statusField ? (r.fields?.[statusField] ?? []).map((x) => x?.name ?? x) : [],
+      cin: cin ? String(r.fields?.[cin] ?? '').trim() !== '' : false,   // the supplier's parcel was shipped (Çin Takip No filled)
     });
   }
   return { index, keyField, tracking, done, statusField, notSentCount: notSent.length, recentCount: recent.length };
@@ -216,8 +219,11 @@ async function fetchMissingShopifyOrders(names) {
  * shows them whatever their date; a tracking number the app has but Airtable lacks is written into the (empty) cell.
  * Returns { found, checked, unsent, filled }.
  */
-export async function syncShippedFromAirtable({ channels, from, to } = {}) {
+export async function syncShippedFromAirtable({ channels, from, to, write = false } = {}) {
   const db = getDb();
+  // What Airtable says is worked out afresh every time: earlier marks are cleared and found again (or not).
+  const before = new Set(db.prepare("SELECT channel, order_id FROM order_sent_marks WHERE source IN ('airtable view', 'airtable done box')").all().map((m) => `${m.channel}:${m.order_id}`));
+  db.prepare("DELETE FROM order_sent_marks WHERE source IN ('airtable view', 'airtable done box')").run();
   const queue = packingQueue({ channels, from, to });
   const orders = queue.orders.filter((o) => o.status !== 'packed');
 
@@ -254,7 +260,9 @@ export async function syncShippedFromAirtable({ channels, from, to } = {}) {
       unsent.push({ channel: t.channel, orderId: String(id) });
     }
 
-    for (const o of orders.filter((x) => x.channel === t.channel)) {
+    // Only an order that is still plainly waiting can leave the queue: one with pieces already received (partly here / ready to
+    // pack) stays whatever Airtable says.
+    for (const o of orders.filter((x) => x.channel === t.channel && x.status === 'waiting')) {
       const key = queueKey(o);
       const v = side.index.get(key);
       if (!v) continue;
@@ -263,11 +271,13 @@ export async function syncShippedFromAirtable({ channels, from, to } = {}) {
       const base = { channel: o.channel, orderId: o.orderId, ref: o.ref, buyer: o.buyer, destination: t.label };
       if (tracking) found.set(k, { ...base, tracking });
       else if (v.rows.some((r) => r.done)) found.set(k, { ...base, tracking: '' });
-      else if (!v.rows.some((r) => r.notSent) && v.rows.some((r) => r.recent)) found.set(k, { ...base, tracking: '', viaView: true });
+      // Out of the not-sent view counts as sent only with something to show for it: the supplier's tracking number, a status
+      // (an empty status with nothing else is a brand-new row that nobody has touched), or a ticked box.
+      else if (!v.rows.some((r) => r.notSent) && v.rows.some((r) => r.recent && (r.cin || r.status.length || r.done))) found.set(k, { ...base, tracking: '', viaView: true });
     }
 
     // the app has a tracking number the Airtable row lacks: fill the empty cell (never overwrite)
-    const trackingCol = side.tracking.find((c) => /takip no|manuel shipping|tracking/i.test(c) && !/cin|çin/i.test(c));
+    const trackingCol = !write ? null : side.tracking.find((c) => /takip no|manuel shipping|tracking/i.test(c) && !/cin|çin/i.test(c));
     if (trackingCol) {
       const updates = [];
       for (const [key, v] of side.index) {
@@ -294,7 +304,7 @@ export async function syncShippedFromAirtable({ channels, from, to } = {}) {
     // The shop already finished these orders (canceled, refunded, fulfilled, or the app holds their tracking) but Airtable still
     // lists them as not sent. That view is driven by the row's "SİPARİŞ DURUM": a status that ends in OK ("ORDER CN OK") is out of
     // it. So the status of such a row is moved to its OK twin - the same step the team takes by hand - and nothing else is touched.
-    if (side.statusField) {
+    if (write && side.statusField) {
       const moves = [];
       for (const [key, v] of side.index) {
         for (const row of v.rows.filter((r) => r.notSent)) {
@@ -327,5 +337,6 @@ export async function syncShippedFromAirtable({ channels, from, to } = {}) {
       done.push(f);
     } catch (err) { log.warn(`could not keep the tracking number of ${f.ref}: ${err.message}`); }
   }
-  return { found: done, checked, unsent: unsent.length, filled, fetched, settled };
+  // only what is new is reported (an order that was already off the queue last time is not announced again)
+  return { found: done.filter((f) => f.tracking || !before.has(`${f.channel}:${f.orderId}`)), checked, unsent: unsent.length, filled, fetched, settled };
 }
