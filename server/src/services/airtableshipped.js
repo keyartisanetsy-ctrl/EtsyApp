@@ -245,9 +245,10 @@ function fillable(cell) {
  */
 export async function syncShippedFromAirtable({ channels, from, to, write = false, plan: wantPlan = write, light = false, maxWrites = Infinity, onWrite = null } = {}) {
   const db = getDb();
-  // What Airtable says is worked out afresh every time: earlier marks are cleared and found again (or not).
+  // What Airtable says is worked out afresh every time. The earlier marks stay in place while Airtable is being read (which takes
+  // seconds) and are swapped for the new ones in one step at the end - so the queue never flashes every order as waiting.
   const before = new Set(db.prepare("SELECT channel, order_id FROM order_sent_marks WHERE source LIKE 'airtable %'").all().map((m) => `${m.channel}:${m.order_id}`));
-  db.prepare("DELETE FROM order_sent_marks WHERE source LIKE 'airtable %'").run();
+  const readChannels = new Set();
   // every order the app has not shipped, of any date - the sync is not limited to the queue's date range
   const orders = allUnshippedOrders({ channels });
 
@@ -269,6 +270,7 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
     let side;
     try { side = await readTable(t, { light, keys: wanted(t.channel) }); } catch (err) { log.warn(`could not read ${t.label}: ${err.message}`); errors.push(`${t.label}: ${err.message}`); continue; }
     if (!side) continue;
+    readChannels.add(t.channel);
     checked += side.recentCount;
 
     // Shopify orders Airtable lists as not sent that the app does not have yet: fetch them by number
@@ -378,18 +380,22 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
   }
 
   const done = [];
+  const marks = [];
   for (const f of found.values()) {
     try {
       if (f.tracking) {
         // eslint-disable-next-line no-await-in-loop
         await inOrderShop(f.channel, f.orderId, () => recordTracking(f.channel, f.orderId, f.tracking));
-      } else {
-        db.prepare('INSERT OR REPLACE INTO order_sent_marks (channel, order_id, source) VALUES (?,?,?)').run(f.channel, String(f.orderId), f.untouched ? 'airtable untouched' : f.viaView ? 'airtable view' : 'airtable done box');
-      }
+      } else marks.push(f);
       if (!f.untouched) audit('airtable.shipped', { entity: f.channel, entityId: String(f.orderId), detail: { tracking: f.tracking, destination: f.destination } });
       done.push(f);
     } catch (err) { log.warn(`could not keep the tracking number of ${f.ref}: ${err.message}`); }
   }
+  // one step: the marks of every table that was read are replaced by what Airtable says now (a table that could not be read keeps its marks)
+  db.transaction(() => {
+    for (const channel of readChannels) db.prepare("DELETE FROM order_sent_marks WHERE channel = ? AND source LIKE 'airtable %'").run(channel);
+    for (const f of marks) db.prepare('INSERT OR REPLACE INTO order_sent_marks (channel, order_id, source) VALUES (?,?,?)').run(f.channel, String(f.orderId), f.untouched ? 'airtable untouched' : f.viaView ? 'airtable view' : 'airtable done box');
+  })();
   // only what is new is reported (an order that was already off the queue last time is not announced again)
   return {
     found: done.filter((f) => !f.untouched && (f.tracking || !before.has(`${f.channel}:${f.orderId}`))),
