@@ -9,6 +9,7 @@ import * as dispatch from '../services/orderdispatch.js';
 import * as ordersupply from '../services/ordersupply.js';
 import * as itemsupply from '../services/itemsupply.js';
 import * as memory from '../services/packingmemory.js';
+import * as itemImages from '../services/itemimages.js';
 import { providerStatus } from '../services/ai/index.js';
 import { readSetting, writeSetting } from '../services/settings.js';
 
@@ -306,6 +307,22 @@ router.get('/orders/dispatch', asyncRoute(async (req, res) => {
 router.delete('/orders/dispatch', asyncRoute(async (req, res) => {
   const b = req.body ?? {};
   res.json(dispatch.undo(b.channel, b.orderId));
+}));
+
+/** Choose the picture shown for an order item on the queue (a file, or a link). */
+router.post('/items/image', upload.single('photo'), asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  if (!b.channel || b.itemId == null) throw badRequest('channel and itemId are required.');
+  res.status(201).json(await itemImages.setOverride({ channel: b.channel, itemId: b.itemId, file: req.file ?? null, url: b.url }));
+}));
+router.delete('/items/image', asyncRoute(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(itemImages.clearOverride(b.channel, b.itemId));
+}));
+/** Queue items whose Airtable picture shows a different product (quiet: empty when there is nothing to say). */
+router.get('/image-warnings', asyncRoute(async (req, res) => {
+  try { res.json(await itemImages.airtableImageWarnings({ channels: channelsOf(req.query.channels), from: req.query.from, to: req.query.to })); }
+  catch { res.json({ warnings: [], pending: 0 }); }
 }));
 
 router.post('/export', asyncRoute(async (req, res) => {

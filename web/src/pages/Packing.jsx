@@ -769,7 +769,46 @@ function HandoverBox({ order, onChanged }) {
   );
 }
 
-function QueueOrder({ order, busy, onPack, onChanged }) {
+/** The listing picture of an order item, with a way to choose another one by hand (a file, or paste a link) and to go back. */
+function ItemPicture({ order, item, onChanged }) {
+  const showError = useErrorToast();
+  const input = useRef(null);
+  const [busy, setBusy] = useState(false);
+  const send = async (file, url) => {
+    setBusy(true);
+    try {
+      const form = new FormData();
+      form.append('channel', order.channel);
+      form.append('itemId', item.itemId);
+      if (file) form.append('photo', await normalizePhoto(file)); else form.append('url', url);
+      await api.upload('/packing/items/image', form);
+      onChanged();
+    } catch (err) { showError(err, 'Could not change that picture'); } finally { setBusy(false); }
+  };
+  const reset = async () => {
+    setBusy(true);
+    try { await api.del('/packing/items/image', { channel: order.channel, itemId: item.itemId }); onChanged(); }
+    catch (err) { showError(err, 'Could not go back to the listing picture'); } finally { setBusy(false); }
+  };
+  const link = () => {
+    const url = window.prompt('Link to the picture:');
+    if (url && /^https?:\/\//i.test(url.trim())) send(null, url.trim());
+  };
+  return (
+    <div style={{ textAlign: 'center' }} data-testid="item-picture">
+      <Thumb src={item.imageUrl} size="lg" alt="Listing" />
+      <div className="small" style={{ whiteSpace: 'nowrap' }}>
+        <button className="btn xs ghost" disabled={busy} title="Choose another picture for this item (a file)" aria-label="Change picture" onClick={() => input.current?.click()}>✎</button>
+        <button className="btn xs ghost" disabled={busy} title="Use a picture from a link" aria-label="Picture from a link" onClick={link}>🔗</button>
+        {item.imageCustom && <button className="btn xs ghost" disabled={busy} title="Back to the listing's own picture" aria-label="Use the listing picture" onClick={reset}>↺</button>}
+        <input ref={input} type="file" accept="image/*" style={{ display: 'none' }} data-testid="item-picture-input"
+               onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) send(f); }} />
+      </div>
+    </div>
+  );
+}
+
+function QueueOrder({ order, busy, onPack, onChanged, warnings = {} }) {
   return (
     <div className="card mb12" style={{ padding: 12 }}>
       <div className="flex gap8" style={{ flexWrap: 'wrap' }}>
@@ -787,7 +826,7 @@ function QueueOrder({ order, busy, onPack, onChanged }) {
         <tbody>
           {order.items.map((it) => (
             <tr key={it.itemId}>
-              <td style={{ width: 70 }}><Thumb src={it.imageUrl} size="lg" alt="Listing" /></td>
+              <td style={{ width: 70 }}><ItemPicture order={order} item={it} onChanged={onChanged} /></td>
               <td style={{ width: 70 + 66 * Math.max(0, it.parcels.length - 1) }}>
                 <div className="flex gap4">
                   {it.parcels.length
@@ -798,6 +837,14 @@ function QueueOrder({ order, busy, onPack, onChanged }) {
               <td>
                 <div><strong>{it.title}</strong>{it.variant && <span className="muted"> · {it.variant}</span>}</div>
                 <div className="small muted">{it.sku}{it.parcels.length ? ` · ${it.parcels.map((p) => p.label).join(', ')}` : ''}</div>
+                {warnings[`${order.channel}:${it.itemId}`] && (
+                  <div className="flex gap8" style={{ marginTop: 6, alignItems: 'center' }} data-testid="product-changed">
+                    <Thumb src={warnings[`${order.channel}:${it.itemId}`].airtableImageUrl} size="sm" alt="In Airtable" />
+                    <span className="badge amber" title={warnings[`${order.channel}:${it.itemId}`].summary}>⚠ Product changed? The customer may want a different product - Airtable's picture shows another one</span>
+                    <button className="btn xs" onClick={() => onChanged({ useImage: { channel: order.channel, itemId: it.itemId, url: warnings[`${order.channel}:${it.itemId}`].airtableImageUrl } })}
+                            title="Show Airtable's picture here instead">Use Airtable's picture</button>
+                  </div>
+                )}
               </td>
               <td className="right">
                 <span className={`badge ${it.received >= it.quantity ? 'green' : it.received > 0 ? 'amber' : 'grey'}`}>{it.received} / {it.quantity}</span>
@@ -830,6 +877,7 @@ export default function Packing() {
   const [deciding, setDeciding] = useState(null);
   const [merging, setMerging] = useState(null);
   const [stocking, setStocking] = useState(null);
+  const [imageWarnings, setImageWarnings] = useState({});
   const cancelRef = useRef(false);
 
   const channels = useMemo(() => [filters.etsy && 'etsy', filters.shopify && 'shopify'].filter(Boolean), [filters.etsy, filters.shopify]);
@@ -843,6 +891,16 @@ export default function Packing() {
   const parcels = useAsync(() => api.get('/packing/parcels', { status }), [status]);
   const queue = useAsync(() => (channels.length ? api.get('/packing/queue', range) : Promise.resolve(null)), [rangeKey]);
   const refresh = useCallback(() => { parcels.reload(); queue.reload(); }, [parcels, queue]);
+
+  // Quietly look at the Airtable pictures of the queue's items: nothing is shown unless one is of a different product.
+  useEffect(() => {
+    if (!queue.data?.orders?.length) { setImageWarnings({}); return undefined; }
+    let live = true;
+    api.get('/packing/image-warnings', range).then((r) => {
+      if (live) setImageWarnings(Object.fromEntries((r.warnings ?? []).map((w) => [`${w.channel}:${w.itemId}`, w])));
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [queue.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setFilter = (patch) => setFilters((f) => ({ ...f, ...patch }));
   const flag = (id, on) => setWorking((w) => ({ ...w, [id]: on }));
@@ -1332,7 +1390,15 @@ export default function Packing() {
               {queueFilter === 'ready' ? 'An order is ready once every item on it has a matched parcel.' : undefined}
             </Empty>
           ) : orders.map((o) => (
-            <QueueOrder key={`${o.channel}:${o.orderId}`} order={o} busy={!!working[`${o.channel}:${o.orderId}`]} onPack={pack} onChanged={() => queue.reload()} />
+            <QueueOrder key={`${o.channel}:${o.orderId}`} order={o} busy={!!working[`${o.channel}:${o.orderId}`]} onPack={pack} warnings={imageWarnings}
+                      onChanged={async (extra) => {
+                        if (extra?.useImage) {
+                          const form = new FormData();
+                          form.append('channel', extra.useImage.channel); form.append('itemId', extra.useImage.itemId); form.append('url', extra.useImage.url);
+                          try { await api.upload('/packing/items/image', form); } catch (err) { showError(err, 'Could not use that picture'); }
+                        }
+                        queue.reload();
+                      }} />
           ))}
         </>
       )}

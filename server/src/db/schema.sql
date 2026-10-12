@@ -1141,6 +1141,26 @@ CREATE TABLE IF NOT EXISTS packing_lessons (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- A picture chosen by hand for one order item (the packing queue shows it instead of the listing's), and what the
+-- AI said about whether an Airtable picture and the listing's picture show the same product (asked once per pair).
+CREATE TABLE IF NOT EXISTS item_images (
+  channel       TEXT NOT NULL,
+  item_id       TEXT NOT NULL,
+  attachment_id TEXT NOT NULL,
+  source_url    TEXT,
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (channel, item_id)
+);
+CREATE TABLE IF NOT EXISTS image_pair_checks (
+  a_key      TEXT NOT NULL,
+  b_key      TEXT NOT NULL,
+  verdict    TEXT NOT NULL,           -- same | different | unsure
+  confidence REAL,
+  summary    TEXT,
+  checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (a_key, b_key)
+);
+
 -- Shopify orders get the same short code Etsy orders carry (26-0710-01), drawn
 -- from the same per-day numbering, so one sheet can list both without two
 -- different orders ever sharing a code.

@@ -28,6 +28,7 @@ import * as memory from './packingmemory.js';
 import * as realStock from './stock.js';
 import { variantRows } from './catalog.js';
 import { imageDimensions } from '../lib/picture.js';
+import { overrides as itemImageOverrides } from './itemimages.js';
 import { resolveForTransaction } from './productimages.js';
 import { codesFor, shopifyCodesFor, ensureOrderCode, releaseIfUnused, restampStaleCodes } from './ordercode.js';
 import { cachedProductImageId } from './warehousecheck.js';
@@ -638,7 +639,7 @@ export function engineChain(preferred) {
 }
 
 /** Run one photo job on the first engine that works. Returns the AI answer with `tried` = the engines that failed first. */
-async function runVision(opts, { provider, model, runner = run, fallback = true } = {}) {
+export async function runVision(opts, { provider, model, runner = run, fallback = true } = {}) {
   const chain = engineChain(provider);
   const tried = [];
   let last = null;
@@ -1603,6 +1604,7 @@ export function packingQueue(params = {}) {
   }
 
   const onHold = holds.allHolds();
+  const custom = itemImageOverrides();
   const orders = new Map();
   for (const d of demand) {
     const key = `${d.channel}:${d.orderId}`;
@@ -1614,7 +1616,8 @@ export function packingQueue(params = {}) {
     }
     orders.get(key).items.push({
       itemId: d.itemId, sku: d.sku, title: d.title, variant: d.variant, quantity: d.quantity, received: d.received,
-      imageUrl: d.imageUrl, parcels: byItem.get(`${d.channel}:${d.itemId}`) ?? [],
+      imageUrl: custom.has(`${d.channel}:${d.itemId}`) ? photoUrl(custom.get(`${d.channel}:${d.itemId}`).attachment_id) : d.imageUrl,
+      imageCustom: custom.has(`${d.channel}:${d.itemId}`), parcels: byItem.get(`${d.channel}:${d.itemId}`) ?? [],
     });
   }
 
