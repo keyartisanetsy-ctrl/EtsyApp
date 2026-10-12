@@ -16,6 +16,7 @@ import { listAllDestinations } from './airtable.js';
 import { packingQueue } from './packing.js';
 import { recordTracking } from './orderdispatch.js';
 import { inOrderShop } from '../lib/ordershop.js';
+import { readSetting } from './settings.js';
 
 const log = createLogger('airtable-shipped');
 
@@ -54,6 +55,68 @@ async function doneColumns(dest) {
     const table = await at.getTable(dest.baseId, dest.tableId);
     return table.fields.filter((f) => f.type === 'checkbox' && DONE_NAMES.map(norm).includes(norm(f.name))).map((f) => f.name);
   } catch { return []; }
+}
+
+
+// ------------------------------------------------------------------ the "not sent" view
+
+const viewsSetting = (key) => { try { return JSON.parse(readSetting(key) || '{}') || {}; } catch { return {}; } };
+
+/** Record ids of one Airtable view (null when it could not be read in full, or is empty - then nothing is concluded from it). */
+async function viewRecordIds(dest, viewId) {
+  const table = await at.getTable(dest.baseId, dest.tableId);
+  const primary = table.fields.find((f) => f.id === table.primaryFieldId)?.name;
+  const recs = await at.listRecords(dest.baseId, dest.tableId, { view: viewId, fields: primary ? [primary] : undefined, max: 20000 });
+  if (!recs.length) return null;
+  return new Set(recs.map((r) => r.id));
+}
+
+/**
+ * An order is "not sent" when one of its Airtable rows is in the not-sent view. When the order has rows and none of them is
+ * in that view (and they still exist), it was sent: marked here so the queue leaves it out. An order that comes back into
+ * the view is put back. Returns the orders newly marked.
+ */
+async function syncFromViews(orders, found) {
+  const db = getDb();
+  const views = viewsSetting('airtable.unshipped_views');
+  const recent = viewsSetting('airtable.recent_views');
+  const marked = db.prepare("SELECT channel, order_id FROM order_sent_marks WHERE source = 'airtable view'").all();
+  for (const dest of listAllDestinations()) {
+    const viewId = views[`${dest.baseId}/${dest.tableId}`];
+    if (!viewId) continue;
+    let inView;
+    try { inView = await viewRecordIds(dest, viewId); } catch (err) { log.warn(`could not read the not-sent view of ${dest.label}: ${err.message}`); continue; }
+    if (!inView) continue;
+    // every order of the last month: only rows that are in it can be called sent (an old or removed row says nothing)
+    let inRecent = null;
+    if (recent[`${dest.baseId}/${dest.tableId}`]) {
+      try { inRecent = await viewRecordIds(dest, recent[`${dest.baseId}/${dest.tableId}`]); } catch (err) { log.warn(`could not read the last-month view of ${dest.label}: ${err.message}`); continue; }
+      if (!inRecent) continue;
+    }
+
+    const rowsOf = (channel, orderId) => db.prepare('SELECT record_id FROM airtable_links WHERE destination_id = ? AND CAST(receipt_id AS TEXT) = ?')
+      .all(dest.id, String(orderId)).map((r) => r.record_id.replace(/[^A-Za-z0-9]/g, ''));
+
+    // back into the view: no longer sent
+    for (const m of marked.filter((x) => x.channel === dest.channel)) {
+      if (rowsOf(m.channel, m.order_id).some((id) => inView.has(id))) db.prepare('DELETE FROM order_sent_marks WHERE channel = ? AND order_id = ?').run(m.channel, m.order_id);
+    }
+
+    const mine = orders.filter((o) => o.channel === dest.channel && (dest.shopId == null || String(dest.shopId) === String(o.shopId)));
+    const candidates = mine.map((o) => ({ o, ids: rowsOf(o.channel, o.orderId) })).filter((c) => c.ids.length && !c.ids.some((id) => inView.has(id)));
+    if (!candidates.length) continue;
+    let alive = null;
+    if (!inRecent) try {
+      const table = await at.getTable(dest.baseId, dest.tableId);
+      alive = await at.existingRecordIds(dest.baseId, dest.tableId, candidates.flatMap((c) => c.ids), { primaryField: table.primaryFieldId });
+    } catch (err) { log.warn(`could not check the rows of ${dest.label}: ${err.message}`); continue; }
+    for (const c of candidates) {
+      // every row still exists and none is in the not-sent view: sent
+      if (!c.ids.every((id) => (inRecent ? inRecent.has(id) : alive.has(id)))) continue;
+      const key = `${c.o.channel}:${c.o.orderId}`;
+      if (!found.has(key)) found.set(key, { channel: c.o.channel, orderId: c.o.orderId, ref: c.o.ref, buyer: c.o.buyer, tracking: '', destination: dest.label, viaView: true });
+    }
+  }
 }
 
 /**
@@ -108,10 +171,14 @@ export async function syncShippedFromAirtable({ channels, from, to } = {}) {
     } catch (err) { log.warn(`could not read the tracking cells of ${dest.label}: ${err.message}`); }
   }
 
+  await syncFromViews(orders, found);
+
   const done = [];
   for (const f of found.values()) {
     try {
-      if (f.tracking) {
+      if (f.viaView && !f.tracking) {
+        db.prepare("INSERT OR REPLACE INTO order_sent_marks (channel, order_id, source) VALUES (?,?,'airtable view')").run(f.channel, String(f.orderId));
+      } else if (f.tracking) {
         // eslint-disable-next-line no-await-in-loop
         await inOrderShop(f.channel, f.orderId, () => recordTracking(f.channel, f.orderId, f.tracking));
       } else {

@@ -126,6 +126,13 @@ export const SETTING_DEFS = {
   'orders.shipping_cost_currency': { env: '', def: 'CNY', label: 'Currency you normally pay shipping in' },
 
   'airtable.token':        { env: process.env.AIRTABLE_TOKEN || '', def: '', secret: true, label: 'Airtable personal access token' },
+  // The Airtable view that lists the orders NOT sent yet, per table ("baseId/tableId": "viewId"). An order whose rows are all
+  // missing from that view has been sent; the packing queue leaves it out.
+  'airtable.unshipped_views': { env: '', label: 'Airtable views of the orders not sent yet (JSON: "baseId/tableId": "viewId")',
+    def: JSON.stringify({ 'appm6y75xX1mkgNqO/tblzTsM0lB0HGxkCb': 'viwNnM3fn2xfrHfZy', 'app5HXCtT3Uxms2Z5/tblsXHMGsSOpF0vAA': 'viwyHXM9ktU1phLUG' }) },
+  // The Airtable view of ALL orders of the last month: an order is only called "sent" when its rows are in this view but not in the not-sent one.
+  'airtable.recent_views': { env: '', label: 'Airtable views of every order of the last month (JSON: "baseId/tableId": "viewId")',
+    def: JSON.stringify({ 'appm6y75xX1mkgNqO/tblzTsM0lB0HGxkCb': 'viw1r1iWydthjLsJw', 'app5HXCtT3Uxms2Z5/tblsXHMGsSOpF0vAA': 'viwwO7etRHwWrKIBv' }) },
   'airtable.auto_push':    { env: '', def: 'false', label: 'Send new orders to Airtable automatically after each sync',
     options: [ { value: 'false', label: 'No - I press the button myself' }, { value: 'true', label: 'Yes - push new orders automatically' } ] },
 
