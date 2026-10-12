@@ -1605,9 +1605,11 @@ export function packingQueue(params = {}) {
 
   const onHold = holds.allHolds();
   const custom = itemImageOverrides();
+  const sentMarks = new Set(db.prepare('SELECT channel, order_id FROM order_sent_marks').all().map((m) => `${m.channel}:${m.order_id}`));
   const orders = new Map();
   for (const d of demand) {
     const key = `${d.channel}:${d.orderId}`;
+    if (sentMarks.has(key)) continue;
     if (!orders.has(key)) {
       orders.set(key, {
         channel: d.channel, shopId: d.shopId, shopName: d.shopName, orderId: d.orderId, ref: d.orderRef, orderedAt: d.orderedAt, buyer: d.buyer, items: [],

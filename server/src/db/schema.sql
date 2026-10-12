@@ -1161,6 +1161,16 @@ CREATE TABLE IF NOT EXISTS image_pair_checks (
   PRIMARY KEY (a_key, b_key)
 );
 
+-- Orders Airtable says are finished/sent without giving a tracking number we could keep (a ticked "done" box): they
+-- stay off the packing queue. Nothing is sent to the shops for them.
+CREATE TABLE IF NOT EXISTS order_sent_marks (
+  channel  TEXT NOT NULL,
+  order_id TEXT NOT NULL,
+  source   TEXT,
+  at       TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (channel, order_id)
+);
+
 -- Shopify orders get the same short code Etsy orders carry (26-0710-01), drawn
 -- from the same per-day numbering, so one sheet can list both without two
 -- different orders ever sharing a code.
