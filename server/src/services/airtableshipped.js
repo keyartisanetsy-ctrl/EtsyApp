@@ -82,7 +82,8 @@ async function readTable(t) {
   if (!keyField) return null;
   const tracking = [...new Set([...t.dests.flatMap((d) => (d.fieldMap ?? []).filter((e) => e.source === 'tracking.code').map((e) => e.target)), ...named(TRACKING_NAMES, TEXT_TYPES)])];
   const done = meta.fields.filter((f) => f.type === 'checkbox' && DONE_NAMES.includes(norm(f.name))).map((f) => f.name);
-  const fields = [keyField, ...tracking, ...done];
+  const statusField = meta.fields.find((f) => f.type === 'multipleSelects' && norm(f.name) === 'siparis durum')?.name || null;
+  const fields = [keyField, ...tracking, ...done, ...(statusField ? [statusField] : [])];
 
   const notSent = await at.listRecords(t.baseId, t.tableId, { view: notSentView, fields, max: 20000 });
   if (!notSent.length) return null;                       // an empty view concludes nothing
@@ -100,9 +101,31 @@ async function readTable(t) {
       id: r.id, notSent: notSentIds.has(r.id), recent: !recentView || recentIds.has(r.id),
       tracking: tracking.map((c) => trackingFromCell(r.fields?.[c])).find(Boolean) || '',
       done: done.some((c) => r.fields?.[c] === true),
+      status: statusField ? (r.fields?.[statusField] ?? []).map((x) => x?.name ?? x) : [],
     });
   }
-  return { index, keyField, tracking, done, notSentCount: notSent.length, recentCount: recent.length };
+  return { index, keyField, tracking, done, statusField, notSentCount: notSent.length, recentCount: recent.length };
+}
+
+
+/**
+ * The status list of a finished order's row with its "in progress" statuses turned into their OK twins
+ * (ORDER CN -> ORDER CN OK on Shopify's table, ORDER CN - OK on Etsy's). null when there is nothing to change.
+ */
+export function finishedStatus(statuses, channel, state) {
+  const etsy = channel === 'etsy';
+  const twin = { 'order cn': etsy ? 'ORDER CN - OK' : 'ORDER CN OK', 'in warehouse': etsy ? 'IN WAREHOUSE - OK -' : 'IN WAREHOUSE OK', 'out of stock': etsy ? 'ORDER CN - OK' : 'ORDER CN OK' };
+  const list = statuses ?? [];
+  if (list.some((x) => /ok\s*-?$/i.test(String(x).trim()))) return null;                 // already finished
+  if (list.some((x) => /cancel|iptal|refund/i.test(norm(x)))) return null;                 // already closed another way
+  let next = [];
+  if (state === 'canceled' || state === 'refunded') next = [...new Set([...list.filter((x) => !twin[String(x).trim().toLowerCase()]), etsy ? 'İPTAL + REFUND' : 'CANCELLED'])];
+  else {
+    const mapped = list.map((x) => twin[String(x).trim().toLowerCase()] ?? x);
+    next = [...new Set(mapped)];
+    if (!next.some((x) => /ok\s*-?$/i.test(x))) next.push(etsy ? 'ORDER CN - OK' : 'ORDER CN OK');
+  }
+  return next.join('|') === list.join('|') ? null : next;
 }
 
 const queueKey = (o) => (o.channel === 'etsy' ? orderKey(o.orderId) : orderKey(o.orderName || o.ref));
@@ -268,22 +291,25 @@ export async function syncShippedFromAirtable({ channels, from, to } = {}) {
       }
     }
 
-    // The shop already finished these orders (canceled, refunded, fulfilled on the shop) but Airtable still lists them as not
-    // sent: tick the table's "done" box on the row (it is what takes a row out of the not-sent view) so both sides agree.
-    const doneCol = side.done[0];
-    if (doneCol) {
-      const ticks = [];
+    // The shop already finished these orders (canceled, refunded, fulfilled, or the app holds their tracking) but Airtable still
+    // lists them as not sent. That view is driven by the row's "SİPARİŞ DURUM": a status that ends in OK ("ORDER CN OK") is out of
+    // it. So the status of such a row is moved to its OK twin - the same step the team takes by hand - and nothing else is touched.
+    if (side.statusField) {
+      const moves = [];
       for (const [key, v] of side.index) {
-        const row = v.rows.find((r) => r.notSent && !r.done);
-        if (!row) continue;
-        const why = appReason(t.channel, key);
-        if (['canceled', 'refunded', 'shipped_on_shop', 'shipped_on_etsy'].includes(why.state)) ticks.push({ id: row.id, fields: { [doneCol]: true }, key, why: why.text });
+        for (const row of v.rows.filter((r) => r.notSent)) {
+          const why = appReason(t.channel, key);
+          const finished = ['canceled', 'refunded', 'shipped_on_shop', 'shipped_on_etsy', 'tracking_in_app'].includes(why.state);
+          if (!finished) continue;
+          const next = finishedStatus(row.status, t.channel, why.state);
+          if (next) moves.push({ id: row.id, fields: { [side.statusField]: next }, key, from: row.status.join(', '), to: next.join(', '), why: why.text });
+        }
       }
-      if (ticks.length) {
+      if (moves.length) {
         try {
-          await at.updateRecords(t.baseId, t.tableId, ticks.map((u) => ({ id: u.id, fields: u.fields })));
-          for (const u of ticks) settled.push({ table: t.label, key: u.key, why: u.why });
-        } catch (err) { log.warn(`could not tick the done box in ${t.label}: ${err.message}`); }
+          await at.updateRecords(t.baseId, t.tableId, moves.map((u) => ({ id: u.id, fields: u.fields })));
+          for (const u of moves) settled.push({ table: t.label, key: u.key, from: u.from, to: u.to, why: u.why });
+        } catch (err) { log.warn(`could not move the status in ${t.label}: ${err.message}`); }
       }
     }
   }
