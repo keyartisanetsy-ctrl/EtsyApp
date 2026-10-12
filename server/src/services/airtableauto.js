@@ -157,6 +157,18 @@ export async function addMissingNow({ includeOld = false } = {}) {
   const todo = res.missing.filter(cutoff);
   const added = todo.length ? await addOrders(todo) : [];
   audit('airtable.auto', { entity: 'airtable', detail: { addedByHand: added.length } });
+  if (added.length) {
+    // the card shows the last look: those orders are no longer missing
+    const db = getDb();
+    const last = db.prepare('SELECT id, detail, missing, added FROM airtable_auto_runs ORDER BY id DESC LIMIT 1').get();
+    if (last) {
+      const detail = parse(last.detail, {});
+      const ids = new Set(added.map((o) => `${o.channel}:${o.orderId}`));
+      detail.missing = (detail.missing ?? []).map((m) => (ids.has(`${m.channel}:${m.orderId}`) ? { ...m, added: true } : m));
+      db.prepare('UPDATE airtable_auto_runs SET detail = ?, missing = ?, added = ? WHERE id = ?')
+        .run(JSON.stringify(detail), Math.max(0, last.missing - added.length), (last.added ?? 0) + added.length, last.id);
+    }
+  }
   return { added: added.length, orders: added.map((o) => ({ channel: o.channel, ref: o.ref, buyer: o.buyer })), skippedOld: res.missing.length - todo.length };
 }
 
