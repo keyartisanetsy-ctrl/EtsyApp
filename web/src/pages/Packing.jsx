@@ -903,7 +903,13 @@ export default function Packing() {
         toast({ kind: 'ok', title: `${r.found.length} order${r.found.length === 1 ? '' : 's'} already sent - taken off the queue`, duration: 9000,
           body: `${r.found.slice(0, 6).map((f) => `${f.ref} (${f.tracking})`).join(', ')}${r.found.length > 6 ? ' …' : ''} - the tracking number came from Airtable; nothing was sent to the shop.` });
         queue.reload();
-      } else if (!quiet) toast({ kind: 'info', title: 'Nothing new in Airtable', body: `${r.checked ?? 0} Airtable row${r.checked === 1 ? '' : 's'} looked at.` });
+      }
+      const synced = (r.filled?.length ?? 0) + (r.settled?.length ?? 0) + (r.fetched ?? 0);
+      if (synced) {
+        toast({ kind: 'ok', title: 'Airtable brought in step', duration: 9000,
+          body: [r.filled?.length && `${r.filled.length} tracking number${r.filled.length === 1 ? '' : 's'} written into Airtable`, r.settled?.length && `${r.settled.length} finished order${r.settled.length === 1 ? '' : 's'} ticked done`, r.fetched && `${r.fetched} older Shopify order${r.fetched === 1 ? '' : 's'} fetched`].filter(Boolean).join(' · ') });
+        queue.reload();
+      } else if (!r.found?.length && !quiet) toast({ kind: 'info', title: 'Airtable and the queue already agree', body: `${r.unsent ?? 0} order${r.unsent === 1 ? '' : 's'} not sent in Airtable.` });
     } catch { if (!quiet) toast({ kind: 'err', title: 'Could not read Airtable' }); } finally { setSyncingShipped(false); }
   }, [rangeKey]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { syncShipped(); }, [syncShipped]);

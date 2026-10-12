@@ -21,6 +21,8 @@ import { packingQueue } from './packing.js';
 import { recordTracking } from './orderdispatch.js';
 import { inOrderShop } from '../lib/ordershop.js';
 import { readSetting } from './settings.js';
+import { listShopifyAccounts, withShopifyShop } from '../shopify/client.js';
+import { syncOrders as syncShopifyOrders } from '../shopify/sync.js';
 
 const log = createLogger('airtable-shipped');
 
@@ -121,8 +123,8 @@ function appReason(channel, key) {
   const f = db.prepare("SELECT tracking_number FROM shopify_fulfillments WHERE order_id = ?").get(o.order_id);
   if (o.cancelled_at) return { state: 'canceled', text: 'Canceled on Shopify.' };
   if (f?.tracking_number) return { state: 'tracking_in_app', text: `The app has tracking ${f.tracking_number} - Airtable does not.`, tracking: f.tracking_number };
-  if (/FULFILLED|RESTOCKED/i.test(o.fulfillment_status || '')) return { state: 'shipped_on_shop', text: 'Shopify says it is fulfilled.' };
-  if (/VOIDED|REFUNDED/i.test(o.financial_status || '')) return { state: 'refunded', text: 'Refunded / voided on Shopify.' };
+  if (/^(FULFILLED|RESTOCKED)$/i.test(o.fulfillment_status || '')) return { state: 'shipped_on_shop', text: 'Shopify says it is fulfilled.' };
+  if (/^(VOIDED|REFUNDED)$/i.test(o.financial_status || '')) return { state: 'refunded', text: 'Refunded / voided on Shopify.' };
   return { state: 'other', text: 'Not in the packing queue for another reason.' };
 }
 
@@ -157,6 +159,24 @@ export async function compareWithAirtable({ channels, from, to } = {}) {
 }
 
 /**
+ * Shopify orders Airtable lists as not sent that the app has never fetched (older than its order sync reaches): fetched by
+ * their number, from every connected store, so the queue can show them. Shopify is not rate-limited the way Etsy is.
+ */
+async function fetchMissingShopifyOrders(names) {
+  if (!names.length) return 0;
+  const query = names.map((n) => `name:#${n}`).join(' OR ');
+  let got = 0;
+  for (const acct of listShopifyAccounts()) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await withShopifyShop(acct.id, () => syncShopifyOrders({ pages: 2, query }));
+      got += r.orders ?? 0;
+    } catch (err) { log.warn(`could not fetch Shopify orders ${names.join(', ')}: ${err.message}`); }
+  }
+  return got;
+}
+
+/**
  * Apply what Airtable says: orders it shows as sent leave the queue; orders it lists as not sent are remembered so the queue
  * shows them whatever their date; a tracking number the app has but Airtable lacks is written into the (empty) cell.
  * Returns { found, checked, unsent, filled }.
@@ -170,12 +190,21 @@ export async function syncShippedFromAirtable({ channels, from, to } = {}) {
   let checked = 0;
   const unsent = [];
   const filled = [];
+  let fetched = 0;
+  const settled = [];
 
   for (const t of tables()) {
     let side;
     try { side = await readTable(t); } catch (err) { log.warn(`could not read ${t.label}: ${err.message}`); continue; }
     if (!side) continue;
     checked += side.recentCount || side.notSentCount;
+
+    // Shopify orders Airtable lists as not sent that the app does not have yet: fetch them by number
+    if (t.channel === 'shopify') {
+      const missing = [...side.index].filter(([, v]) => v.rows.some((r) => r.notSent)).map(([k]) => k)
+        .filter((k) => /^\d+$/.test(k) && !db.prepare('SELECT 1 FROM shopify_orders WHERE name = ?').get(`#${k}`));
+      if (missing.length) fetched += await fetchMissingShopifyOrders(missing);
+    }
 
     // not sent in Airtable -> remembered (shown by the queue whatever the date); back in the view -> no longer sent
     const mark = db.prepare("DELETE FROM order_sent_marks WHERE channel = ? AND order_id = ? AND source = 'airtable view'");
@@ -219,6 +248,25 @@ export async function syncShippedFromAirtable({ channels, from, to } = {}) {
         } catch (err) { log.warn(`could not write tracking into ${t.label}: ${err.message}`); }
       }
     }
+
+    // The shop already finished these orders (canceled, refunded, fulfilled on the shop) but Airtable still lists them as not
+    // sent: tick the table's "done" box on the row (it is what takes a row out of the not-sent view) so both sides agree.
+    const doneCol = side.done[0];
+    if (doneCol) {
+      const ticks = [];
+      for (const [key, v] of side.index) {
+        const row = v.rows.find((r) => r.notSent && !r.done);
+        if (!row) continue;
+        const why = appReason(t.channel, key);
+        if (['canceled', 'refunded', 'shipped_on_shop', 'shipped_on_etsy'].includes(why.state)) ticks.push({ id: row.id, fields: { [doneCol]: true }, key, why: why.text });
+      }
+      if (ticks.length) {
+        try {
+          await at.updateRecords(t.baseId, t.tableId, ticks.map((u) => ({ id: u.id, fields: u.fields })));
+          for (const u of ticks) settled.push({ table: t.label, key: u.key, why: u.why });
+        } catch (err) { log.warn(`could not tick the done box in ${t.label}: ${err.message}`); }
+      }
+    }
   }
 
   const done = [];
@@ -234,5 +282,5 @@ export async function syncShippedFromAirtable({ channels, from, to } = {}) {
       done.push(f);
     } catch (err) { log.warn(`could not keep the tracking number of ${f.ref}: ${err.message}`); }
   }
-  return { found: done, checked, unsent: unsent.length, filled };
+  return { found: done, checked, unsent: unsent.length, filled, fetched, settled };
 }

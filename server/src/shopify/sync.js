@@ -97,8 +97,8 @@ export async function syncProducts() {
 
 const ADDR_FIELDS = 'name address1 address2 city provinceCode zip countryCodeV2 phone';
 const ORDERS_QUERY = `
-query Orders($cursor: String) {
-  orders(first: 40, after: $cursor, sortKey: CREATED_AT, reverse: true) {
+query Orders($cursor: String, $query: String) {
+  orders(first: 40, after: $cursor, query: $query, sortKey: CREATED_AT, reverse: true) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id name email phone note tags createdAt cancelledAt
@@ -141,7 +141,7 @@ query Orders($cursor: String) {
 }`;
 
 /** Pull recent orders + their line items for the active store. */
-export async function syncOrders({ pages = 5 } = {}) {
+export async function syncOrders({ pages = 5, query = null } = {}) {
   const shopId = requireShopifyShopId();
   const db = getDb();
   const upsertOrder = db.prepare(`
@@ -182,7 +182,7 @@ export async function syncOrders({ pages = 5 } = {}) {
   let orders = 0;
   let page = 0;
   for (;;) {
-    const data = await gql(ORDERS_QUERY, { cursor });
+    const data = await gql(ORDERS_QUERY, { cursor, query });
     for (const o of data.orders.nodes) {
       const addr = o.shippingAddress ?? {};
       const firstVisit = o.customerJourneySummary?.firstVisit ?? null;
