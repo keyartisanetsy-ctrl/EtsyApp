@@ -23,6 +23,7 @@ import { inOrderShop } from '../lib/ordershop.js';
 import { readSetting } from './settings.js';
 import { listShopifyAccounts, withShopifyShop } from '../shopify/client.js';
 import { syncOrders as syncShopifyOrders } from '../shopify/sync.js';
+import { gql } from '../shopify/client.js';
 
 const log = createLogger('airtable-shipped');
 
@@ -158,6 +159,17 @@ export async function compareWithAirtable({ channels, from, to } = {}) {
   return report;
 }
 
+/** The tracking number Shopify holds for a fulfilled order (the first fulfillment that has one), or ''. */
+async function shopifyTrackingOf(orderId) {
+  try {
+    const data = await inOrderShop('shopify', orderId, () => gql(`query T($id: ID!) { order(id: $id) { fulfillments { trackingInfo { number company } } } }`, { id: orderId }));
+    for (const f of data?.order?.fulfillments ?? []) {
+      for (const t of f.trackingInfo ?? []) { const n = trackingFromCell(t.number); if (n) return n; }
+    }
+  } catch (err) { log.warn(`could not read Shopify's tracking of ${orderId}: ${err.message}`); }
+  return '';
+}
+
 /**
  * Shopify orders Airtable lists as not sent that the app has never fetched (older than its order sync reaches): fetched by
  * their number, from every connected store, so the queue can show them. Shopify is not rate-limited the way Etsy is.
@@ -240,6 +252,13 @@ export async function syncShippedFromAirtable({ channels, from, to } = {}) {
         if (!row) continue;
         const why = appReason(t.channel, key);
         if (why.state === 'tracking_in_app') updates.push({ id: row.id, fields: { [trackingCol]: why.tracking }, key, tracking: why.tracking });
+        else if (why.state === 'shipped_on_shop' && t.channel === 'shopify') {
+          // fulfilled on Shopify: its tracking number goes into the Airtable row, which is what takes it off the not-sent view
+          const orderId = db.prepare('SELECT order_id FROM shopify_orders WHERE name = ?').get(`#${key}`)?.order_id;
+          // eslint-disable-next-line no-await-in-loop
+          const number = orderId ? await shopifyTrackingOf(orderId) : '';
+          if (number) updates.push({ id: row.id, fields: { [trackingCol]: number }, key, tracking: number });
+        }
       }
       if (updates.length) {
         try {
