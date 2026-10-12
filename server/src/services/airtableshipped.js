@@ -178,7 +178,7 @@ export async function compareWithAirtable({ channels, from, to } = {}) {
       const v = side.index.get(key);
       if (v?.rows.some((r) => r.notSent)) continue;
       queueOnly.push({ key, ref: o.ref, buyer: o.buyer, orderedAt: o.orderedAt,
-        text: !v ? 'No row for this order in the last-month Airtable view (not pushed to Airtable, or older than a month).' : 'In Airtable but not in the not-sent view (it counts as sent there).' });
+        text: !v ? 'No row for this order in Airtable yet (it has not been pushed there).' : 'In Airtable but not in the not-sent view (it counts as sent there).' });
     }
     report.push({ table: t.label, channel: t.channel, airtableNotSent: side.notSentCount, queue: mine.length, airtableOnly, queueOnly });
   }
