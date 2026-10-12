@@ -1329,3 +1329,42 @@ CREATE TABLE IF NOT EXISTS stock_log (
   note        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_stock_log_sku ON stock_log(sku, id);
+
+-- ------------------------------------------------------- Airtable autopilot
+-- Every look the autopilot took at Airtable (on a schedule or by hand): what it checked, what it would write (preview) or
+-- wrote, and the orders it added. The summary is what the Packing card shows; `detail` holds the per-order lines.
+CREATE TABLE IF NOT EXISTS airtable_auto_runs (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  ran_at        TEXT NOT NULL DEFAULT (datetime('now')),
+  trigger       TEXT NOT NULL DEFAULT 'manual',    -- schedule | manual
+  mode          TEXT NOT NULL DEFAULT 'preview',   -- preview | on
+  deep          INTEGER NOT NULL DEFAULT 0,        -- 1 = every row of the tables was read, 0 = the not-sent view + the open orders
+  ok            INTEGER NOT NULL DEFAULT 1,
+  error         TEXT,
+  checked       INTEGER DEFAULT 0,                 -- Airtable rows read
+  unsent        INTEGER DEFAULT 0,                 -- orders in Airtable's not-sent views
+  planned       INTEGER DEFAULT 0,                 -- cells that need writing (tracking numbers + statuses)
+  wrote         INTEGER DEFAULT 0,                 -- cells actually written
+  added         INTEGER DEFAULT 0,                 -- orders added to Airtable
+  missing       INTEGER DEFAULT 0,                 -- orders the app has that Airtable has no row for
+  capped        INTEGER DEFAULT 0,                 -- 1 = the per-run limit stopped some writes
+  detail        TEXT
+);
+
+-- The cell values before and after each write of a run, so a run can be undone (only when the cell still holds what the
+-- run wrote - something typed in Airtable since is never overwritten).
+CREATE TABLE IF NOT EXISTS airtable_auto_writes (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id    INTEGER NOT NULL,
+  base_id   TEXT NOT NULL,
+  table_id  TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  field     TEXT NOT NULL,
+  channel   TEXT,
+  order_key TEXT,
+  kind      TEXT,                                   -- tracking | status
+  old_value TEXT,                                   -- JSON
+  new_value TEXT,                                   -- JSON
+  undone_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_atauto_writes_run ON airtable_auto_writes(run_id);

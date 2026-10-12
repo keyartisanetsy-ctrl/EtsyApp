@@ -14,6 +14,7 @@ import { syncProducts as syncShopifyProducts, syncOrders as syncShopifyOrders, s
 import { ensureRates } from './services/fx.js';
 import { applyOrders as applyOrdersToStock } from './services/stock.js';
 import { scanInbox } from './services/productstudio.js';
+import { tick as airtableAutopilotTick } from './services/airtableauto.js';
 import { checkForUpdate, applyUpdate } from '../../scripts/self-update.mjs';
 
 const log = createLogger('scheduler');
@@ -65,6 +66,11 @@ export function startScheduler() {
   // every shop at once, from the dashboard or the Etsy requests page) - or switch to repeat there, each with its own
   // interval. This only wakes once a minute to run whatever you set to repeat; with nothing switched on it does nothing.
   timers.push(setInterval(() => { autoTick().catch((err) => log.warn(`Etsy requests: ${err.message}`)); }, 60_000).unref());
+
+  // The Airtable autopilot wakes once a minute and acts only when its own interval (Settings, default 30 minutes) has passed.
+  // It reads Airtable, never Etsy; in Preview mode (the default) it writes nothing at all.
+  setTimeout(() => airtableAutopilotTick().catch((err) => log.warn(`Airtable autopilot: ${err.message}`)), 90_000).unref();
+  timers.push(setInterval(() => { airtableAutopilotTick().catch((err) => log.warn(`Airtable autopilot: ${err.message}`)); }, 60_000).unref());
 
   // Shopify's own version of the two jobs above, for every connected store -
   // Shopify sync had no schedule at all before this, so every store had to be

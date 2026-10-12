@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { asyncRoute } from '../lib/http.js';
 import * as client from '../airtable/client.js';
 import * as service from '../services/airtable.js';
+import * as autopilot from '../services/airtableauto.js';
 import { sourceFieldsFor } from '../airtable/fields.js';
 import { readSetting, writeSetting } from '../services/settings.js';
 import { maskSecret } from '../lib/crypto.js';
@@ -86,6 +87,35 @@ router.post('/destinations/:id/duplicate', asyncRoute(async (req, res) => {
 router.post('/match', asyncRoute(async (req, res) => {
   const { baseId, tableId, mode = 'name', provider, rowMode = 'item', channel = 'etsy' } = req.body ?? {};
   res.json(await service.proposeMapping({ baseId, tableId, mode, provider, rowMode, channel }));
+}));
+
+// --------------------------------------------------------------- autopilot
+
+/** Mode, schedule, the last runs and what the next one would do. */
+router.get('/auto', asyncRoute(async (req, res) => res.json(autopilot.status())));
+
+router.put('/auto', asyncRoute(async (req, res) => {
+  autopilot.setConfig(req.body ?? {});
+  res.json(autopilot.status());
+}));
+
+/** Look now. { write: true } writes this once even while the autopilot is only previewing. */
+router.post('/auto/run', asyncRoute(async (req, res) => {
+  const run = await autopilot.runOnce({ trigger: 'manual', mode: req.body?.write ? 'on' : 'preview' });
+  res.json({ run, status: autopilot.status() });
+}));
+
+router.get('/auto/runs', asyncRoute(async (req, res) => res.json(autopilot.listRuns(Math.min(100, Number(req.query.limit) || 30)))));
+
+router.post('/auto/undo/:id', asyncRoute(async (req, res) => {
+  const result = await autopilot.undoRun(Number(req.params.id));
+  res.json({ ...result, status: autopilot.status() });
+}));
+
+/** Add the orders Airtable has no row for. */
+router.post('/auto/add-missing', asyncRoute(async (req, res) => {
+  const result = await autopilot.addMissingNow({ includeOld: !!req.body?.includeOld });
+  res.json({ ...result, status: autopilot.status() });
 }));
 
 // -------------------------------------------------------------------- push

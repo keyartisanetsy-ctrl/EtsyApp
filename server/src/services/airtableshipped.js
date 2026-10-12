@@ -72,7 +72,7 @@ function tables() {
  * What one Airtable table says about its orders: Map(orderKey -> { rows: [{ id, notSent, tracking, done }] }), or null
  * when its views are not set up or could not be read in full.
  */
-async function readTable(t) {
+async function readTable(t, { light = false, keys = null } = {}) {
   const notSentView = viewsSetting('airtable.unshipped_views')[t.id];
   if (!notSentView) return null;
   const meta = await at.getTable(t.baseId, t.tableId);
@@ -88,9 +88,23 @@ async function readTable(t) {
 
   const notSent = await at.listRecords(t.baseId, t.tableId, { view: notSentView, fields, max: 20000 });
   if (!notSent.length) return null;                       // an empty view concludes nothing
-  // Every row of the table (not only the last month): an order from months ago that was shipped is still not "to ship".
-  const recent = await at.listRecords(t.baseId, t.tableId, { fields, max: 40000 });
-  if (!recent.length) return null;
+  let recent;
+  if (light) {
+    // The not-sent view plus the rows of the orders the app still has open: a handful of requests instead of the whole table,
+    // which is what a look every half hour can afford. An order with no row among them has no row in Airtable at all.
+    const known = new Set(notSent.map((r) => orderKey(r.fields?.[keyField])));
+    const wanted = [...(keys ?? [])].filter((k) => k && !known.has(k));
+    recent = [...notSent];
+    for (let i = 0; i < wanted.length; i += 25) {
+      const formula = `OR(${wanted.slice(i, i + 25).map((k) => `FIND('${String(k).replace(/[^A-Za-z0-9]/g, '')}', {${keyField}}&'')`).join(',')})`;
+      // eslint-disable-next-line no-await-in-loop
+      recent.push(...await at.listRecords(t.baseId, t.tableId, { fields, filterByFormula: formula, max: 2000 }));
+    }
+  } else {
+    // Every row of the table (not only the last month): an order from months ago that was shipped is still not "to ship".
+    recent = await at.listRecords(t.baseId, t.tableId, { fields, max: 40000 });
+    if (!recent.length) return null;
+  }
 
   const notSentIds = new Set(notSent.map((r) => r.id));
   const recentIds = new Set(recent.map((r) => r.id));
@@ -105,6 +119,7 @@ async function readTable(t) {
       done: done.some((c) => r.fields?.[c] === true),
       status: statusField ? (r.fields?.[statusField] ?? []).map((x) => x?.name ?? x) : [],
       cin: cin ? String(r.fields?.[cin] ?? '').trim() !== '' : false,   // the supplier's parcel was shipped (Çin Takip No filled)
+      cells: Object.fromEntries(tracking.map((c) => [c, r.fields?.[c] ?? null])),   // what the tracking cells hold now
     });
   }
   return { index, keyField, tracking, done, statusField, notSentCount: notSent.length, recentCount: recent.length };
@@ -214,12 +229,21 @@ async function fetchMissingShopifyOrders(names) {
   return got;
 }
 
+/** What a cell holds, as text. */
+const cellText = (cell) => (Array.isArray(cell) ? cell.map((c) => c?.name ?? c).join(', ') : String(cell ?? '')).trim();
+/** A tracking cell the autopilot may fill: empty, a dash, or only HOLD codes (which the real number replaces). */
+function fillable(cell) {
+  const text = cellText(cell);
+  if (!text || /^[-–—.\s]*$/.test(text)) return true;
+  return text.split(/[\s,;，；]+/).filter(Boolean).every((p) => /^HOLD/i.test(p));
+}
+
 /**
  * Apply what Airtable says: orders it shows as sent leave the queue; orders it lists as not sent are remembered so the queue
  * shows them whatever their date; a tracking number the app has but Airtable lacks is written into the (empty) cell.
  * Returns { found, checked, unsent, filled }.
  */
-export async function syncShippedFromAirtable({ channels, from, to, write = false } = {}) {
+export async function syncShippedFromAirtable({ channels, from, to, write = false, plan: wantPlan = write, light = false, maxWrites = Infinity, onWrite = null } = {}) {
   const db = getDb();
   // What Airtable says is worked out afresh every time: earlier marks are cleared and found again (or not).
   const before = new Set(db.prepare("SELECT channel, order_id FROM order_sent_marks WHERE source LIKE 'airtable %'").all().map((m) => `${m.channel}:${m.order_id}`));
@@ -233,10 +257,17 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
   const filled = [];
   let fetched = 0;
   const settled = [];
+  // what needs writing (everything, even past the limit or in a preview), what was blocked, who has no row, what failed
+  const plan = { fills: [], moves: [] };
+  const blocked = [];
+  const missing = [];
+  const errors = [];
+  let budget = maxWrites;
+  const wanted = (channel) => new Set(orders.filter((o) => o.channel === channel).map(queueKey).filter(Boolean));
 
   for (const t of tables()) {
     let side;
-    try { side = await readTable(t); } catch (err) { log.warn(`could not read ${t.label}: ${err.message}`); continue; }
+    try { side = await readTable(t, { light, keys: wanted(t.channel) }); } catch (err) { log.warn(`could not read ${t.label}: ${err.message}`); errors.push(`${t.label}: ${err.message}`); continue; }
     if (!side) continue;
     checked += side.recentCount;
 
@@ -258,6 +289,12 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
       unsent.push({ channel: t.channel, orderId: String(id) });
     }
 
+    // Orders the app has open that this table has no row for at all (never pushed there)
+    for (const o of orders.filter((x) => x.channel === t.channel)) {
+      const key = queueKey(o);
+      if (key && !side.index.has(key)) missing.push({ channel: o.channel, orderId: o.orderId, ref: o.ref, buyer: o.buyer, orderedAt: o.orderedAt, destination: t.label });
+    }
+
     // Only an order that is still plainly waiting can leave the queue: one with pieces already received (partly here / ready to
     // pack) stays whatever Airtable says.
     for (const o of orders.filter((x) => x.channel === t.channel && x.status === 'waiting')) {
@@ -277,51 +314,66 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
       else if (!v.rows.some((r) => r.notSent)) found.set(k, { ...base, tracking: '', untouched: true });
     }
 
-    // the app has a tracking number the Airtable row lacks: fill the empty cell (never overwrite)
-    const trackingCol = !write ? null : side.tracking.find((c) => /takip no|manuel shipping|tracking/i.test(c) && !/cin|çin/i.test(c));
-    if (trackingCol) {
-      const updates = [];
+    // The app (or the shop) holds a tracking number the Airtable row lacks: it goes into the tracking cell, but only a cell that is
+    // empty, a dash or a HOLD code - never into one somebody typed something else in.
+    const trackingCol = side.tracking.find((c) => /takip no|manuel shipping|tracking/i.test(c) && !/cin|çin/i.test(c));
+    const fills = [];
+    if (trackingCol && wantPlan) {
       for (const [key, v] of side.index) {
         const row = v.rows.find((r) => r.notSent && !r.tracking);
         if (!row) continue;
         const why = appReason(t.channel, key);
-        if (why.state === 'tracking_in_app') updates.push({ id: row.id, fields: { [trackingCol]: why.tracking }, key, tracking: why.tracking });
+        let number = '';
+        if (why.state === 'tracking_in_app') number = why.tracking;
         else if (why.state === 'shipped_on_shop' && t.channel === 'shopify') {
           // fulfilled on Shopify: its tracking number goes into the Airtable row, which is what takes it off the not-sent view
           const orderId = db.prepare('SELECT order_id FROM shopify_orders WHERE name = ?').get(`#${key}`)?.order_id;
           // eslint-disable-next-line no-await-in-loop
-          const number = orderId ? await shopifyTrackingOf(orderId) : '';
-          if (number) updates.push({ id: row.id, fields: { [trackingCol]: number }, key, tracking: number });
+          number = orderId ? await shopifyTrackingOf(orderId) : '';
         }
-      }
-      if (updates.length) {
-        try {
-          await at.updateRecords(t.baseId, t.tableId, updates.map((u) => ({ id: u.id, fields: u.fields })));
-          for (const u of updates) filled.push({ table: t.label, key: u.key, tracking: u.tracking });
-        } catch (err) { log.warn(`could not write tracking into ${t.label}: ${err.message}`); }
+        if (!number) continue;
+        const cell = row.cells?.[trackingCol];
+        if (!fillable(cell)) { blocked.push({ table: t.label, key, text: `${trackingCol} already says "${cellText(cell)}" - the app has ${number}. Left alone.` }); continue; }
+        fills.push({ table: t.label, channel: t.channel, key, id: row.id, field: trackingCol, old: cell ?? null, tracking: number });
       }
     }
 
     // The shop already finished these orders (canceled, refunded, fulfilled, or the app holds their tracking) but Airtable still
     // lists them as not sent. That view is driven by the row's "SİPARİŞ DURUM": a status that ends in OK ("ORDER CN OK") is out of
     // it. So the status of such a row is moved to its OK twin - the same step the team takes by hand - and nothing else is touched.
-    if (write && side.statusField) {
-      const moves = [];
+    const moves = [];
+    if (side.statusField && wantPlan) {
       for (const [key, v] of side.index) {
         for (const row of v.rows.filter((r) => r.notSent)) {
           const why = appReason(t.channel, key);
           const finished = ['canceled', 'refunded', 'shipped_on_shop', 'shipped_on_etsy', 'tracking_in_app'].includes(why.state);
           if (!finished) continue;
           const next = finishedStatus(row.status, t.channel, why.state);
-          if (next) moves.push({ id: row.id, fields: { [side.statusField]: next }, key, from: row.status.join(', '), to: next.join(', '), why: why.text });
+          if (next) moves.push({ table: t.label, channel: t.channel, key, id: row.id, field: side.statusField, old: row.status, next, from: row.status.join(', '), to: next.join(', '), why: why.text });
         }
       }
-      if (moves.length) {
+    }
+    plan.fills.push(...fills.map(({ id, old, ...rest }) => ({ ...rest, recordId: id, old })));
+    plan.moves.push(...moves.map(({ id, old, next, ...rest }) => ({ ...rest, recordId: id, old, next })));
+
+    if (write) {
+      // the limit counts cells; tracking numbers go first because they are what the packing queue is waiting for
+      const send = async (kind, list, valueOf, onDone) => {
+        const take = list.slice(0, Math.max(0, budget));
+        if (!take.length) return;
         try {
-          await at.updateRecords(t.baseId, t.tableId, moves.map((u) => ({ id: u.id, fields: u.fields })));
-          for (const u of moves) settled.push({ table: t.label, key: u.key, from: u.from, to: u.to, why: u.why });
-        } catch (err) { log.warn(`could not move the status in ${t.label}: ${err.message}`); }
-      }
+          await at.updateRecords(t.baseId, t.tableId, take.map((u) => ({ id: u.id, fields: { [u.field]: valueOf(u) } })));
+          budget -= take.length;
+          for (const u of take) {
+            onDone(u);
+            onWrite?.({ baseId: t.baseId, tableId: t.tableId, recordId: u.id, field: u.field, channel: t.channel, key: u.key, kind, old: u.old, value: valueOf(u) });
+          }
+        } catch (err) { log.warn(`could not write ${kind} into ${t.label}: ${err.message}`); errors.push(`${t.label}: could not write ${kind} - ${err.message}`); }
+      };
+      // eslint-disable-next-line no-await-in-loop
+      await send('tracking', fills, (u) => u.tracking, (u) => { filled.push({ table: t.label, key: u.key, tracking: u.tracking }); });
+      // eslint-disable-next-line no-await-in-loop
+      await send('status', moves, (u) => u.next, (u) => { settled.push({ table: t.label, key: u.key, from: u.from, to: u.to, why: u.why }); });
     }
   }
 
@@ -339,5 +391,10 @@ export async function syncShippedFromAirtable({ channels, from, to, write = fals
     } catch (err) { log.warn(`could not keep the tracking number of ${f.ref}: ${err.message}`); }
   }
   // only what is new is reported (an order that was already off the queue last time is not announced again)
-  return { found: done.filter((f) => !f.untouched && (f.tracking || !before.has(`${f.channel}:${f.orderId}`))), untouched: done.filter((f) => f.untouched).length, checked, unsent: unsent.length, filled, fetched, settled };
+  return {
+    found: done.filter((f) => !f.untouched && (f.tracking || !before.has(`${f.channel}:${f.orderId}`))),
+    untouched: done.filter((f) => f.untouched).length, checked, unsent: unsent.length, filled, fetched, settled,
+    plan, blocked, missing, errors, capped: write && budget <= 0 && plan.fills.length + plan.moves.length > filled.length + settled.length,
+    light,
+  };
 }

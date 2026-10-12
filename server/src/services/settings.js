@@ -133,6 +133,15 @@ export const SETTING_DEFS = {
   // The Airtable view of ALL orders of the last month: an order is only called "sent" when its rows are in this view but not in the not-sent one.
   'airtable.recent_views': { env: '', label: 'Airtable views of every order of the last month (JSON: "baseId/tableId": "viewId")',
     def: JSON.stringify({ 'appm6y75xX1mkgNqO/tblzTsM0lB0HGxkCb': 'viw1r1iWydthjLsJw', 'app5HXCtT3Uxms2Z5/tblsXHMGsSOpF0vAA': 'viwwO7etRHwWrKIBv' }) },
+  // The Airtable autopilot: looks at the not-sent views on a schedule and keeps Airtable in step with the shops.
+  'airtable.auto_mode':    { env: '', def: 'preview', label: 'Airtable autopilot',
+    options: [ { value: 'off', label: 'Off - only when I press the button' },
+      { value: 'preview', label: 'Preview - look and report what it would write, write nothing' },
+      { value: 'on', label: 'On - write tracking numbers and statuses into Airtable by itself' } ] },
+  'airtable.auto_minutes': { env: '', def: '30', label: 'How often the Airtable autopilot looks (minutes, 10 or more)' },
+  'airtable.auto_cap':     { env: '', def: '40', label: 'Most Airtable cells the autopilot may write in one run (the rest waits for the next run)' },
+  'airtable.auto_add_missing': { env: '', def: 'false', label: 'Autopilot also adds orders Airtable has no row for',
+    options: [ { value: 'false', label: 'No - I add them with the button' }, { value: 'true', label: 'Yes - add them by itself (when the autopilot is On)' } ] },
   'airtable.auto_push':    { env: '', def: 'false', label: 'Send new orders to Airtable automatically after each sync',
     options: [ { value: 'false', label: 'No - I press the button myself' }, { value: 'true', label: 'Yes - push new orders automatically' } ] },
 
