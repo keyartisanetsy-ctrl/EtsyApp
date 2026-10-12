@@ -9,6 +9,7 @@ import PhotoBrain from '../components/PhotoBrain.jsx';
 import { AssignPicker, StockDialog, SkuPicker } from '../components/PieceAllocator.jsx';
 import ItemSupplyBox from '../components/ItemSupply.jsx';
 import UnshippedShops from '../components/UnshippedShops.jsx';
+import AirtableAutopilot from '../components/AirtableAutopilot.jsx';
 import { normalizePhoto, splitPhoto } from '../lib/photo.js';
 
 const FILTER_KEY = 'packing.filters';
@@ -1402,6 +1403,7 @@ export default function Packing() {
 
       {tab === 'queue' && (
         <>
+          <AirtableAutopilot onChanged={() => queue.reload()} />
           <div className="flex gap8 mb12" style={{ flexWrap: 'wrap' }}>
             {['ready', 'partial', 'waiting', 'packed', 'all'].map((s) => (
               <button key={s} className={`btn xs ${queueFilter === s ? 'primary' : 'ghost'}`} onClick={() => setQueueFilter(s)}>

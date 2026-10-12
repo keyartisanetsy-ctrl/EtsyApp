@@ -326,7 +326,7 @@ router.delete('/items/image', asyncRoute(async (req, res) => {
  */
 router.post('/sync-shipped', asyncRoute(async (req, res) => {
   const b = req.body ?? {};
-  try { res.json(await airtableShipped.syncShippedFromAirtable({ channels: channelsOf(b.channels), from: b.from, to: b.to, write: bool(b.write) })); }
+  try { res.json(await airtableShipped.syncShippedFromAirtable({ channels: channelsOf(b.channels), from: b.from, to: b.to, write: bool(b.write), light: !bool(b.deep) })); }
   catch { res.json({ found: [], checked: 0 }); }
 }));
 /** The queue and Airtable side by side: every order they disagree about, and why. */
